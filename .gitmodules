@@ -1,0 +1,6 @@
+[submodule "resources/colmap"]
+	path = resources/colmap
+	url = https://github.com/colmap/colmap
+[submodule "resources/nerfstudio"]
+	path = resources/nerfstudio
+	url = https://github.com/nerfstudio-project/nerfstudio.git
