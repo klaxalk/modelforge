@@ -63,20 +63,20 @@ Done:
   0.1°, scale 0.999, so `splat_to_enu` is right. A 5–13 cm vertical offset
   remains that shrinks away from the centre: MVS at 640 px sits on the
   vegetation tops.
+- **The whole pipeline from the GUI works on the GPU** (run by the user):
+  ingest of 305–332 s (20 images) → SfM (20/20, error median 0.39 px) →
+  dense at 640 px (stereo 170 s, 43.5k fused points, mesh, texture) → splat
+  2000 iterations (204k Gaussians, 40 s) → View overlay. The GUI tests also
+  pass on `berlin_test` (`MODELFORGE_TEST_PROJECT`).
 - That image was built with a local override (`CUDA_ARCHITECTURES=86`,
   `GSPLAT_ARCH_LIST=8.6`, `JOBS=8`). The committed full arch list has not
   been built.
 
-Still untested on the GPU:
+Still open on the GPU:
 - **PatchMatch is slow**: ~4.5 s per view even at 640×360. 20 → 6 source
   images saves only 31%, and COLMAP is a Release build, so most of the cost is
   fixed per view and its cause is unknown. Investigate before a full-clip,
   full-resolution dense run (300 views would take hours).
-- The GUI on the GPU: the GUI tests pass on `berlin_test`, and the Run tab
-  detects CUDA + nerfstudio. A Run-tab check (`build/gui_gpu_check.py`,
-  gitignored: dense at 640, splat Stop, splat run) was stopped during stereo,
-  so a complete dense run, splat and Stop from the GUI and the View overlay
-  are unchecked. `data/berlin_test/dense/` is incomplete since then.
 - The full test suite, and the GUI tests that need `berlin_3_1_frames` (not
   copied to this machine; rebuild it with extract + SfM).
 
@@ -86,8 +86,8 @@ Tested only partially:
   flights.**
 
 Open items, in priority order:
-1. Find out why PatchMatch stereo is slow (see above), then run the full
-   clip's dense stage and check the GUI on the GPU.
+1. Find out why PatchMatch stereo is slow (see above: ~4.2 s per view per
+   pass at 640 px), then run the full clip's dense stage.
 2. Test multi-video ingest on real separate flights of one site.
 3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
    weakly constrained. Trim it with the source range.
