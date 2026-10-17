@@ -148,9 +148,9 @@ and GUI both call them, and progress events feed the GUI.
     problem and solved.
   - Confirm that a Python iteration callback fires.
 - **M1, headless pipeline** on `berlin_3_1`, ingest through `transforms.json`.
-  - Baseline: stock COLMAP (spatial matcher + incremental mapper).
-  - Metrics: reprojection error, registered frames, track length, deviation
-    from priors, estimated B/δt, runtime.
+  - No stock-COLMAP comparison (decided against). The checks are internal:
+    reprojection error, registered frames, track length, deviation from the
+    priors, systematic residuals (B, heading bias, δt), runtime.
   - Sanity check: `ns-train splatfacto`.
 - **M2, GUI.** A read-only artifact viewer first, then live refinement and stage
   control.

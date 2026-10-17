@@ -135,6 +135,39 @@ Results on the sample clip:
   - Time sampling also misses turns (105°), and 7% of its images land while
     hovering.
 
+## Pipeline (M1, headless)
+
+`scripts/dev python -m modelforge.pipeline PROJECT [--stages features,pairs,match,refine,export]`
+works on an ingest output folder. There is deliberately **no stock-COLMAP
+comparison**. Stages and artifacts:
+
+| Stage | Artifact | Notes |
+|---|---|---|
+| `features` | `features.db` | Upright SIFT (gimbal keeps roll ≈ 0), one shared OPENCV camera. Matching works on a copy. |
+| `pairs` | `pairs.txt` | Time neighbours (±5) plus look-at-point overlap (optical axis ∩ takeoff ground plane, axes within 60°). Catches revisits. |
+| `match` | `database.db` | `match_image_pairs` on the pair list. |
+| `refine` | `sparse/round_N[_tri]`, `sparse/refined` | Every frame registered at its prior, then 3 rounds of (triangulate with poses fixed → BA with free poses + `AbsolutePosePriorCost`). Thresholds 40 → 12 → 4 px. No gauge fixing. |
+| `export` | `transforms.json`, `sparse_pc.ply` | nerfstudio, world = ENU, no `applied_transform`. |
+
+Stats for every stage go to `report.json`. Use `point_error_px`
+(median/p90) rather than the mean: right after BA, before filtering, a few
+degenerate points make the mean meaningless.
+
+Results on `berlin_3_1` (300 images, CPU):
+- 300/300 registered, 43k points, track length 4.35, point error median 0.51
+  px / p90 1.23 px.
+- Focal length converges from the default 2304 px to **1085 px** (HFOV ≈ 83°).
+  The 2161.78 djmd value is not fx at 1920 px.
+- Deviation from priors: position median 0.76 m (p90 1.28 m), rotation median
+  1.05° (p90 3.0°).
+- Systematic residuals are small. Mean camera-frame offset 0.74° (heading bias
+  −0.73°). The time offset from position-vs-velocity regression is 9 ms
+  (R² 0.01), which **independently confirms the 0.72 s lead**.
+- Rotation scatter (~1°) doesn't correlate with the EIS correction (r = 0.05)
+  and only weakly with yaw rate (r = 0.11).
+- Largest position deviations (2–5 m) are in the last ~10 s (landing).
+- Runtime: matching 698 s (CPU, 2398 pairs) dominates. Refinement takes 83 s.
+
 ## Reusing COLMAP
 
 The full table is in `docs/architecture.md`. The short version:
