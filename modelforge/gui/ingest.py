@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
+from modelforge import files
 from modelforge.dji import extract as ex
 from modelforge.dji import ingest
 
@@ -111,6 +112,14 @@ class IngestPanel:
                                        hint="Add as source: the whole clip becomes a new source (narrow it with its "
                                             "range). Rescan: look for new videos.")
             row.on_click(lambda e: self.add_source() if e.target.value == "Add as source" else self.rescan())
+            self.g_upload = gui.add_upload_button(
+                "Upload video / SRT", icon=viser.Icon.UPLOAD,
+                mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
+                hint="Upload a DJI video (.MP4 / .MOV) or its .SRT sidecar from this computer into the project's "
+                     "videos/ folder; upload the .SRT too (same name), it carries per-frame metadata. Large clips "
+                     "take a while: progress shows below. An existing file is not overwritten.")
+            self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
+            self.g_upload_md = gui.add_markdown("")
         self.g_sources = gui.add_folder("Sources")
         with self.g_sources:
             self.g_sources_md = gui.add_markdown("")
@@ -172,13 +181,32 @@ class IngestPanel:
         self._rebuild_sources()
 
     def rescan(self):
-        roots = [os.path.dirname(os.path.abspath(self.path)), os.path.join(os.getcwd(), "data")]
+        # uploads land in PROJECT/videos/; find_videos skips project folders, so list it explicitly
+        roots = [os.path.join(self.path, files.VIDEO_DIR), os.path.dirname(os.path.abspath(self.path)),
+                 os.path.join(os.getcwd(), "data")]
         found = []
         for r in dict.fromkeys(roots):
             if os.path.isdir(r):
                 found += [os.path.relpath(v) for v in ingest.find_videos(r)]
         found = list(dict.fromkeys(found))
         self.g_video.options = tuple(found) or ("(none found)",)
+
+    def _on_upload(self, up):
+        def work():
+            try:
+                path = files.save_video_upload(self.path, up.name, up.content)
+                rel = os.path.relpath(path)
+                self.rescan()
+                if rel in self.g_video.options:
+                    self.g_video.value = rel
+                hint = "" if rel.lower().endswith(".srt") else (
+                    "; then **Add as source**" + ("" if ingest.find_srt(path) else
+                                                  " (no .SRT next to it yet: upload it too)"))
+                self.g_upload_md.content = f"✅ uploaded `{rel}` ({len(up.content) / 1e6:.0f} MB){hint}"
+                self.app.files.refresh()
+            except (OSError, ValueError) as e:
+                self.g_upload_md.content = f"❌ upload failed: `{e}`"
+        threading.Thread(target=work, daemon=True).start()
 
     def add_source(self):
         v = self.g_video_path.value.strip() or self.g_video.value
