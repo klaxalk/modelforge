@@ -16,7 +16,6 @@ import pyceres
 import pycolmap
 import pycolmap.cost_functions
 
-from modelforge.sfm.priors import PriorSigmas
 
 
 @dataclass
@@ -81,12 +80,17 @@ class _Progress(pyceres.IterationCallback):
         return pyceres.CallbackReturnType.SOLVER_CONTINUE
 
 
-def prior_ba(rec, priors, sigmas=PriorSigmas(), loss_scale_px=1.0, prior_loss_scale=3.0,
-             refine_intrinsics=True, max_iterations=500, on_iteration=None):
-    """BA over all registered images with reprojection + absolute 6-DoF prior terms.
+def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
+             refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True):
+    """BA over all registered images with reprojection + 6-DoF prior terms.
 
-    No gauge fixing: the priors pin position, rotation and metric scale in ENU.
+    Absolute priors on every image (except model.abs_rejected), and, if
+    model.use_relative, relative priors between time-consecutive images (except
+    model.rel_rejected). No gauge fixing: the priors pin position, rotation and
+    metric scale in ENU.
     """
+    from modelforge.sfm import robust
+    model = model or robust.PriorModel(use_relative=False)
     ba_options = pycolmap.BundleAdjustmentOptions()
     ba_options.refine_focal_length = refine_intrinsics
     ba_options.refine_extra_params = refine_intrinsics
@@ -101,16 +105,32 @@ def prior_ba(rec, priors, sigmas=PriorSigmas(), loss_scale_px=1.0, prior_loss_sc
     ba = pycolmap.create_default_ceres_bundle_adjuster(ba_options, ba_config, rec)
     problem = ba.problem
     prior_loss = pyceres.CauchyLoss(prior_loss_scale)  # on whitened residuals (sigma units)
-    n_priors = 0
+    poses = {}
     for image_id in rec.reg_image_ids():
         img = rec.image(image_id)
         pose = rec.frame(img.frame_id).rig_from_world
-        if not problem.has_parameter_block(pose.params):
-            continue  # image without observations; leave it at its prior
-        prior = priors[img.name]
-        cost = pycolmap.cost_functions.AbsolutePosePriorCost(prior.covariance(sigmas), prior.rigid())
+        if problem.has_parameter_block(pose.params):  # else: no observations, stays at its prior
+            poses[img.name] = pose
+    n_abs = n_rel = 0
+    for name, pose in poses.items():
+        if name in model.abs_rejected:
+            continue
+        prior = priors[name]
+        cost = pycolmap.cost_functions.AbsolutePosePriorCost(prior.covariance(model.abs_sigmas), prior.rigid())
         problem.add_residual_block(cost, prior_loss, [pose.params])
-        n_priors += 1
+        n_abs += 1
+    if model.use_relative and relative:
+        names = sorted(poses, key=lambda n: priors[n].frame)
+        for a, b in robust.consecutive_pairs(names):
+            if (a, b) in model.rel_rejected:
+                continue
+            R, t = robust.relative_prior(priors[a], priors[b])
+            i_from_j = pycolmap.Rigid3d()
+            i_from_j.params = np.r_[robust.rot_to_quat_xyzw(R), t]
+            cost = pycolmap.cost_functions.RelativePosePriorCost(
+                robust.relative_covariance(model, priors[a], priors[b]), i_from_j)
+            problem.add_residual_block(cost, prior_loss, [poses[a].params, poses[b].params])
+            n_rel += 1
 
     solver_options = pyceres.SolverOptions(ba_options.ceres.create_solver_options(ba_config, problem))
     progress = _Progress(on_iteration)
@@ -122,7 +142,7 @@ def prior_ba(rec, priors, sigmas=PriorSigmas(), loss_scale_px=1.0, prior_loss_sc
     return {"iterations": len(progress.costs), "initial_cost": summary.initial_cost,
             "final_cost": summary.final_cost, "usable": summary.IsSolutionUsable(),
             "termination": str(summary.termination_type).split(".")[-1],
-            "num_priors": n_priors, "seconds": round(time.time() - t0, 1)}
+            "num_abs_priors": n_abs, "num_rel_priors": n_rel, "seconds": round(time.time() - t0, 1)}
 
 
 def rot_angle_deg(qa, qb):  # (x, y, z, w)

@@ -22,7 +22,7 @@ import time
 import pycolmap
 
 from modelforge.export import nerfstudio
-from modelforge.sfm import features, pairs, priors as priors_mod, refine
+from modelforge.sfm import features, pairs, priors as priors_mod, refine, robust
 
 STAGES = ("features", "pairs", "match", "refine", "export")
 
@@ -82,10 +82,15 @@ def stage_match(project, report):
     report.set("match", stats)
 
 
-def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None):
+def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done";
-    "ba" events carry the live Reconstruction (poses are updated every iteration)."""
+    "ba" events carry the live Reconstruction (poses are updated every iteration).
+
+    model (robust.PriorModel) holds prior sigmas, systematic corrections and rejected
+    priors; it is self-calibrated after every round's BA.
+    """
     emit = progress or (lambda event: None)
+    model = model or robust.PriorModel()
     db_path = os.path.join(project, "database.db")
     image_path = os.path.join(project, "images")
     rec = refine.init_from_database(db_path, pri)
@@ -97,24 +102,32 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", f"round_{i}_tri"), rnd)
         tri = refine.evaluate(rec, pri)
         live = rec
-        ba = refine.prior_ba(rec, pri, loss_scale_px=rnd.loss_scale_px,
+        corrected = robust.corrected_priors(pri, model)
+        ba = refine.prior_ba(rec, corrected, model, loss_scale_px=rnd.loss_scale_px, relative=i >= model.start_round,
                              on_iteration=lambda s, i=i: emit({"phase": "ba", "round": i, "rounds": len(rounds),
                                                                "iteration": s.iteration, "cost": s.cost, "rec": live}))
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
         rec.write(out)
         ev = refine.evaluate(rec, pri)
+        calib = robust.update(model, rec, pri) if i >= model.start_round else {"model": model.summary(), "skipped": True}
         results[f"round_{i}"] = {"thresholds": vars(rnd), "after_triangulation": tri, "ba": ba, "after_ba": ev,
-                                 "seconds": round(time.time() - t0, 1)}
+                                 "prior_model": calib, "seconds": round(time.time() - t0, 1)}
         log(f"round {i} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, median {tri['point_error_px']['median']}px "
             f"-> BA {ba['iterations']} it ({ba['termination']}), median {ev['point_error_px']['median']}px, "
             f"prior dev pos {ev['prior_deviation']['position_m']} rot {ev['prior_deviation']['rotation_deg']}")
+        m = calib["model"]
+        if not calib.get("skipped"):
+            log(f"   prior model: scales {calib.get('scales')} | abs {m['abs_sigmas']} rel {m['rel_sigmas']} | "
+                f"B {m['boresight_norm_deg']} deg, dt {m['dt_ms']} ms | rejected abs {calib['abs_rejected']} "
+                f"rel {calib['rel_rejected']} | d2 median abs {calib['abs_d2_median']} rel {calib['rel_d2_median']}")
         emit({"phase": "round_done", "round": i, "rounds": len(rounds), "rec": rec, "eval": ev})
     # final triangulation at the tightest threshold so the exported cloud matches the refined poses
     rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), rounds[-1])
     rec.extract_colors_for_all_images(image_path)
     rec.write(os.path.join(project, "sparse", "refined"))
     results["final"] = refine.evaluate(rec, pri)
+    results["prior_model"] = model.summary()
     results["seconds"] = round(time.time() - t_start, 1)
     report.set("refine", results)
     log(f"refine final: {results['final']}")
@@ -134,6 +147,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
     ap.add_argument("--stages", default=",".join(STAGES), help=f"comma-separated subset of {STAGES}")
+    ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
+    ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
+    ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
     args = ap.parse_args()
     stages = args.stages.split(",")
     unknown = set(stages) - set(STAGES)
@@ -150,7 +166,9 @@ def main():
     if "match" in stages:
         stage_match(args.project, report)
     if "refine" in stages:
-        rec = stage_refine(args.project, report, pri)
+        model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
+                                  estimate_systematic=not args.no_systematic)
+        rec = stage_refine(args.project, report, pri, model=model)
     if "export" in stages:
         stage_export(args.project, report, rec)
 

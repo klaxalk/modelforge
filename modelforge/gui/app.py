@@ -236,7 +236,24 @@ class App:
         if s.intrinsics:
             p = s.intrinsics["params"]
             lines.append(f"camera {s.intrinsics['model']}: f = {p[0]:.1f}, {p[1]:.1f} px")
+        pm = self._prior_model(s.name)
+        if pm:
+            a, r = pm["abs_sigmas"], pm["rel_sigmas"]
+            lines.append(f"prior σ abs: {a['pos_horizontal_m']:.2f} m h, {a['pos_vertical_m']:.2f} m v, "
+                         f"{a['roll_pitch_deg']:.2f}° r/p, {a['yaw_deg']:.2f}° yaw · rel: {r['rot_deg']:.3f}°, "
+                         f"{r['pos_m']:.3f} m + {r['pos_per_m'] * 100:.2f} % of baseline")
+            lines.append(f"boresight {pm['boresight_norm_deg']:.2f}° · time offset {pm['dt_ms']:.1f} ms · "
+                         f"rejected priors: {len(pm['abs_rejected'])} abs, {pm['rel_rejected']} rel")
         self.g_stats.content = "  \n".join(lines)
+
+    def _prior_model(self, snapshot):
+        """Calibrated prior model after the given snapshot, from report.json (None if unknown)."""
+        refine_rep = self.project.report().get("refine", {})
+        if snapshot == "refined":
+            return refine_rep.get("prior_model")
+        rnd = refine_rep.get(snapshot, {}) if snapshot.startswith("round_") and not snapshot.endswith("_tri") else {}
+        pm = rnd.get("prior_model", {})
+        return None if pm.get("skipped") else pm.get("model")
 
     def _update_plots(self):
         s = self.snap

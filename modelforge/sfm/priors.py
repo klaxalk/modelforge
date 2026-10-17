@@ -40,6 +40,12 @@ class Prior:
     params: np.ndarray  # cam_from_world, [qx qy qz qw tx ty tz]
     center: np.ndarray  # ENU
     R_cw: np.ndarray
+    velocity: np.ndarray = None  # ENU [m/s], aligned like the pose
+
+    @classmethod
+    def from_pose(cls, name, frame, pts, R_cw, center, velocity=None):
+        q = rot_to_quat_xyzw(R_cw)
+        return cls(name, frame, pts, np.r_[q, -R_cw @ center], np.asarray(center, float), R_cw, velocity)
 
     def rigid(self):
         r = pycolmap.Rigid3d()
@@ -56,6 +62,24 @@ class Prior:
     @property
     def optical_axis(self):
         return self.R_cw[2]  # camera z in world = third row of R_cw
+
+
+def rot_to_quat_xyzw(R):
+    t = np.trace(R)
+    if t > 0:
+        s = 2 * np.sqrt(t + 1)
+        q = [(R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s, s / 4]
+    else:
+        i = int(np.argmax(np.diag(R)))
+        j, k = (i + 1) % 3, (i + 2) % 3
+        s = 2 * np.sqrt(1 + R[i, i] - R[j, j] - R[k, k])
+        q = [0.0] * 4
+        q[3] = (R[k, j] - R[j, k]) / s
+        q[i] = s / 4
+        q[j] = (R[j, i] + R[i, j]) / s
+        q[k] = (R[k, i] + R[i, k]) / s
+    q = np.array(q)
+    return q if q[3] >= 0 else -q
 
 
 def quat_wxyz_to_rot(q):
@@ -78,5 +102,6 @@ def load(project):
             params=np.array([qx, qy, qz, qw, *t]),
             center=np.array([r["enu_x"], r["enu_y"], r["enu_z"]]),
             R_cw=R_cw,
+            velocity=np.array([r["vel_e"], r["vel_n"], -r["vel_d"]]),
         )
     return priors, meta

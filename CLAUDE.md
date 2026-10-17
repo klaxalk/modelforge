@@ -168,6 +168,60 @@ Results on `berlin_3_1` (300 images, CPU):
 - Largest position deviations (2–5 m) are in the last ~10 s (landing).
 - Runtime: matching 698 s (CPU, 2398 pairs) dominates. Refinement takes 83 s.
 
+## Robust priors (M3), `modelforge/sfm/robust.py`
+
+A `PriorModel` is self-calibrated after every round, starting from round 1.
+Round 0 still has the default focal length (2× off) and 40 px thresholds, so it
+runs with absolute priors only. Each update does, in order:
+1. **systematic**: boresight B = median camera-frame rotation residual;
+   time offset δt = trimmed least squares of position residual on velocity.
+   Both are estimated against the raw priors over *all* frames, then folded
+   into the priors. This must come first: a big bias otherwise gets every
+   prior flagged as an outlier before it can be estimated.
+2. **calibrate**: rescale each block (abs rot, abs pos, rel rot, rel pos) so
+   the median whitened d² = χ²₃ median. Clamped to ×2 per round, with floors.
+3. **flag**: priors beyond χ²₆ at 99.9% lose their term in the next round.
+
+Relative priors (`RelativePosePriorCost`) link time-consecutive images.
+- COLMAP's cost is rigid in the camera frame: the prior displacement gets
+  rotated by camera j's *absolute* attitude error. So
+  σ_pos = a + b·baseline with b ≈ 0.008 (velocity) + 0.0175 (1° heading).
+- σ_rot = a + c·turn, because 10 Hz attitude interpolation error grows with
+  the rotation between images (~2% of the turn).
+- Residuals are re-implemented in numpy and verified equal to the Ceres
+  functors (`robust.residuals`).
+
+Results on `berlin_3_1` (CLI flags `--no-relative`, `--no-calibration`,
+`--no-systematic` for ablations):
+
+| | points / obs | err median / p90 | prior dev pos median / max |
+|---|---|---|---|
+| M1, fixed σ | 42,487 / 185.3k | 0.505 / 1.214 px | 0.76 / 2.17 m |
+| M3, no relative | 42,498 / 185.3k | 0.505 / 1.215 px | 1.17 / 2.72 m |
+| **M3 full** | **42,987 / 187.6k** | **0.486 / 1.138 px** | **0.77 / 1.78 m** |
+
+- Calibrated absolute σ: 0.63 m horizontal, 0.42 m vertical, 0.33° roll/pitch,
+  0.98° yaw. Relative σ: 0.12° + 0.8% of the turn, 0.017 m + 1.4% of the
+  baseline.
+- B = 0.86° (mostly heading), δt = 11 ms.
+- 3 absolute priors rejected, one of them in the landing phase.
+- 69 of 299 relative priors rejected. The tail is heavy and non-Gaussian, even
+  for small turns.
+
+Known limitations:
+- Calibration is biased low in directions the images constrain weakly
+  (synthetic test: about 0.7× the true σ). Fixing this needs redundancy-aware
+  variance component estimation.
+- Rounds 1–2 converge slowly with relative priors (~500 iterations).
+- Pair gating was **not** implemented, by measurement. Geometries are
+  uncalibrated (F only), and the ~2.5% false pairs are already removed by
+  triangulation filtering.
+
+Tests: `tests/test_m3_robust.py` (synthetic ground truth). Calibration recovers
+injected σ, a 3 m / 10° outlier is rejected and the image-only pose recovered
+to 0.03 units, a 2° boresight comes back within 0.11°, and δt = 300 ms comes
+back as 304 ms.
+
 ## GUI (M2, viser)
 
 `scripts/dev python -m modelforge.gui.app PROJECT [--port 8080]`, then open
@@ -180,7 +234,7 @@ Code layout:
   world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
   scalar-first quaternion of R_wc).
 - `modelforge/gui/app.py`, with four tabs:
-  - **View**: snapshot picker and stats. Layers: points, cameras with
+  - **View**: snapshot picker and stats, including the calibrated prior model. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error, or
     time.
