@@ -74,3 +74,24 @@ def test_splat_maps_back_exactly(tmp_path):
     S.convert(str(src), str(tr), str(dst))
     out = plyfile.PlyData.read(dst)["vertex"].data
     assert np.allclose(out["x"], w["x"]) and np.allclose(out["f_rest_20"], w["f_rest_20"])
+
+
+def test_live_snapshot_matches_export(tmp_path):
+    """A training snapshot (ckpt_dump .npz) lands where the exported, converted PLY does."""
+    from modelforge.gui import data as gdata
+    rng = np.random.default_rng(3)
+    R, t, s = random_rotation(rng), rng.normal(size=3), 0.05
+    v, _ = make_splat(rng, n=300)
+    tr = tmp_path / "t.json"
+    json.dump({"transform": np.c_[R, t].tolist(), "scale": s}, open(tr, "w"))
+    col = lambda *names: np.stack([v[n] for n in names], -1)  # noqa: E731
+    np.savez(tmp_path / "live.npz", step=np.int64(1500), means=col("x", "y", "z"),
+             scales=col("scale_0", "scale_1", "scale_2"), quats=col("rot_0", "rot_1", "rot_2", "rot_3"),
+             opacities=v["opacity"][:, None], features_dc=col("f_dc_0", "f_dc_1", "f_dc_2"))
+    step, n, live = gdata.load_live_splat(str(tmp_path / "live.npz"), str(tr))
+    ref = gdata.splat_arrays(S.transform_vertices(v, R, t, s))
+    assert step == 1500 and n == 300
+    for a, b in zip(live, ref):
+        assert np.allclose(a, b, rtol=1e-4, atol=1e-5)
+    step, n, live = gdata.load_live_splat(str(tmp_path / "live.npz"), str(tr), max_gaussians=100)
+    assert n == 300 and len(live[0]) == 100  # subsampled for the browser

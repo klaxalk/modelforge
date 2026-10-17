@@ -10,7 +10,10 @@ subprocesses:
   export   ns-export gaussian-splat -> PROJECT/splat/splat.ply (nerfstudio's normalized frame)
   convert  modelforge.export.splat_to_enu -> PROJECT/splat/splat_enu.ply (ENU, aligned with
            the refined cameras and the COLMAP mesh)
-Stats go to report.json["splat"]. The GUI Run tab and scripts/splat both call `run`.
+Live preview: with preview_every=N, ns-train saves a checkpoint every N steps; a watcher dumps
+each new one (export/ckpt_dump.py, in nerfstudio's venv) to PROJECT/splat/live.npz and calls
+on_snapshot(step, npz, dataparser_transforms.json). The GUI shows it in the View tab.
+Stats go to report.json["splat"]. The GUI Splat tab and scripts/splat both call `run`.
 
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
@@ -24,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
@@ -92,7 +96,8 @@ def _stream(cmd, on_line, job):
         raise RuntimeError(f"{os.path.basename(cmd[0])} exited with code {rc} (see the log)")
 
 
-def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1):
+def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
+                  steps_per_save=None):
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -103,6 +108,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
            "--pipeline.datamanager.cache-images", cache]
     if iterations:
         cmd += ["--max-num-iterations", str(int(iterations))]
+    if steps_per_save:
+        cmd += ["--steps-per-save", str(int(steps_per_save))]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
     # auto-picking a leftover images_2/ for images wider than 1600 px
     return cmd + list(extra) + ["nerfstudio-data", "--downscale-factor", str(int(downscale))]
@@ -148,8 +155,48 @@ def latest_config(project, method):
     return max(configs, key=os.path.getmtime)
 
 
+def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
+    """Dump every new checkpoint of the run started at t0 and pass it to on_snapshot. Reports what
+    it does through on_line (the GUI log), so a preview that never appears leaves a trace."""
+    dump = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "ckpt_dump.py")
+    out = os.path.join(project, "splat", "live.npz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    seen, run_dir, failures = None, None, 0
+    on_line("splat: live preview waiting for the first checkpoint")
+    while not stop.wait(2.0):
+        runs = [d for d in glob.glob(os.path.join(project, "nerfstudio", "*", method, "*"))
+                if os.path.isdir(d) and os.path.getmtime(d) >= t0 - 2]
+        if not runs:
+            continue
+        if max(runs, key=os.path.getmtime) != run_dir:
+            run_dir = max(runs, key=os.path.getmtime)
+            on_line(f"splat: live preview watching {run_dir}")
+        ckpts = sorted(glob.glob(os.path.join(run_dir, "nerfstudio_models", "step-*.ckpt")))
+        transforms = os.path.join(run_dir, "dataparser_transforms.json")
+        if not ckpts or ckpts[-1] == seen or not os.path.exists(transforms):
+            continue
+        try:
+            r = subprocess.run([os.path.join(NS_BIN, "python"), dump, ckpts[-1], out], env=_env(),
+                               capture_output=True, text=True, timeout=300)
+            rc, err = r.returncode, (r.stderr or "").strip()
+        except subprocess.TimeoutExpired:
+            rc, err = -1, "timed out"
+        if rc:  # usually still being written: retry on the next poll, but say so when it persists
+            failures += 1
+            if failures in (2, 10) or failures % 50 == 0:
+                on_line(f"splat: live preview cannot read {os.path.basename(ckpts[-1])} "
+                        f"(attempt {failures}): {err.splitlines()[-1] if err else rc}")
+            continue
+        seen, failures = ckpts[-1], 0
+        step = int(re.search(r"step-(\d+)", seen).group(1))
+        try:
+            on_snapshot(step, out, transforms)
+        except Exception as e:  # a preview problem must never stop training
+            on_line(f"splat: live preview failed at step {step}: {e}")
+
+
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
-        cache="disk", downscale=1):
+        cache="disk", downscale=1, preview_every=None, on_snapshot=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"])."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
@@ -170,7 +217,15 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     prepare_downscaled(project, int(downscale), on_line)
     on_line(f"splat: training {method}, cache {cache}, downscale {downscale} "
             f"(viewer on http://localhost:{VIEWER_PORT})")
-    _stream(train_command(project, method, iterations, extra, cache, downscale), line, job)
+    stop = threading.Event()
+    if on_snapshot:
+        threading.Thread(target=_watch_checkpoints, args=(project, method, t0, on_snapshot, stop, on_line),
+                         daemon=True).start()
+    try:
+        _stream(train_command(project, method, iterations, extra, cache, downscale,
+                              preview_every if on_snapshot else None), line, job)
+    finally:
+        stop.set()
     t_train = time.time() - t0
     config = latest_config(project, method)
     out_dir = os.path.join(project, "splat")

@@ -190,7 +190,7 @@ modelforge/
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
-│   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab: mesh + splat files)
+│   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab), ckpt_dump (live splat)
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
@@ -458,11 +458,26 @@ Known limitations:
 - Calibration is biased low in directions the images constrain weakly
   (synthetic test: about 0.7× the true σ). Fixing this needs redundancy-aware
   variance component estimation.
-- Rounds 1–2 converge slowly with relative priors (~500 iterations). After
-  100 iterations the median camera has settled to 4.6 cm, but the weakly
-  constrained near-horizontal frames at t ≥ 515 s still move up to 3.6 m /
-  3.8°, so the iteration cap must stay. Cost reaches 0.25% of final by
-  iteration 100.
+- **BA stops when the cameras settle** (`refine.Settle`), not at Ceres'
+  convergence:
+  - The rule: no camera centre moved > 0.5 mm, rotated > 0.001°, and no
+    focal length changed > 0.01 px, measured across the last 10 iterations.
+  - Why: COLMAP's solver options have `function_tolerance = 0` and
+    `parameter_tolerance = 0`, so Ceres only stops on the gradient test
+    (1e-4). The user saw minutes of BA with a flat cost and no visible pose
+    changes.
+  - Measured on berlin_test (80 images): the cameras are within 1 mm of
+    final by iteration 80 / 10 / 9 (rounds 0 / 1 / 2), but Ceres ran 215 /
+    274 / 345 iterations nudging points (−0.05–0.12% cost).
+  - With the rule: 93 / 22 / 20 iterations. Refine 169 s → 42 s. Points,
+    errors, prior deviations and focal are unchanged (focal within
+    0.01 px).
+  - The window displacement keeps a slow creeper going: the full clip's
+    near-horizontal frames at t ≥ 515 s moved up to 3.6 m after iteration
+    100 under the old cap. The 500-iteration cap stays as a backstop.
+    Untested on the full 300-image clip.
+  - `prior_ba(settle=None)` runs to Ceres' convergence. The report's
+    termination says `SETTLED`.
 - Pair gating was **not** implemented, by measurement. Geometries are
   uncalibrated (F only), and the ~2.5% false pairs are already removed by
   triangulation filtering.
@@ -540,6 +555,38 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
   --downscale-factor N`, last on the command line), because nerfstudio
   otherwise auto-picks a leftover `images_2/` for images wider than 1600 px.
   `images_N/` is an intermediate (Clean removes it; re-extraction archives it).
+
+**Live preview** (Splat tab, on by default):
+- The user wanted to watch the splat form in the GUI's 3D view.
+- With **Preview every N steps** (default 1000), `ns-train` gets
+  `--steps-per-save N`.
+- `splat._watch_checkpoints` polls the run folder. On each new checkpoint it
+  runs `export/ckpt_dump.py` in nerfstudio's venv (torch + numpy only),
+  writing `PROJECT/splat/live.npz` (means, log-scales, wxyz quats, opacity
+  logits, SH band 0, step).
+- `gui.data.load_live_splat` maps the snapshot to ENU with
+  `splat_to_enu.transform_vertices` (band 0, so no SH rotation) and
+  subsamples to ≤500k for the browser. The GUI draws it as
+  `/dense/splat_live`, replacing the old splat during training; the
+  finished splat replaces it at the end.
+- A half-written checkpoint fails the dump and is retried on the next poll. A
+  preview error never stops training.
+- The watcher reports to the GUI log and the server console ("waiting for the
+  first checkpoint", "watching <run>", repeated read failures with the error,
+  "live preview at step N").
+  - Why: the first real GUI attempt showed nothing and left no trace: the
+    dump never succeeded and failures were skipped silently. The cause was
+    not found; with the diagnostics it worked on the next try (steps 1000 to
+    9000).
+  - Dumps time out after 5 min.
+- The Splat tab shows a live status line. During training, the View tab's
+  Splat checkbox is enabled and ticked and toggles the live layer (it used
+  to be disabled until a finished splat existed).
+- Measured on berlin_test: snapshots at steps 500/1000/1500 (47k → 146k →
+  225k Gaussians), each redraw ≤0.3 s. A real 1.07M-Gaussian checkpoint
+  dumps and converts in 0.6 s.
+- Each checkpoint is ~0.75 GB per million Gaussians (it includes optimizer
+  state), so very small intervals slow training.
 
 **Export** (`modelforge/export/products.py`, Export tab, or
 `python -m modelforge.export.products PROJECT [--mesh-format glb|obj|ply] [--splat-format ply|splat]`):

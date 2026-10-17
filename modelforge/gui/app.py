@@ -263,6 +263,15 @@ class App:
                 "Downsample factor", initial_value=1, min=1, max=16, step=1,
                 hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
                      "less detail. The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+            self.g_splat_live = gui.add_checkbox(
+                "Live preview", initial_value=True,
+                hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
+                     "at most 500k Gaussians). The finished splat replaces it at the end.")
+            self.g_splat_every = gui.add_number(
+                "Preview every (steps)", initial_value=1000, min=100, step=100,
+                hint="Checkpoint interval while previewing (nerfstudio's default is 2000). Each checkpoint is "
+                     "written to disk (~0.75 GB per million Gaussians), so very small values slow training down.")
+            self.g_splat_status = gui.add_markdown("")
             b = gui.add_button("Train + export splat", icon=viser.Icon.SPARKLES, disabled=why is not None,
                                hint="ns-train on transforms.json + sparse_pc.ply, then ns-export and conversion "
                                     "to splat/splat_enu.ply in the project's ENU frame (aligned with the "
@@ -677,16 +686,57 @@ class App:
         self.g_splat_stop.disabled = False
         iters = int(self.g_splat_iters.value)
 
+        self._live_msg = ""
+
         def progress(step, pct):
             self.g_progress.value = pct
-            self._job["detail"] = f"training step {step:,} / {iters:,} ({pct:.1f} %)"
+            self._job["detail"] = f"training step {step:,} / {iters:,} ({pct:.1f} %)" + (
+                f"  \n{self._live_msg}" if self._live_msg else "")
+
+        def on_line(m):
+            self._on_log(m)
+            if m.startswith("splat:"):  # also on the server console, for diagnosing the preview
+                print(m, flush=True)
         try:
-            splat.run(project, self.g_splat_method.value, iters, on_line=self._on_log, on_progress=progress,
+            live = self.g_splat_live.value
+            if live:  # the live layer stands in for the previous result while training
+                self.server.scene.remove_by_name("/dense/splat")
+                self._splat_live_on = True
+                self.g_splat.disabled, self.g_splat.value = False, True  # View tab toggle drives the live layer
+                self.g_splat_status.content = (f"live preview: first snapshot at step "
+                                               f"{int(self.g_splat_every.value):,}, then in the View tab")
+            splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
                       job=self._splat_job, cache="disk" if self.g_splat_disk.value else "gpu",
-                      downscale=int(self.g_splat_down.value))
+                      downscale=int(self.g_splat_down.value), preview_every=int(self.g_splat_every.value),
+                      on_snapshot=self._on_splat_snapshot if live else None)
+            self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         finally:
             self.g_splat_stop.disabled = True
             self._splat_job = None
+            self._splat_live_on = False
+            self.server.scene.remove_by_name("/dense/splat_live")
+
+    def _on_splat_snapshot(self, step, npz, transforms):
+        """A new training checkpoint: redraw the live splat in the View tab."""
+        step, n, arrays = gdata.load_live_splat(npz, transforms)
+        self._live_splat = arrays
+        self._draw_live_splat()
+        msg = f"live splat: step {step:,}, {n:,} gaussians" + (f" ({len(arrays[0]):,} shown)" if len(arrays[0]) < n
+                                                                 else "")
+        self.g_dense_md.content = msg
+        self.g_splat_status.content = msg + " · View tab → Dense / splat → Splat"
+        self._live_msg = msg + " (View tab)"
+        self._on_log(f"splat: live preview at step {step:,} ({n:,} gaussians)")
+        print(f"splat: live preview at step {step:,} ({n:,} gaussians)", flush=True)
+
+    def _draw_live_splat(self):
+        a = getattr(self, "_live_splat", None)
+        if a is not None and self.g_splat.value:
+            c, cov, rgb, op = a
+            self.server.scene.add_gaussian_splats("/dense/splat_live", centers=c, covariances=cov, rgbs=rgb,
+                                                  opacities=op)
+        else:
+            self.server.scene.remove_by_name("/dense/splat_live")
 
     def _begin_stage(self, st, k, n):
         j = self._job
@@ -869,6 +919,9 @@ class App:
             self.server.scene.remove_by_name("/dense/mesh")
 
     def _draw_splat(self):
+        if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer
+            self._draw_live_splat()
+            return
         if self.g_splat.value and self.dense["splat"]:
             c, cov, rgb, op = gdata.load_splat(self.dense["splat"])
             self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)

@@ -255,7 +255,30 @@ def load_mesh(ply_path):
 def load_splat(ply_path, max_gaussians=1_000_000, seed=0):
     """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays."""
     import plyfile
-    v = plyfile.PlyData.read(ply_path)["vertex"].data
+    return splat_arrays(plyfile.PlyData.read(ply_path)["vertex"].data, max_gaussians, seed)
+
+
+def load_live_splat(npz_path, transforms_path, max_gaussians=500_000, seed=0):
+    """A training snapshot (modelforge.export.ckpt_dump) mapped to ENU, as viser arrays; (step, arrays).
+    Band 0 only: the preview shows base colours, so no SH rotation is needed."""
+    from modelforge.export import splat_to_enu
+    d = np.load(npz_path)
+    n = len(d["means"])
+    names = ["x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+             "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
+    v = np.zeros(n, dtype=[(k, "f4") for k in names])
+    cols = np.c_[d["means"], d["scales"], d["quats"], d["features_dc"].reshape(n, -1)[:, :3],
+                 d["opacities"].reshape(n)]
+    for i, k in enumerate(names):
+        v[k] = cols[:, i]
+    if n > max_gaussians:  # subsample before the transform: cheaper, same result
+        v = v[np.sort(np.random.default_rng(seed).choice(n, max_gaussians, replace=False))]
+    R, t, s = splat_to_enu.load_transform(transforms_path)
+    return int(d["step"]), n, splat_arrays(splat_to_enu.transform_vertices(v, R, t, s), max_gaussians, seed)
+
+
+def splat_arrays(v, max_gaussians=1_000_000, seed=0):
+    """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities."""
     idx = np.arange(len(v))
     if len(v) > max_gaussians:
         idx = np.sort(np.random.default_rng(seed).choice(len(v), max_gaussians, replace=False))
