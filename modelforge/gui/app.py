@@ -21,7 +21,7 @@ from modelforge import dense, pipeline, projects, splat
 from modelforge.export import products
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
-from modelforge.gui.files import FilesPanel, upload_progress
+from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 
@@ -142,8 +142,8 @@ class App:
         tabs = gui.add_tab_group()
         with tabs.add_tab("Projects", viser.Icon.FOLDERS):
             self.projects = ProjectsPanel(self, gui)
-        with tabs.add_tab("Files", viser.Icon.FILES):
-            self.files = FilesPanel(self, gui)
+        with tabs.add_tab("Videos", viser.Icon.MOVIE):
+            self.videos = VideosPanel(self, gui)
         with tabs.add_tab("Ingest", viser.Icon.VIDEO):
             self.ingest = IngestPanel(self, gui)
 
@@ -348,22 +348,15 @@ class App:
             self.g_inspect_md.content = "Click a camera to inspect it."
         self.ingest.set_project(path)
         self.projects.refresh()
-        self.files.reset()
         for client in self.server.get_clients().values():
             self._on_connect(client)
-
-    def after_files_changed(self):
-        """Files were deleted or added by hand: re-scan products, project status and videos."""
-        self._refresh_dense()
-        self.projects.refresh()
-        self.ingest.rescan()
 
     def _watch_uploads(self):
         """Progress of browser uploads still arriving (viser delivers them only when complete)."""
         while True:
             p = upload_progress(self.server)
             if p:  # once complete, the upload handlers write the result
-                self.files.g_msg.content = self.ingest.g_upload_md.content = "⏳ receiving " + " · ".join(p)
+                self.videos.g_msg.content = self.ingest.g_upload_md.content = "⏳ receiving " + " · ".join(p)
             time.sleep(0.5)
 
     def _clear_scene(self):

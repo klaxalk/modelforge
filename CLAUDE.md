@@ -34,12 +34,11 @@ Done:
 - M0–M3: prior-initialized refinement with self-calibrating robust priors.
 - M5: dense mesh (COLMAP MVS) and Gaussian splat (nerfstudio splatfacto).
 - Multi-video ingest: sources = video + time range, per-source offsets.
-- Web GUI with tabs Projects / Files / Ingest / View / Inspect / Plots / Sparse /
+- Web GUI with tabs Projects / Videos / Ingest / View / Inspect / Plots / Sparse /
   Dense / Splat / Export.
   - Projects: list, open, create; final vs. intermediate results; clean.
-  - Files: browse, download (folders as .zip), delete, and upload into the
-    project. The Ingest tab uploads videos + .SRT from the browser into
-    `videos/`.
+  - Videos: the shared video library (upload from the browser, info, used-by,
+    add to project, download, rename, delete).
   - Sparse / Dense / Splat: run each part; live state above the tabs,
     history and log below, hover hints.
   - Export: mesh (glb / obj / ply) and splat (ply / .splat), saved under
@@ -196,7 +195,7 @@ modelforge/
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── projects.py     # project folders: list / create / status / clean
-│   ├── files.py        # project file manager back end + browser uploads (GUI Files tab)
+│   ├── videos.py       # shared video library: list / probe / usage / upload / rename / delete (Videos tab)
 │   └── pipeline.py     # CLI driving all stages
 ├── resources/
 │   ├── colmap/      # git submodule: github.com/colmap/colmap (SfM / MVS, C++)
@@ -616,16 +615,20 @@ Code layout:
     databases, `sparse/round_*`, the dense workspace (depth maps),
     `nerfstudio/` runs, `splat/splat.ply` and `previous/`. It keeps the
     images, sources and final results.
-- `modelforge/gui/files.py`: the **Files** tab, built on `modelforge/files.py`.
-  - Browses the open project folder: entry picker, Open / Up / Refresh, and a
-    table with sizes and dates.
-  - Download sends a file to the browser (`ClientHandle.send_file_download`);
-    a folder goes as an in-memory .zip, up to 4 GB.
-  - Delete needs a confirmation box and is refused while a job runs. A
-    symlink is removed, never its target.
-  - "Upload file here" writes into the current folder and never overwrites.
-  - Paths are confined to the project (`files.resolve` rejects `..` and
-    absolute paths).
+- `modelforge/gui/videos.py`: the **Videos** tab, built on `modelforge/videos.py`.
+  The user wanted a manager for the *videos*, not for the project's internal
+  files; a project-file browser was built first and then removed.
+  - The library is every clip under the data root outside project folders
+    (`ingest.find_videos`). Browser uploads (video and .SRT) go to
+    `ROOT/videos/`.
+  - Per clip: size, length, resolution / fps and recording time (ffprobe,
+    cached by size + mtime), SRT present, and the projects using it (their
+    `ingest.json`).
+  - Actions: add to the open project (`IngestPanel.add_source(video)`),
+    download, rename and delete. Rename and delete move the .SRT along.
+  - Rename and delete are refused while a project uses the clip, including
+    the open project's unsaved Ingest sources.
+  - Delete needs a confirmation box.
 - **Uploads.** viser buffers an upload in server memory and delivers it only
   when complete, so a 1.2 GB clip needs ~2.4 GB of RAM at peak.
   `App._watch_uploads` shows progress from viser's in-flight transfer table
@@ -634,10 +637,10 @@ Code layout:
 - `modelforge/gui/ingest.py`: the **Ingest** tab (first tab when the
   project has no images yet). `python -m modelforge.gui.app data/new_site`
   works on a new or empty folder.
-  - **Videos**: lists videos in the project's `videos/` (browser uploads),
-    next to the project and in `data/` (other project folders are skipped), or
-    takes a path. "Add as source" adds the whole clip. **Upload video / SRT**
-    saves a clip or its sidecar into `PROJECT/videos/` and selects it.
+  - **Videos**: lists the library's clips (data root incl. `data/videos/`;
+    project folders are skipped), or takes a path. "Add as source" adds the
+    whole clip. **Upload video / SRT** saves into the library, as the Videos
+    tab does.
   - **Sources**: one folder per source, with a stats line, a range
     multi-slider, Enabled, a lead override, Preview, "Add piece" (a second
     range of the same video) and Remove. Clips decode in a background planner

@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import files
+from modelforge import videos
 from modelforge.dji import extract as ex
 from modelforge.dji import ingest
 
@@ -103,8 +103,9 @@ class IngestPanel:
         self.g_md = gui.add_markdown("")
         with gui.add_folder("Videos"):
             self.g_video = gui.add_dropdown("Video", options=("(none found)",),
-                                            hint="Videos found next to this project and in data/ "
-                                                 "(project folders are skipped). The .SRT sidecar is used if present.")
+                                            hint="Videos of the library (data root, incl. data/videos/; project "
+                                                 "folders are skipped; Videos tab to manage them). The .SRT sidecar "
+                                                 "is used if present.")
             self.g_video_path = gui.add_text("or path", initial_value="",
                                              hint="Any video path inside the container (repo = /workspace); "
                                                   "overrides the dropdown.")
@@ -115,9 +116,10 @@ class IngestPanel:
             self.g_upload = gui.add_upload_button(
                 "Upload video / SRT", icon=viser.Icon.UPLOAD,
                 mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
-                hint="Upload a DJI video (.MP4 / .MOV) or its .SRT sidecar from this computer into the project's "
-                     "videos/ folder; upload the .SRT too (same name), it carries per-frame metadata. Large clips "
-                     "take a while: progress shows below. An existing file is not overwritten.")
+                hint="Upload a DJI video (.MP4 / .MOV) or its .SRT sidecar from this computer into the shared "
+                     "video library (data/videos/, managed in the Videos tab); upload the .SRT too (same name), it "
+                     "carries per-frame metadata. Large clips take a while: progress shows below. An existing file "
+                     "is not overwritten.")
             self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
             self.g_upload_md = gui.add_markdown("")
         self.g_sources = gui.add_folder("Sources")
@@ -181,9 +183,7 @@ class IngestPanel:
         self._rebuild_sources()
 
     def rescan(self):
-        # uploads land in PROJECT/videos/; find_videos skips project folders, so list it explicitly
-        roots = [os.path.join(self.path, files.VIDEO_DIR), os.path.dirname(os.path.abspath(self.path)),
-                 os.path.join(os.getcwd(), "data")]
+        roots = [self.app.root, os.path.dirname(os.path.abspath(self.path)), os.path.join(os.getcwd(), "data")]
         found = []
         for r in dict.fromkeys(roots):
             if os.path.isdir(r):
@@ -194,7 +194,7 @@ class IngestPanel:
     def _on_upload(self, up):
         def work():
             try:
-                path = files.save_video_upload(self.path, up.name, up.content)
+                path = videos.save_upload(self.app.root, up.name, up.content)
                 rel = os.path.relpath(path)
                 self.rescan()
                 if rel in self.g_video.options:
@@ -203,13 +203,13 @@ class IngestPanel:
                     "; then **Add as source**" + ("" if ingest.find_srt(path) else
                                                   " (no .SRT next to it yet: upload it too)"))
                 self.g_upload_md.content = f"✅ uploaded `{rel}` ({len(up.content) / 1e6:.0f} MB){hint}"
-                self.app.files.refresh()
+                self.app.videos.refresh()
             except (OSError, ValueError) as e:
                 self.g_upload_md.content = f"❌ upload failed: `{e}`"
         threading.Thread(target=work, daemon=True).start()
 
-    def add_source(self):
-        v = self.g_video_path.value.strip() or self.g_video.value
+    def add_source(self, video=None):
+        v = video or self.g_video_path.value.strip() or self.g_video.value
         if not v or v == "(none found)" or not os.path.exists(v):
             self.g_status.content = f"❌ video not found: `{v}`"
             return
