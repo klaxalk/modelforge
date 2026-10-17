@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run a command in the modelforge dev container, starting it if needed.
+#   scripts/dev python -m modelforge.dji.extract data/clip.MP4 -o data/clip_frames
+#   scripts/dev            # interactive shell
+set -euo pipefail
+cd "$(dirname "$0")/.."
+compose=(docker compose -f compose.yaml)
+[[ "${MODELFORGE_GPU:-0}" == 1 ]] && compose+=(-f compose.gpu.yaml)
+if [[ -z "$("${compose[@]}" ps -q --status running dev)" ]]; then
+  env UID="$(id -u)" GID="$(id -g)" "${compose[@]}" up -d dev >&2  # UID is read-only in bash
+fi
+tty=(); [[ -t 0 && -t 1 ]] || tty=(-T)
+if [[ $# -eq 0 ]]; then set -- bash; fi
+exec "${compose[@]}" exec "${tty[@]}" dev "$@"

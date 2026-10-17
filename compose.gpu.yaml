@@ -1,0 +1,10 @@
+# CUDA variant (needs a working NVIDIA driver + nvidia-container-toolkit on the host):
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
+services:
+  dev:
+    build:
+      args:
+        BASE_IMAGE: nvidia/cuda:12.8.1-devel-ubuntu24.04
+        CUDA_ENABLED: "ON"
+    image: modelforge-dev:cuda
+    gpus: all

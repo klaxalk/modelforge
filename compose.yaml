@@ -1,0 +1,14 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: modelforge-dev:cpu
+    volumes:
+      - .:/workspace
+    ports:
+      - "8080:8080"  # viser GUI
+    init: true

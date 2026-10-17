@@ -4,3 +4,6 @@
 [submodule "resources/nerfstudio"]
 	path = resources/nerfstudio
 	url = https://github.com/nerfstudio-project/nerfstudio.git
+[submodule "resources/pyceres"]
+	path = resources/pyceres
+	url = https://github.com/cvg/pyceres.git
