@@ -1,8 +1,9 @@
 """modelforge web GUI (viser): ingest videos, run stages live, inspect snapshots and products.
 
 Usage (in the dev container; port 8080 is published by compose.yaml):
-    python -m modelforge.gui.app data/site [--port 8080]
-The project folder may be new or empty: the Ingest tab builds it from one or more videos.
+    python -m modelforge.gui.app [data/site] [--root data] [--port 8080]
+Projects are folders under --root (Projects tab: open / create / clean). A project folder
+may be new or empty: the Ingest tab builds it from one or more videos.
 """
 
 import argparse
@@ -16,10 +17,11 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import dense, pipeline
+from modelforge import dense, pipeline, projects
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.ingest import IngestPanel, source_color
+from modelforge.gui.projects import ProjectsPanel
 
 STAGE_HINTS = {
     "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
@@ -81,8 +83,9 @@ def rot_dev_deg(Ra, Rb):
 
 
 class App:
-    def __init__(self, project_path, port=8080):
+    def __init__(self, project_path, port=8080, root=None):
         self.path = project_path
+        self.root = root or os.path.dirname(os.path.abspath(project_path))
         self.project = Project(project_path) if os.path.exists(os.path.join(project_path, "poses.json")) else None
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
         self.server.scene.set_up_direction("+z")
@@ -108,9 +111,10 @@ class App:
         gui = self.server.gui
         self.g_header = gui.add_markdown(self._header())
         tabs = gui.add_tab_group()
-        if self.project is None:  # new project: start where the work starts
-            with tabs.add_tab("Ingest", viser.Icon.VIDEO):
-                self.ingest = IngestPanel(self, gui)
+        with tabs.add_tab("Projects", viser.Icon.FOLDERS):
+            self.projects = ProjectsPanel(self, gui)
+        with tabs.add_tab("Ingest", viser.Icon.VIDEO):
+            self.ingest = IngestPanel(self, gui)
 
         with tabs.add_tab("View", viser.Icon.EYE):
             names = tuple(self.project.snapshot_names()) if self.project else ("priors",)
@@ -212,9 +216,6 @@ class App:
             with gui.add_folder("Log", expand_by_default=False):
                 self.g_log = gui.add_markdown("")
 
-        if self.project is not None:
-            with tabs.add_tab("Ingest", viser.Icon.VIDEO):
-                self.ingest = IngestPanel(self, gui)
 
     def _header(self):
         if self.project is None:
@@ -224,17 +225,49 @@ class App:
                 + (f" from {n_src} sources" if n_src > 1 else ""))
 
     def load_project(self):
-        """(Re)load PROJECT after extraction: new images, no snapshots yet."""
+        """(Re)load the open project after extraction: new images, no snapshots yet."""
         with self.lock:
-            for h in list(self.cam_handles.values()) + list(self.prior_handles.values()):
-                h.remove()
-            self.cam_handles, self.prior_handles, self.selected, self.snap = {}, {}, None, None
+            self._clear_scene()
             self.project = Project(self.path)
-            self.g_header.content = self._header()
+            self._show_project()
+        self.projects.refresh()
+
+    def open_project(self, path):
+        """Switch the whole GUI to another (new or existing) project folder."""
+        if self.running or self.ingest.running:
+            raise RuntimeError("a job is running: wait for it to finish before switching projects")
+        with self.lock:
+            self.path = path
+            self._clear_scene()
+            self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
+            self._show_project()
+            self._history_lines, self._log_lines = [], []
+            self.g_history.content, self.g_log.content = "_nothing run in this session_", ""
+            self.g_state.content = "⚪ **idle**"
+            self.g_inspect_md.content = "Click a camera to inspect it."
+        self.ingest.set_project(path)
+        self.projects.refresh()
+        for client in self.server.get_clients().values():
+            self._on_connect(client)
+
+    def _clear_scene(self):
+        for h in list(self.cam_handles.values()) + list(self.prior_handles.values()):
+            h.remove()
+        self.cam_handles, self.prior_handles, self.selected, self.snap = {}, {}, None, None
+        for name in ("/points", "/corrections", "/traj", "/dense"):
+            self.server.scene.remove_by_name(name)
+
+    def _show_project(self):
+        self.g_header.content = self._header()
+        if self.project is None:
+            self.g_snapshot.options = ("priors",)
+            self.g_stats.content = self.g_legend.content = ""
+            self.g_plot.figure = go.Figure()
+        else:
             names = tuple(self.project.snapshot_names())
             self.g_snapshot.options = names
             self.load_snapshot("refined" if "refined" in names else names[-1])
-            self._refresh_dense()
+        self._refresh_dense()
 
     def _on_connect(self, client):
         if self.project is None:
@@ -663,10 +696,18 @@ class App:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("project")
+    ap.add_argument("project", nargs="?",
+                    help="project folder to open (new or existing); default: the newest project under --root")
+    ap.add_argument("--root", default="data", help="folder holding the projects (default data/)")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
-    app = App(os.path.abspath(args.project) if not os.path.isabs(args.project) else args.project, args.port)
+    root = os.path.abspath(args.root)
+    if args.project:
+        path = os.path.abspath(args.project)
+    else:
+        found = projects.list_projects(root)
+        path = found[0] if found else os.path.join(root, "project_1")
+    app = App(path, args.port, root=root)
     print(f"modelforge GUI on http://localhost:{args.port}", flush=True)
     app.serve_forever()
 

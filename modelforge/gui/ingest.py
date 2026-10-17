@@ -39,6 +39,7 @@ class IngestPanel:
         self.plan, self.prev = None, None
         self.running = False
         self.edited = False  # ingest.json is written only once the user changes the plan
+        self._loading = False  # widget updates from set_project are not user edits
         self._lock = threading.RLock()  # source widgets: GUI callbacks vs. the planner thread
         self._dirty = threading.Event()
         self._preview_req = None
@@ -47,6 +48,33 @@ class IngestPanel:
         self._build()
         threading.Thread(target=self._planner, daemon=True).start()
         threading.Thread(target=self._previewer, daemon=True).start()
+        self.request_plan(edited=False)
+
+    def set_project(self, path):
+        """Show another project's plan (called by App.open_project)."""
+        with self._lock:
+            self.path = path
+            self.sources, self.settings = ingest.load_plan(path)
+            if not self.sources:
+                self.sources, self.settings = self._plan_from_poses()
+            self.plan, self.prev, self.edited = None, None, False
+            self._loading = True
+            try:
+                st = self.settings
+                self.g_sampling.value = st.sampling
+                self.g_num.value = st.num_images
+                self.g_spacing.value = st.spacing or 0.0
+                self.g_rotw.value = -1.0 if st.rot_weight is None else st.rot_weight
+                self.g_window.value = st.window
+                self.g_yaw.value = st.yaw_source
+            finally:
+                self._loading = False
+            self._rebuild_sources_locked()
+        self.server.scene.remove_by_name("/ingest")
+        self.g_status.content = ""
+        self.g_plan_md.content = ""
+        self.g_plot.figure = go.Figure()
+        self._update_status()
         self.request_plan(edited=False)
 
     def _plan_from_poses(self):
@@ -238,6 +266,8 @@ class IngestPanel:
         self.request_plan()
 
     def _settings_changed(self):
+        if self._loading:
+            return
         self.settings = ingest.Settings(
             sampling=self.g_sampling.value, num_images=max(1, int(self.g_num.value)),
             spacing=float(self.g_spacing.value) or None,
