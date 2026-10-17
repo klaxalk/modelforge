@@ -24,7 +24,11 @@ folder opens the **Ingest** tab. There you:
 - add one or more videos, and cut each into pieces (time ranges) using the
   flight track, telemetry plots and frame preview;
 - set the number of images, check the planned positions, and extract;
-- then run SfM and the dense stages from the **Run** tab.
+- then run SfM, the dense stages and the Gaussian splat from the **Run** tab.
+
+The **Projects** tab lists, opens and creates projects under `data/`. It
+shows each project's sources and its final vs. intermediate results, and can
+clean the intermediates.
 
 Step by step:
 
@@ -33,7 +37,7 @@ scripts/dev python -m modelforge.dji.extract data/clip.MP4 -o data/clip_frames -
 #   several videos into one project: ... extract data/a.MP4 data/b.MP4 -o data/site --num-images 500
 scripts/dev python -m modelforge.pipeline data/clip_frames                       # SfM, CPU is fine
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/clip_frames --stages dense
-scripts/splat data/clip_frames                                                   # nerfstudio, GPU
+scripts/splat data/clip_frames                                                   # nerfstudio splatfacto, GPU
 ```
 
 ## Outputs (in `data/<clip>_frames/`)
@@ -52,8 +56,11 @@ scripts/splat data/clip_frames                                                  
 ## Requirements
 
 - Docker with Compose.
-- For dense + splat: an NVIDIA GPU with the NVIDIA Container Toolkit
-  (`compose.gpu.yaml`). The pose refinement itself runs on CPU.
+- For dense + splat: an NVIDIA GPU with the NVIDIA Container Toolkit. Build
+  the one CUDA image with
+  `env UID=$(id -u) GID=$(id -g) docker compose -f compose.yaml -f compose.gpu.yaml build dev`.
+  It holds COLMAP, modelforge and nerfstudio. The pose refinement itself runs
+  on CPU.
 
 More detail: `docs/architecture.md` (design), `docs/djmd_format.md` (DJI
 metadata), `CLAUDE.md` (development notes, results, conventions).

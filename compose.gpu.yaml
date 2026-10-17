@@ -1,27 +1,17 @@
 # CUDA variant (needs a working NVIDIA driver + nvidia-container-toolkit on the host):
-#   docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
-#   MODELFORGE_GPU=1 scripts/dev ...      (dev container with CUDA COLMAP: dense stages)
-#   scripts/splat data/clip_frames        (nerfstudio splatfacto via the service below)
+#   env UID=$(id -u) GID=$(id -g) docker compose -f compose.yaml -f compose.gpu.yaml build dev
+#   MODELFORGE_GPU=1 scripts/dev ...      (dev container: CUDA COLMAP + nerfstudio splatfacto)
+#   scripts/splat data/clip_frames        (splat from the shell; the GUI Run tab does the same)
 services:
   dev:
     build:
       args:
         BASE_IMAGE: nvidia/cuda:12.8.1-devel-ubuntu24.04
         CUDA_ENABLED: "ON"
+        CUDA_ARCHITECTURES: "75;80;86;89;90;120"  # Turing .. Blackwell (RTX 50xx needs 120)
+        NERFSTUDIO: "ON"  # /opt/nerfstudio venv: torch cu128 + gsplat + nerfstudio (resources/nerfstudio)
     image: modelforge-dev:cuda
     gpus: all
-
-  nerfstudio:
-    image: ghcr.io/nerfstudio-project/nerfstudio:1.1.5  # matches resources/nerfstudio (v1.1.5)
-    profiles: ["nerfstudio"]  # started only by scripts/splat, never by `up`
-    gpus: all
-    user: "${UID:-1000}:${GID:-1000}"  # outputs in data/ stay owned by the host user
-    environment:
-      HOME: /tmp/home  # writable cache dirs (torch, matplotlib) for the non-root user
-    working_dir: /workspace
-    volumes:
-      - .:/workspace
-      - ./build/nerfstudio-home:/tmp/home  # keeps compiled CUDA kernels / caches across --rm runs
     ports:
-      - "7007:7007"  # nerfstudio viewer
-    shm_size: 8gb
+      - "7007:7007"  # nerfstudio viewer while training
+    shm_size: 8gb  # torch data loaders

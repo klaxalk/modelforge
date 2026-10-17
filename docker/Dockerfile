@@ -62,6 +62,31 @@ RUN python -c "import pyceres, pycolmap; print('pycolmap', pycolmap.__version__,
 # Web GUI; mesh / splat PLY I/O.
 RUN pip install --no-cache-dir "viser==1.1.1" "plotly==7.1.0" "trimesh==5.1.0" "plyfile==1.1.5"
 
+# nerfstudio (splatfacto) in its own venv (CUDA image only, NERFSTUDIO=ON). It pins
+# viser==1.0.0 and opencv 4.10 and wants numpy<2, which clash with /opt/venv; the two
+# environments only exchange files (transforms.json, PLY). Called as /opt/nerfstudio/bin/ns-*,
+# never put on PATH. torch for CUDA 12.8 (Blackwell-capable) instead of nerfstudio's cu118;
+# gsplat's CUDA kernels are compiled here for GSPLAT_ARCH_LIST, so training starts at once.
+# tiny-cuda-nn is not installed: only the NeRF methods need it, not splatfacto.
+ARG NERFSTUDIO=OFF
+ARG TORCH_VERSION=2.7.1
+ARG TORCHVISION_VERSION=0.22.1
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+ARG GSPLAT_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;12.0"
+COPY resources/nerfstudio /src/nerfstudio
+RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
+      python3 -m venv /opt/nerfstudio && \
+      /opt/nerfstudio/bin/pip install --no-cache-dir --upgrade pip setuptools wheel ninja && \
+      /opt/nerfstudio/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+          --index-url "${TORCH_INDEX_URL}" && \
+      TORCH_CUDA_ARCH_LIST="${GSPLAT_ARCH_LIST}" MAX_JOBS=${JOBS} \
+          /opt/nerfstudio/bin/pip install --no-cache-dir --no-build-isolation --no-binary gsplat "gsplat==1.4.0" && \
+      /opt/nerfstudio/bin/pip install --no-cache-dir "numpy<2" /src/nerfstudio && \
+      /opt/nerfstudio/bin/python -c "import torch, gsplat, nerfstudio; from gsplat.cuda._backend import _C; \
+print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gsplat', gsplat.__version__, 'prebuilt kernels', _C is not None)" ; \
+    fi
+ENV NERFSTUDIO_BIN=/opt/nerfstudio/bin
+
 # Run as the host user so files written to the bind-mounted repo are not root-owned.
 RUN (getent passwd ${UID} | cut -d: -f1 | xargs -r userdel -r) 2>/dev/null; \
     groupadd -o -g ${GID} dev 2>/dev/null || true; \

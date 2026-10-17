@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import dense, pipeline, projects
+from modelforge import dense, pipeline, projects, splat
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.ingest import IngestPanel, source_color
@@ -38,6 +38,7 @@ STAGE_HINTS = {
     "fusion": "Fuse depth maps into dense/fused.ply (+ .vis for meshing).",
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
+    "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
 }
 NEXT_STEP = {
     "sfm": "View tab → snapshot **refined**; next: dense stages (GPU) or `scripts/splat`",
@@ -46,6 +47,7 @@ NEXT_STEP = {
     "export": "transforms.json written; next: dense stages (GPU) or `scripts/splat`",
     "dense": "View tab → Dense / splat", "undistort": "next: **stereo**", "stereo": "next: **fusion**",
     "fusion": "next: **mesh**", "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written",
+    "splat": "View tab → Dense / splat → **Splat (ENU)**",
 }
 LOG_LINES = 40
 
@@ -99,6 +101,7 @@ class App:
         self._last_live = 0.0
         self._run_id = 0
         self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
+        self._splat_job = None
         self._build_gui()
         if self.project:
             names = self.project.snapshot_names()
@@ -205,9 +208,28 @@ class App:
                                        hint=STAGE_HINTS[stage])
                     b.on_click(lambda _, s=stage: self.run_stage(s))
                     self.g_buttons[stage] = b
-            with gui.add_folder("Gaussian splat (nerfstudio)", expand_by_default=False):
-                gui.add_markdown("Train on the host: `scripts/splat <project>` (nerfstudio container, GPU). "
-                                 "It writes `splat/splat_enu.ply`, aligned with the mesh.")
+            with gui.add_folder("Gaussian splat (nerfstudio)"):
+                why = splat.available()
+                gui.add_markdown("splatfacto: " + ("ready (GPU + nerfstudio found) · viewer on "
+                                                   f"http://localhost:{splat.VIEWER_PORT} while training"
+                                                   if why is None else f"**unavailable**: {why}"))
+                self.g_splat_method = gui.add_dropdown(
+                    "Method", options=splat.METHODS, initial_value="splatfacto",
+                    hint="splatfacto: default. splatfacto-big: more Gaussians and detail, more GPU memory and time.")
+                self.g_splat_iters = gui.add_number(
+                    "Iterations", initial_value=splat.DEFAULT_ITERATIONS, min=100, step=1000,
+                    hint="Training steps. 30000 is splatfacto's default (~20-40 min on a recent GPU); "
+                         "use a few thousand for a quick check.")
+                b = gui.add_button("Train + export splat", icon=viser.Icon.SPARKLES, disabled=why is not None,
+                                   hint="ns-train on transforms.json + sparse_pc.ply, then ns-export and conversion "
+                                        "to splat/splat_enu.ply in the project's ENU frame (aligned with the "
+                                        "cameras and the mesh). Progress and the log appear here.")
+                b.on_click(lambda _: self.run_stage("splat"))
+                self.g_buttons["splat"] = b
+                self.g_splat_stop = gui.add_button("Stop splat training", icon=viser.Icon.PLAYER_STOP, disabled=True,
+                                                   hint="Terminate ns-train / ns-export. Nothing is converted; "
+                                                        "checkpoints written so far stay in nerfstudio/.")
+                self.g_splat_stop.on_click(lambda _: self._splat_job.stop() if self._splat_job else None)
                 gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
                                "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                     lambda _: self._refresh_dense())
@@ -516,6 +538,8 @@ class App:
             pri = self.project.priors
             if stage == "sfm" or stage in pipeline.SFM_STAGES:
                 seq = pipeline.SFM_STAGES if stage == "sfm" else (stage,)
+            elif stage == "splat":
+                seq = ("splat",)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
             m = self.g_mesh_method.value
@@ -533,10 +557,13 @@ class App:
                     pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
                 elif st == "export":
                     pipeline.stage_export(project, report)
+                elif st == "splat":
+                    self._run_splat(project)
+                    report = pipeline.Report(project)  # splat.run wrote its stats
                 else:
                     pipeline.stage_dense(project, report, st, methods)
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage == "dense" or stage in pipeline.DENSE_STAGES:
+            if stage in ("dense", "splat") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm") else None)
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
@@ -552,10 +579,26 @@ class App:
             with self.lock:  # the ticker writes under the same lock and checks `running`
                 self.running = False
                 self.g_state.content = final or "❌ **stopped**"
-            for b in self.g_buttons.values():
-                b.disabled = b is self.g_buttons.get("stereo") and not dense.has_cuda() or \
-                    b is self.g_buttons.get("dense") and not dense.has_cuda()
+            unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
+                           "splat": splat.available() is not None}
+            for name, b in self.g_buttons.items():
+                b.disabled = unavailable.get(name, False)
             self.g_progress.visible = False
+
+    def _run_splat(self, project):
+        self._splat_job = splat.Job()
+        self.g_splat_stop.disabled = False
+        iters = int(self.g_splat_iters.value)
+
+        def progress(step, pct):
+            self.g_progress.value = pct
+            self._job["detail"] = f"training step {step:,} / {iters:,} ({pct:.1f} %)"
+        try:
+            splat.run(project, self.g_splat_method.value, iters, on_line=self._on_log, on_progress=progress,
+                      job=self._splat_job)
+        finally:
+            self.g_splat_stop.disabled = True
+            self._splat_job = None
 
     def _begin_stage(self, st, k, n):
         j = self._job
@@ -610,6 +653,10 @@ class App:
                 return f"{r['frames']} frames → transforms.json"
             if st == "fusion":
                 return f"{r.get('points', r)}"
+            if st == "splat":
+                r = rep["splat"]
+                return (f"{r['num_gaussians']:,} gaussians, {r['method']} {r['iterations']:,} it, "
+                        f"training {_fmt_s(r['train_seconds'])}")
         except (KeyError, TypeError):
             pass
         text = str(r)

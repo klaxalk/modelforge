@@ -22,33 +22,69 @@ modelforge fixes that. There are three workstreams:
    refinement. Output is a nerfstudio dataset (`transforms.json` +
    `sparse_pc.ply`).
 
-## Status (2026-10-17) and next steps
+## Status (2026-10-17) and handoff
 
-Milestones M0–M3 and M5 (dense mesh + splat) are done and committed on `master`.
-Everything was developed on a machine **without an NVIDIA GPU**, so two steps
-have **never been run on real data**:
-- COLMAP PatchMatch stereo (`--stages dense`, the `stereo` stage), and the
-  dense stages after it on real depth maps. They were verified only on a
-  synthetic workspace.
-- nerfstudio splatfacto training plus export (`scripts/splat`). The ENU
-  conversion is unit-tested, and the `nerfstudio` service has never been
-  started.
+**Read this first if you are a new Claude instance on another machine.** The work
+was developed on a laptop without an NVIDIA GPU and is being continued on a GPU
+machine. Everything is committed and pushed to `origin/master`. Nothing lives
+outside the repo except `data/` (videos and project folders; copy separately)
+and the per-machine Claude memory, which holds nothing project-specific.
 
-The project is being moved to a machine with an NVIDIA GPU to test these.
-Follow "Migrating to a GPU machine" below, then the GPU test checklist.
+Done:
+- M0–M3: prior-initialized refinement with self-calibrating robust priors.
+- M5: dense mesh (COLMAP MVS) and Gaussian splat (nerfstudio splatfacto).
+- Multi-video ingest: sources = video + time range, per-source offsets.
+- Web GUI with tabs Projects / Ingest / View / Inspect / Plots / Run.
+  - Projects: list, open, create; final vs. intermediate results; clean.
+  - Run: live state, history and log, hover hints.
+  - Splat: training from the GUI.
+- **One image for everything** (`compose.gpu.yaml`): COLMAP (CUDA) +
+  modelforge in `/opt/venv`, and nerfstudio + torch cu128 + gsplat in
+  `/opt/nerfstudio`. The separate nerfstudio container and the Docker socket
+  are gone.
 
-Multi-video ingest (GUI Ingest tab, per-source offsets) is done. It is tested
-on synthetic data and on pieces of the one sample clip, but **not yet on two
-different flights**.
+**Never run on a GPU** (this laptop has none), so test these first:
+1. **The CUDA image build with nerfstudio (`NERFSTUDIO=ON`) has never
+   completed.**
+   - A build on the laptop got through the cached COLMAP layers and the
+     torch 2.7.1+cu128 download, then was stopped on purpose while compiling
+     the gsplat kernels; the build was moved to the GPU machine.
+   - So the nerfstudio install itself is unverified. Its last line is a
+     self-check that prints the torch / CUDA / gsplat versions and whether
+     the prebuilt kernels load.
+   - torch 2.7.1+cu128 with gsplat 1.4.0 and nerfstudio 1.1.5 is not a
+     combination nerfstudio ships (its image uses torch 2.1.2+cu118).
+   - If the gsplat build from source fails, try installing gsplat without
+     `--no-binary` (kernels then compile by JIT on first use), or change the
+     torch pins.
+2. PatchMatch stereo and the dense stages after it on real depth maps. They
+   were verified only on a synthetic workspace.
+3. Splat training, export and ENU conversion end to end, from the GUI and
+   `scripts/splat`. The ENU conversion is unit-tested.
+
+Tested only partially:
+- **Multi-video ingest.** Tested on synthetic data and on two pieces of the
+  one sample clip (true offset 0, estimate 3 cm). **Not yet on two different
+  flights.**
 
 Open items, in priority order:
-1. Run the GPU checklist and fix whatever breaks.
+1. Follow "Migrating to a GPU machine", then the GPU test checklist, and fix
+   whatever breaks.
 2. Test multi-video ingest on real separate flights of one site.
 3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
-   weakly constrained. It can now be trimmed with the source range.
+   weakly constrained. Trim it with the source range.
 4. Calibration is biased low (~0.7×) in weakly constrained directions. The
    fix is redundancy-aware variance component estimation.
 5. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+
+The user's working preferences, as seen so far:
+- They want results committed and pushed when asked ("commit and push").
+- They value a GUI that clearly shows state and progress, with hover hints.
+- Don't run the full test suite unprompted while they use the machine. They
+  stopped long test runs twice. Run the targeted tests for what changed, or
+  ask.
+- Mounting the host Docker socket into the container was refused, as a
+  containment escape. Keep everything inside one container.
 
 ## Migrating to a GPU machine
 
@@ -62,35 +98,30 @@ separately.
    - Pinned submodules: colmap `48af6d30`, nerfstudio `50e0e3c7` (v1.1.5+),
      pyceres `2eeeca7`. pyceres must stay on that commit, because v2.6 doesn't
      build with pybind11 3.1.
-2. Copy the data. Minimum is `data/berlin_3_1.MP4` (1.2 GB) and
-   `data/berlin_3_1.SRT`. Optional:
-   - `data/berlin_3_1_frames/` (2.1 GB). It skips the ~17 min CPU run of
-     extract + SfM and keeps the validated refined model.
-   - The database copies (`features.db`, `database.db`) and `dense/` can be
-     regenerated, so you can leave them behind.
+2. Copy the data (under `data/`). Minimum is `berlin_3_1.MP4` (1.2 GB) and
+   `berlin_3_1.SRT`. Optional:
+   - `berlin_3_1_frames/` (2.1 GB): the validated single-video project. It
+     skips the ~17 min CPU run of extract + SfM.
+   - `berlin_pieces/`: the two-source null test.
+   - `site/`: the user's GUI trial project.
+   - Databases and `dense/` can be regenerated, so you can leave them behind.
    - Keep file ownership as the host user (the container runs as host UID/GID).
 3. Prepare the host:
    - Install an NVIDIA driver, Docker with Compose v2, and the **NVIDIA
      Container Toolkit**. Then run `sudo nvidia-ctk runtime configure --runtime=docker`
      and restart Docker.
    - Check with `docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi`.
-4. Build the images:
-   - CUDA dev image:
-     `env UID=$(id -u) GID=$(id -g) docker compose -f compose.yaml -f compose.gpu.yaml build dev`
-     (`modelforge-dev:cuda`, ~12 GB, compiles COLMAP with CUDA).
-   - The CPU image (`docker compose build dev`) is optional. `scripts/dev`
-     without `MODELFORGE_GPU=1` uses it.
-   - `CUDA_ARCHITECTURES` defaults to `75;80;86;89;90`, set in
-     `docker/Dockerfile` and passed as a build arg. **For an RTX 50xx (Blackwell),
-     add `120`**. CUDA 12.8 supports it. Otherwise COLMAP's kernels won't run on it.
+4. Build the image:
+   `env UID=$(id -u) GID=$(id -g) docker compose -f compose.yaml -f compose.gpu.yaml build dev`
+   - Result: `modelforge-dev:cuda`, ~20 GB. Takes roughly 45–90 min: COLMAP
+     with CUDA, then torch + gsplat kernels + nerfstudio.
+   - Architectures: COLMAP's `CUDA_ARCHITECTURES` is set in `compose.gpu.yaml`
+     to `75;80;86;89;90;120` (Turing to Blackwell). gsplat's
+     `GSPLAT_ARCH_LIST` (Dockerfile) is the same list in torch notation.
+     Trim both to your GPU for a faster build.
    - Lower `JOBS` (default 6) if the build runs out of RAM.
-   - The nerfstudio image (`ghcr.io/nerfstudio-project/nerfstudio:1.1.5`) is
-     pulled on first `scripts/splat`. It is built on CUDA 11.8 with kernels for
-     sm 61–90 (see `resources/nerfstudio/Dockerfile`). So it covers Pascal to
-     Hopper, including RTX 20/30/40, but **not Blackwell (RTX 50xx)**. A
-     Blackwell GPU needs a custom nerfstudio image built on CUDA ≥ 12.8 with
-     a matching torch and gsplat. Swap that in for `image:` in
-     `compose.gpu.yaml`; `scripts/splat` does not change.
+   - The CPU image (`docker compose build dev`) is optional. It has no
+     nerfstudio. `scripts/dev` without `MODELFORGE_GPU=1` uses it.
 5. Use `MODELFORGE_GPU=1` for every `scripts/dev` call on that machine. The CPU
    and CUDA variants share the `dev` service name, so stop one before starting
    the other: `docker compose down`.
@@ -99,16 +130,18 @@ separately.
 
 ```bash
 MODELFORGE_GPU=1 scripts/dev python -c "import pycolmap; print(pycolmap.has_cuda)"   # True
-MODELFORGE_GPU=1 scripts/dev pytest -q tests          # expect 25 passed, 1 skipped (the no-CUDA error test)
-# dense on the existing refined project (or run scripts/process data/berlin_3_1.MP4 from scratch)
+MODELFORGE_GPU=1 scripts/dev /opt/nerfstudio/bin/python -c \
+  "import torch, gsplat; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+MODELFORGE_GPU=1 scripts/dev pytest -q tests          # all pass except the no-CUDA error test (skipped)
+# dense on the existing refined project (or build a project in the GUI)
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/berlin_3_1_frames --stages dense --mesh delaunay
 #   faster first try: add --dense-max-image-size 1200
-scripts/splat data/berlin_3_1_frames                  # viewer on :7007 while training
-MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app data/berlin_3_1_frames   # :8080, View tab → Dense / splat
+scripts/splat data/berlin_3_1_frames --iterations 2000   # quick splat check; viewer on :7007
+MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app   # :8080; Projects tab, Run → splat, View → Dense / splat
 ```
 
 What to check:
-- `report.json` gets `dense.*` entries.
+- `report.json` gets `dense.*` and `splat` entries.
 - `dense/fused.ply` has millions of points.
 - `dense/meshed-delaunay.ply` and `textured-delaunay/` exist.
 - `splat/splat_enu.ply` overlays the mesh and the cameras in the GUI. A
@@ -117,6 +150,14 @@ What to check:
 - Expected size: about 10 GB of depth/normal maps at full resolution.
 - In the CUDA image, SIFT extraction and matching should also run on the GPU
   (pycolmap `Device.auto`). Matching took 698 s on CPU. Re-measure it.
+
+If splat training fails in the nerfstudio venv:
+- Likely suspects: gsplat kernels (they rebuild by JIT into `~/.cache` if
+  the prebuilt ones don't load), torch/torchvision versions, or an
+  `ns-train` CLI flag. `modelforge/splat.py:train_command` builds the
+  command.
+- Pins to adjust: `TORCH_VERSION`, `TORCHVISION_VERSION`, `TORCH_INDEX_URL`
+  and `GSPLAT_ARCH_LIST` in `docker/Dockerfile`.
 
 ## Layout
 
@@ -128,20 +169,22 @@ modelforge/
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
 │   ├── export/         # nerfstudio transforms.json, splat_to_enu
-│   ├── gui/            # viser app, Ingest tab, data layer
+│   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
+│   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
+│   ├── projects.py     # project folders: list / create / status / clean
 │   └── pipeline.py     # CLI driving all stages
 ├── resources/
 │   ├── colmap/      # git submodule: github.com/colmap/colmap (SfM / MVS, C++)
 │   ├── nerfstudio/  # git submodule: github.com/nerfstudio-project/nerfstudio (Python)
 │   └── pyceres/     # git submodule: github.com/cvg/pyceres (full Ceres bindings)
-├── docker/Dockerfile  # dev image (COLMAP + pycolmap + pyceres)
-├── compose.yaml       # `dev` service; compose.gpu.yaml = CUDA dev image + `nerfstudio` service
+├── docker/Dockerfile  # dev image (COLMAP + pycolmap + pyceres [+ nerfstudio venv when NERFSTUDIO=ON])
+├── compose.yaml       # `dev` service (CPU); compose.gpu.yaml = CUDA + nerfstudio, ports 8080 + 7007
 ├── scripts/dev        # run a command in the dev container (MODELFORGE_GPU=1: CUDA image)
-├── scripts/splat      # nerfstudio splatfacto train + export + ENU conversion
+├── scripts/splat      # wrapper: modelforge.splat in the CUDA container
 ├── scripts/process    # video -> extract -> sfm -> (GPU) dense + splat, end to end
 ├── README.md          # human quick start
-├── tests/             # pytest (26 tests): prior BA, robust priors, multi-source, dense chain, splat, GUI
+├── tests/             # pytest (28 tests): prior BA, robust priors, multi-source, projects, dense, splat, GUI
 ├── build/             # gitignored local build logs
 ├── .gitmodules
 └── CLAUDE.md
@@ -436,12 +479,25 @@ GUI), run in the CUDA container:
   1913×1074 images, 4 maps each, about 10 GB of depth/normal maps.
   `--dense-max-image-size 1200` shrinks both time and size.
 
-**Splat**: `scripts/splat PROJECT [ns-train args]`, on a host with an NVIDIA GPU.
-1. Trains `ns-train splatfacto` in the official
-   `ghcr.io/nerfstudio-project/nerfstudio:1.1.5` image (the `nerfstudio`
-   service in `compose.gpu.yaml`, run as the host UID, viewer on :7007).
-   splatfacto loads our `sparse_pc.ply` (`load_3D_points=True` in its method
-   config).
+**Splat**: there are two ways to run it. Both call `modelforge.splat.run`
+inside the CUDA dev container, where nerfstudio sits in its own venv at
+`/opt/nerfstudio`:
+- GUI: Run tab → "Gaussian splat" → method, iterations, then **Train + export
+  splat**. The progress bar shows the training step, there is a Stop button,
+  and the result is reloaded into the View tab.
+- Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [ns-train args]`.
+
+Why a separate venv: nerfstudio pins viser 1.0.0 and opencv 4.10 and wants
+numpy<2, which clash with `/opt/venv`. The two environments exchange only
+files. `splat.py` strips `VIRTUAL_ENV`/`PYTHONPATH` and puts
+`/opt/nerfstudio/bin` first on PATH for its subprocesses.
+
+Steps:
+1. Trains `ns-train splatfacto` with `--output-dir PROJECT/nerfstudio`; the
+   viewer is on :7007. `compose.gpu.yaml` publishes 7007 and sets
+   `shm_size: 8gb`. Progress comes from nerfstudio's table rows
+   ("12000 (40.00%) ..."); ANSI cursor escapes are stripped. splatfacto
+   loads our `sparse_pc.ply` (`load_3D_points=True` in its method config).
 2. Exports with `ns-export gaussian-splat` → `PROJECT/splat/splat.ply`, in
    nerfstudio's normalized frame.
 3. Converts with `python -m modelforge.export.splat_to_enu` →
@@ -449,6 +505,8 @@ GUI), run in the CUDA container:
    (x_ns = s·(R x + t)). Positions, log-scales and wxyz quaternions are mapped
    back, and the SH bands are rotated (degree ≤ 3, D_l by least squares over
    sampled directions).
+4. Stats go to `report.json["splat"]`: method, iterations, number of
+   Gaussians, times.
 
 Tests:
 - `tests/test_splat_to_enu.py` checks that positions, covariances and
@@ -461,8 +519,9 @@ Tests:
 
 ## GUI (M2, viser)
 
-`scripts/dev python -m modelforge.gui.app PROJECT [--port 8080]`, then open
-http://localhost:8080. compose publishes 8080. viser 1.1.1 and plotly 7.1.0 are
+`scripts/dev python -m modelforge.gui.app [PROJECT] [--root data] [--port 8080]`,
+then open http://localhost:8080. Without PROJECT it opens the newest project
+under `--root`. compose publishes 8080. viser 1.1.1 and plotly 7.1.0 are
 pinned in the image.
 
 Code layout:
@@ -470,6 +529,21 @@ Code layout:
   `sparse/round_N[_tri]`, `refined`) and thumbnails into numpy. Poses are
   world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
   scalar-first quaternion of R_wc).
+- `modelforge/gui/projects.py`: the **Projects** tab (first tab), built on
+  `modelforge/projects.py`.
+  - Lists project folders under the root: any folder with `ingest.json` or
+    `poses.json`.
+  - **Open** switches the whole GUI via `App.open_project`: it clears the
+    scene, reloads the Project, calls `IngestPanel.set_project`, and resets
+    the Run state/history/log. Switching is refused while a job runs.
+  - **Create** makes a new project, optionally copying the open project's
+    `ingest.json`.
+  - Status: sources, image count, stages done, and final vs. intermediate
+    files with their sizes.
+  - **Clean intermediates** needs a confirmation box. It deletes the
+    databases, `sparse/round_*`, the dense workspace (depth maps),
+    `nerfstudio/` runs, `splat/splat.ply` and `previous/`. It keeps the
+    images, sources and final results.
 - `modelforge/gui/ingest.py`: the **Ingest** tab (first tab when the
   project has no images yet). `python -m modelforge.gui.app data/new_site`
   works on a new or empty folder.
@@ -575,13 +649,18 @@ The image is defined in `docker/Dockerfile` and `compose.yaml`. Rebuild with
   "Migrating to a GPU machine".
 - `compose.gpu.yaml`:
   - Overrides `dev` with a CUDA build: `nvidia/cuda:12.8.1-devel-ubuntu24.04`,
-    `CUDA_ENABLED=ON`, `gpus: all`, image `modelforge-dev:cuda`. Use it with
-    `MODELFORGE_GPU=1 scripts/dev ...`. That image was built and validated
-    without a GPU: `has_cuda` is True and the tests pass.
-  - Adds the `nerfstudio` service (profile `nerfstudio`, only started by
-    `scripts/splat`). It uses its own official image, so nerfstudio is **not**
-    installed in the dev image.
-  - `build/nerfstudio-home` persists its caches.
+    `CUDA_ENABLED=ON`, `CUDA_ARCHITECTURES=75;80;86;89;90;120`,
+    `NERFSTUDIO=ON`, `gpus: all`, ports 7007, `shm_size: 8gb`, image
+    `modelforge-dev:cuda`. Use it with `MODELFORGE_GPU=1 scripts/dev ...`.
+  - `NERFSTUDIO=ON` adds `/opt/nerfstudio`: torch 2.7.1+cu128, gsplat 1.4.0
+    with kernels compiled at build time for `GSPLAT_ARCH_LIST`, and
+    nerfstudio from `resources/nerfstudio`. tiny-cuda-nn is not installed,
+    because splatfacto doesn't need it.
+  - There is no separate nerfstudio service or image any more, and no Docker
+    socket in the container. The user refused the socket as a containment
+    escape.
+  - The earlier CUDA image, without nerfstudio, was validated without a GPU:
+    `has_cuda` is True and the tests pass.
 
 Tests: `scripts/dev pytest -q tests`.
 
