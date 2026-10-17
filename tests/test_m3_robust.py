@@ -142,3 +142,31 @@ def test_relative_priors_enter_the_problem():
     model = robust.PriorModel()
     ba = refine.prior_ba(rec, priors, model, refine_intrinsics=False)
     assert ba["num_abs_priors"] == len(gt) and ba["num_rel_priors"] == len(gt) - 1
+
+
+def test_settle_rule():
+    """BA ends once no camera moved more than Settle.pos_m across the window; a slow creep that is
+    tiny per step but large across the window keeps it going."""
+    import pyceres
+
+    class Pose:
+        def __init__(self):
+            self.params = np.array([0, 0, 0, 1.0, 0, 0, 0])
+
+    class Summary:
+        cost = 1.0
+
+    poses = [Pose(), Pose()]
+    s = refine.Settle(pos_m=0.0005, window=10)
+    cb = refine._Progress(None, poses, (), s)
+    go = pyceres.CallbackReturnType.SOLVER_CONTINUE
+    for _ in range(30):  # creep 0.1 mm per iteration: 1 mm across the window
+        poses[1].params = poses[1].params + [0, 0, 0, 0, 1e-4, 0, 0]
+        assert cb(Summary()) == go
+    still = 0
+    while cb(Summary()) == go:  # still: the window's displacement drops below pos_m within one window
+        still += 1
+        assert still <= s.window
+    assert cb.settled and still >= 4  # not before 0.5 mm of creep has left the window
+    cb = refine._Progress(None, poses, (), None)  # settle=None never stops early
+    assert all(cb(Summary()) == go for _ in range(30))

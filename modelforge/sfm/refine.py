@@ -5,6 +5,9 @@ init:   cameras/rigs/frames/images from the COLMAP database, every frame registe
 rounds: triangulate with poses fixed (stock COLMAP point_triangulator path), then
         BA with free poses + 6-DoF covariance-weighted absolute pose priors;
         thresholds tighten each round because priors start ~100 px off.
+BA stops once the cameras have settled (Settle), not at Ceres' gradient tolerance: COLMAP's
+solver options have no function / parameter tolerance, and on these prior-anchored problems the
+cameras stop moving after ~10-80 iterations while Ceres runs hundreds more nudging points.
 """
 
 import os
@@ -26,6 +29,19 @@ class Round:
 
 
 DEFAULT_ROUNDS = (Round(40.0, 8.0, 5.0), Round(12.0, 2.0, 3.0), Round(4.0, 1.0, 2.0))
+
+
+@dataclass
+class Settle:
+    """BA is done when, over the last `window` iterations, no camera centre moved more than
+    `pos_m`, no camera rotated more than `rot_deg` and no focal length changed more than `focal_px`.
+    Displacement is measured across the whole window (not per step), so a slowly creeping camera
+    keeps the solver going. berlin_test (80 images): 834 -> ~125 iterations over 3 rounds, poses
+    within 0.5 mm / 0.001 deg of running to Ceres' convergence."""
+    pos_m: float = 0.0005
+    rot_deg: float = 0.001
+    focal_px: float = 0.01
+    window: int = 10
 
 
 def init_from_database(db_path, priors):
@@ -69,25 +85,47 @@ def triangulate(rec, db_path, image_path, out_dir, rnd):
 
 
 class _Progress(pyceres.IterationCallback):
-    def __init__(self, fn):
+    """Forwards iterations to `fn` and ends the solve once the cameras have settled."""
+
+    def __init__(self, fn, poses=(), cameras=(), settle=None):
         pyceres.IterationCallback.__init__(self)
         self.fn, self.costs = fn, []
+        self.poses, self.cameras, self.settle = list(poses), list(cameras), settle
+        self.history, self.settled = [], False
+
+    def _state(self):
+        P = np.array([p.params for p in self.poses]) if self.poses else np.zeros((0, 7))
+        C = np.array([center_of(p) for p in P]).reshape(-1, 3)
+        f = np.array([c.params[0] for c in self.cameras])
+        return C, P[:, :4].copy(), f
 
     def __call__(self, summary):
         self.costs.append(summary.cost)
         if self.fn:
             self.fn(summary)
+        s = self.settle
+        if s and self.poses:
+            self.history = (self.history + [self._state()])[-(s.window + 1):]
+            if len(self.history) > s.window:
+                (c0, q0, f0), (c1, q1, f1) = self.history[0], self.history[-1]
+                dpos = np.linalg.norm(c1 - c0, axis=1).max()
+                drot = np.degrees(2 * np.arccos(np.abs(np.sum(q0 * q1, 1)).clip(0, 1))).max()
+                dfoc = np.abs(f1 - f0).max() if len(f0) else 0.0
+                if dpos < s.pos_m and drot < s.rot_deg and dfoc < s.focal_px:
+                    self.settled = True
+                    return pyceres.CallbackReturnType.SOLVER_TERMINATE_SUCCESSFULLY
         return pyceres.CallbackReturnType.SOLVER_CONTINUE
 
 
 def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
-             refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True):
+             refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle()):
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
     model.use_relative, relative priors between time-consecutive images of one source (except
     model.rel_rejected). No gauge fixing: the priors pin position, rotation and
-    metric scale in ENU.
+    metric scale in ENU. `settle` (None: run to Ceres' own convergence) ends the solve once the
+    cameras stop moving.
     """
     from modelforge.sfm import robust
     model = model or robust.PriorModel(use_relative=False)
@@ -137,7 +175,8 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
             n_rel += 1
 
     solver_options = pyceres.SolverOptions(ba_options.ceres.create_solver_options(ba_config, problem))
-    progress = _Progress(on_iteration)
+    cameras = [rec.cameras[c] for c in sorted(rec.cameras)] if refine_intrinsics else []
+    progress = _Progress(on_iteration, poses.values(), cameras, settle)
     solver_options.callbacks = [progress]
     solver_options.update_state_every_iteration = True
     summary = pyceres.SolverSummary()
@@ -145,7 +184,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     pyceres.solve(solver_options, problem, summary)
     return {"iterations": len(progress.costs), "initial_cost": summary.initial_cost,
             "final_cost": summary.final_cost, "usable": summary.IsSolutionUsable(),
-            "termination": str(summary.termination_type).split(".")[-1],
+            "termination": "SETTLED" if progress.settled else str(summary.termination_type).split(".")[-1],
             "num_abs_priors": n_abs, "num_rel_priors": n_rel, "seconds": round(time.time() - t0, 1)}
 
 
