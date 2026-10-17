@@ -47,12 +47,13 @@ Open items, in priority order:
 
 ## Migrating to a GPU machine
 
-The repo has **no git remote** yet. Move it with a remote push, a
-`git bundle`, or by copying the folder. `data/` and `build/` are gitignored and
-must be copied separately.
+The code is on GitHub: `origin` = `git@github.com:klaxalk/modelforge.git`,
+branch `master`. `data/` and `build/` are gitignored and must be copied
+separately.
 
 1. Get the code:
-   - Clone (or unbundle), then run `git submodule update --init --recursive`.
+   - `git clone --recurse-submodules -b master git@github.com:klaxalk/modelforge.git`
+     (or `git submodule update --init --recursive` after a plain clone).
    - Pinned submodules: colmap `48af6d30`, nerfstudio `50e0e3c7` (v1.1.5+),
      pyceres `2eeeca7`. pyceres must stay on that commit, because v2.6 doesn't
      build with pybind11 3.1.
@@ -469,6 +470,6 @@ Tests: `scripts/dev pytest -q tests`.
 
 ## Conventions
 
-- Default branch is `main`, but work is currently on `master`.
+- Work is on `master`, which is the only branch on `origin` (GitHub).
 - Never commit large files. Frames, databases, sparse models and checkpoints go
   under `data/`.
