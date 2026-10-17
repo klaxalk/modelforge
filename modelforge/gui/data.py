@@ -202,3 +202,67 @@ class Project:
                     stats = {"observations": len(errs), "keypoints": len(image.points2D),
                              "median_err_px": float(np.median(errs)), "p90_err_px": float(np.percentile(errs, 90))}
         return img, stats
+
+
+# ---------------------------------------------------------------- dense / splat
+SH_C0 = 0.28209479177387814
+
+
+def dense_artifacts(path):
+    """Which dense / splat outputs exist in the project (paths, or None)."""
+    ws = os.path.join(path, "dense")
+    found = {"fused": None, "splat": None, "meshes": {}}
+    if os.path.exists(os.path.join(ws, "fused.ply")):
+        found["fused"] = os.path.join(ws, "fused.ply")
+    for method in ("delaunay", "poisson"):
+        for name in (f"preview-{method}.ply", f"meshed-{method}.ply"):  # prefer the simplified copy
+            p = os.path.join(ws, name)
+            if os.path.exists(p):
+                found["meshes"][method] = p
+                break
+    p = os.path.join(path, "splat", "splat_enu.ply")
+    if os.path.exists(p):
+        found["splat"] = p
+    return found
+
+
+def load_fused(ply_path, max_points=1_500_000, seed=0):
+    import plyfile
+    v = plyfile.PlyData.read(ply_path)["vertex"].data
+    idx = np.arange(len(v))
+    if len(v) > max_points:
+        idx = np.sort(np.random.default_rng(seed).choice(len(v), max_points, replace=False))
+    pts = np.stack([v["x"][idx], v["y"][idx], v["z"][idx]], -1).astype(np.float32)
+    names = v.dtype.names
+    if {"red", "green", "blue"} <= set(names):
+        cols = np.stack([v["red"][idx], v["green"][idx], v["blue"][idx]], -1).astype(np.uint8)
+    else:
+        cols = np.full((len(idx), 3), 200, np.uint8)
+    return pts, cols, len(v)
+
+
+def load_mesh(ply_path):
+    import trimesh
+    return trimesh.load(ply_path, process=False)
+
+
+def load_splat(ply_path, max_gaussians=1_000_000, seed=0):
+    """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays."""
+    import plyfile
+    v = plyfile.PlyData.read(ply_path)["vertex"].data
+    idx = np.arange(len(v))
+    if len(v) > max_gaussians:
+        idx = np.sort(np.random.default_rng(seed).choice(len(v), max_gaussians, replace=False))
+    v = v[idx]
+    centers = np.stack([v["x"], v["y"], v["z"]], -1).astype(np.float32)
+    q = np.stack([v[f"rot_{i}"] for i in range(4)], -1).astype(np.float64)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    w, x, y, z = q.T
+    R = np.stack([np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], -1),
+                  np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], -1),
+                  np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], -1)], 1)
+    s2 = np.exp(2 * np.stack([v[f"scale_{i}"] for i in range(3)], -1).astype(np.float64))
+    cov = np.einsum("nij,nj,nkj->nik", R, s2, R).astype(np.float32)
+    rgb = np.clip(0.5 + SH_C0 * np.stack([v[f"f_dc_{i}"] for i in range(3)], -1), 0, 1).astype(np.float32)
+    opacity = (1 / (1 + np.exp(-v["opacity"].astype(np.float64))))[:, None].astype(np.float32)
+    return centers, cov, rgb, opacity

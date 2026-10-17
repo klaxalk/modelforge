@@ -156,6 +156,10 @@ and GUI both call them, and progress events feed the GUI.
   control.
 - **M3, robustness.** B/δt, relative priors, prior-gated verification, and
   rejecting frames with bad priors.
+- **M5, products.** Dense mesh via COLMAP MVS on the refined poses
+  (undistort → PatchMatch [CUDA] → fusion → Delaunay/Poisson → texture), in the
+  pipeline and the GUI. Gaussian splat via nerfstudio splatfacto
+  (`scripts/splat`), converted back to ENU so the splat and mesh align.
 - **M4, accuracy.** Prior-guided epipolar matching, EIS warp (`pp_target` vs.
   `pp_current`), rolling shutter.
 

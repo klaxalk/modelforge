@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Train nerfstudio splatfacto on a modelforge project and export the splat in the
+# project's ENU frame (aligned with the refined cameras and the COLMAP dense mesh).
+#   scripts/splat data/berlin_3_1_frames [extra ns-train args, e.g. --max-num-iterations 15000]
+# Outputs: PROJECT/nerfstudio/ (training run), PROJECT/splat/splat.ply (nerfstudio frame),
+#          PROJECT/splat/splat_enu.ply (ENU). Viewer during training: http://localhost:7007
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ $# -ge 1 ]] || { echo "usage: $0 PROJECT [ns-train args...]" >&2; exit 2; }
+project="$(realpath --relative-to=. "$1")"  # same relative path inside both containers
+shift
+[[ -f "$project/transforms.json" ]] || { echo "$project/transforms.json missing: run the pipeline export first" >&2; exit 1; }
+compose=(env UID="$(id -u)" GID="$(id -g)" docker compose -f compose.yaml -f compose.gpu.yaml)
+out="$project/nerfstudio"
+mkdir -p build/nerfstudio-home  # created by us, not by docker as root
+
+"${compose[@]}" run --rm --service-ports nerfstudio \
+  ns-train splatfacto --data "$project" --output-dir "$out" --viewer.quit-on-train-completion True "$@"
+
+config="$(ls -t "$out"/*/splatfacto/*/config.yml | head -1)"
+run="$(dirname "$config")"
+"${compose[@]}" run --rm nerfstudio ns-export gaussian-splat --load-config "$config" --output-dir "$project/splat"
+scripts/dev python -m modelforge.export.splat_to_enu "$project/splat/splat.ply" \
+  "$run/dataparser_transforms.json" -o "$project/splat/splat_enu.ply"
+echo "splat (ENU): $project/splat/splat_enu.ply"

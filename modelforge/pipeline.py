@@ -6,10 +6,18 @@ Stages (artifacts in PROJECT/):
   match     database.db                    copy of features.db + matches + two-view geometry
   refine    sparse/round_N, sparse/refined prior-initialized triangulation + prior BA rounds
   export    transforms.json, sparse_pc.ply nerfstudio dataset
+Dense stages (modelforge.dense, COLMAP MVS on the refined poses; artifacts in PROJECT/dense/):
+  undistort images/, sparse/               PINHOLE workspace
+  stereo    stereo/{depth,normal}_maps     PatchMatch, needs CUDA (MODELFORGE_GPU=1)
+  fusion    fused.ply (+ .vis)
+  mesh      meshed-<method>.ply, preview-<method>.ply (simplified for the GUI)
+  texture   textured-<method>/mesh.ply + texture.png
 Every stage records its stats in PROJECT/report.json.
 
 Usage:
-    python -m modelforge.pipeline data/clip_frames [--stages pairs,match,refine,export]
+    python -m modelforge.pipeline data/clip_frames                  # sfm stages (default)
+    python -m modelforge.pipeline data/clip_frames --stages dense   # undistort .. texture
+    python -m modelforge.pipeline data/clip_frames --stages refine,export,dense --mesh poisson
 """
 
 import argparse
@@ -21,10 +29,14 @@ import time
 
 import pycolmap
 
+from modelforge import dense
 from modelforge.export import nerfstudio
 from modelforge.sfm import features, pairs, priors as priors_mod, refine, robust
 
-STAGES = ("features", "pairs", "match", "refine", "export")
+SFM_STAGES = ("features", "pairs", "match", "refine", "export")
+DENSE_STAGES = ("undistort", "stereo", "fusion", "mesh", "texture")
+STAGES = SFM_STAGES + DENSE_STAGES
+GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": STAGES}
 
 
 def log(msg):
@@ -143,18 +155,48 @@ def stage_export(project, report, rec=None):
     log(f"export: {path}")
 
 
+def stage_dense(project, report, stage, mesh_methods=("delaunay",), max_image_size=-1):
+    rep = report.data.get("dense", {})
+    if stage == "undistort":
+        rep = {"undistort": dense.undistort(project, max_image_size=max_image_size)}  # new workspace
+    elif stage == "stereo":
+        rep["stereo"] = dense.stereo(project, max_image_size=max_image_size)
+    elif stage == "fusion":
+        rep["fusion"] = dense.fusion(project)
+    elif stage == "mesh":
+        rep["mesh"] = {m: {**dense.mesh(project, m), "preview": dense.preview(project, m)} for m in mesh_methods}
+    elif stage == "texture":
+        rep["texture"] = {m: dense.texture(project, m) for m in mesh_methods}
+    report.set("dense", rep)
+    log(f"{stage}: {rep.get(stage)}")
+
+
+def expand_stages(spec):
+    out = []
+    for s in spec.split(","):
+        for stage in GROUPS.get(s, (s,)):
+            if stage not in out:
+                out.append(stage)
+    return [s for s in STAGES if s in out]  # canonical order
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
-    ap.add_argument("--stages", default=",".join(STAGES), help=f"comma-separated subset of {STAGES}")
+    ap.add_argument("--stages", default="sfm",
+                    help=f"comma-separated stages {STAGES} or groups {tuple(GROUPS)} (default: sfm)")
+    ap.add_argument("--mesh", default="delaunay", choices=dense.MESH_METHODS + ("both",),
+                    help="dense meshing method (default delaunay: keeps open surfaces)")
+    ap.add_argument("--dense-max-image-size", type=int, default=-1,
+                    help="downscale images for PatchMatch/fusion (-1 = full resolution)")
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
     ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
     args = ap.parse_args()
-    stages = args.stages.split(",")
-    unknown = set(stages) - set(STAGES)
+    unknown = [s for s in args.stages.split(",") if s not in STAGES and s not in GROUPS]
     if unknown:
         ap.error(f"unknown stages {unknown}")
+    stages = expand_stages(args.stages)
 
     report = Report(args.project)
     pri, meta = priors_mod.load(args.project)
@@ -171,6 +213,10 @@ def main():
         rec = stage_refine(args.project, report, pri, model=model)
     if "export" in stages:
         stage_export(args.project, report, rec)
+    methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)
+    for stage in DENSE_STAGES:
+        if stage in stages:
+            stage_dense(args.project, report, stage, methods, args.dense_max_image_size)
 
 
 if __name__ == "__main__":

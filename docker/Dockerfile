@@ -59,8 +59,8 @@ RUN --mount=type=cache,target=/ccache \
 # Fail the build early if the cross-module type sharing is broken.
 RUN python -c "import pyceres, pycolmap; print('pycolmap', pycolmap.__version__, 'pyceres', pyceres.__version__)"
 
-# Web GUI.
-RUN pip install --no-cache-dir "viser==1.1.1" "plotly==7.1.0"
+# Web GUI; mesh / splat PLY I/O.
+RUN pip install --no-cache-dir "viser==1.1.1" "plotly==7.1.0" "trimesh==5.1.0" "plyfile==1.1.5"
 
 # Run as the host user so files written to the bind-mounted repo are not root-owned.
 RUN (getent passwd ${UID} | cut -d: -f1 | xargs -r userdel -r) 2>/dev/null; \

@@ -29,18 +29,21 @@ modelforge/
 ├── data/            # Input footage and outputs. Contents are gitignored (only data/.gitignore is tracked)
 ├── docs/            # architecture.md (design + milestones), djmd_format.md
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
-│   └── dji/
-│       ├── djmd.py     # djmd track decoder → per-frame CSV (stdlib only)
-│       ├── srt.py      # SRT sidecar parser
-│       └── extract.py  # frame extraction with time-aligned 6-DoF pose priors
+│   ├── dji/            # djmd decoder, SRT parser, frame extraction with time-aligned priors
+│   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
+│   ├── export/         # nerfstudio transforms.json, splat_to_enu
+│   ├── gui/            # viser app + data layer
+│   ├── dense.py        # COLMAP MVS stages
+│   └── pipeline.py     # CLI driving all stages
 ├── resources/
 │   ├── colmap/      # git submodule: github.com/colmap/colmap (SfM / MVS, C++)
 │   ├── nerfstudio/  # git submodule: github.com/nerfstudio-project/nerfstudio (Python)
 │   └── pyceres/     # git submodule: github.com/cvg/pyceres (full Ceres bindings)
 ├── docker/Dockerfile  # dev image (COLMAP + pycolmap + pyceres)
-├── compose.yaml       # `dev` service; compose.gpu.yaml = CUDA override
-├── scripts/dev        # run a command in the dev container
-├── tests/             # pytest: M0 prior-BA check, GUI smoke test
+├── compose.yaml       # `dev` service; compose.gpu.yaml = CUDA dev image + `nerfstudio` service
+├── scripts/dev        # run a command in the dev container (MODELFORGE_GPU=1: CUDA image)
+├── scripts/splat      # nerfstudio splatfacto train + export + ENU conversion
+├── tests/             # pytest (19 tests): prior BA, robust priors, dense chain, splat, GUI
 ├── build/             # gitignored local build logs
 ├── .gitmodules
 └── CLAUDE.md
@@ -222,6 +225,59 @@ injected σ, a 3 m / 10° outlier is rejected and the image-only pose recovered
 to 0.03 units, a 2° boresight comes back within 0.11°, and δt = 300 ms comes
 back as 304 ms.
 
+## Dense mesh (COLMAP MVS) and Gaussian splat (nerfstudio)
+
+The end products are a **dense mesh** and a **Gaussian splat**, both in the
+project's ENU frame, so they line up with each other and with the refined
+cameras.
+
+**Dense** (`modelforge/dense.py`, pipeline stage group `dense`, Run tab in the
+GUI), run in the CUDA container:
+`MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline PROJECT --stages dense [--mesh delaunay|poisson|both] [--dense-max-image-size N]`
+
+| Stage | Output in `PROJECT/dense/` | Device |
+|---|---|---|
+| `undistort` | `images/`, `sparse/` (PINHOLE) | CPU (8 s for 300 images, 464 MB) |
+| `stereo` | `stereo/{depth,normal}_maps` (PatchMatch, 20 sources/view from the refined tracks) | **CUDA only**, clear error otherwise |
+| `fusion` | `fused.ply` + `fused.ply.vis` | CPU |
+| `mesh` | `meshed-<m>.ply`, `preview-<m>.ply` (≤300k faces, COLMAP `mesh_simplifier`, for the GUI) | CPU |
+| `texture` | `textured-<m>/mesh.ply` + `texture.png` (COLMAP `mesh_texturer`) | CPU |
+
+- **Delaunay** is the default. It is visibility-based, keeps open surfaces, and
+  runs through the `colmap` CLI because it has no pycolmap binding. Poisson
+  closes surfaces, and its trim step (10) deletes everything in sparse clouds.
+- Fusion picks overlapping images from the **sparse tracks**: with no shared
+  sparse points, nothing fuses. Fusion output type must be `"ply"` to get the
+  `.vis` file Delaunay needs.
+- A perfectly planar scene crashes Delaunay's graph cut (degenerate CGAL
+  triangulation). Real scenes are fine, and the synthetic test uses relief.
+- Untested here: PatchMatch on the real clip (no GPU). Expect a long run: 300 ×
+  1913×1074 images, 4 maps each, about 10 GB of depth/normal maps.
+  `--dense-max-image-size 1200` shrinks both time and size.
+
+**Splat**: `scripts/splat PROJECT [ns-train args]`, on a host with an NVIDIA GPU.
+1. Trains `ns-train splatfacto` in the official
+   `ghcr.io/nerfstudio-project/nerfstudio:1.1.5` image (the `nerfstudio`
+   service in `compose.gpu.yaml`, run as the host UID, viewer on :7007).
+   splatfacto loads our `sparse_pc.ply` (`load_3D_points=True` in its method
+   config).
+2. Exports with `ns-export gaussian-splat` → `PROJECT/splat/splat.ply`, in
+   nerfstudio's normalized frame.
+3. Converts with `python -m modelforge.export.splat_to_enu` →
+   `PROJECT/splat/splat_enu.ply`, using `dataparser_transforms.json`
+   (x_ns = s·(R x + t)). Positions, log-scales and wxyz quaternions are mapped
+   back, and the SH bands are rotated (degree ≤ 3, D_l by least squares over
+   sampled directions).
+
+Tests:
+- `tests/test_splat_to_enu.py` checks that positions, covariances and
+  view-dependent colour render identically.
+- `tests/test_dense_chain.py` runs exact depth/normal maps of a bumpy ground
+  through fusion (≤1.6 cm error), Delaunay (0.6 mm median), Poisson
+  (1.9 mm), texturing and preview.
+- `tests/test_gui_dense.py` covers the GUI layers and runs a dense stage from
+  the GUI.
+
 ## GUI (M2, viser)
 
 `scripts/dev python -m modelforge.gui.app PROJECT [--port 8080]`, then open
@@ -234,7 +290,10 @@ Code layout:
   world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
   scalar-first quaternion of R_wc).
 - `modelforge/gui/app.py`, with four tabs:
-  - **View**: snapshot picker and stats, including the calibrated prior model. Layers: points, cameras with
+  - **View**: snapshot picker and stats, including the calibrated prior model.
+    A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview
+    mesh and `splat_enu.ply` (viser gaussian splats), each enabled once its
+    file exists. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error, or
     time.
@@ -242,8 +301,9 @@ Code layout:
     residuals × gain in red, and unmatched keypoints in grey.
   - **Plots**: Plotly charts of deviation vs. video time and a point-error
     histogram.
-  - **Run**: pairs, match, refine (live), export, each run in a background
-    thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
+  - **Run**: pairs, match, refine (live), export, and the dense stages (a
+    "Run dense (all)" button plus one per stage, with a mesh-method picker),
+    each run in a background thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
     events move the existing frustums (throttled to 4 Hz), and each round
     reloads the snapshot.
 

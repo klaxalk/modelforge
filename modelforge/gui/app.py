@@ -15,7 +15,8 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import pipeline
+from modelforge import dense, pipeline
+from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 
 COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "uniform")
@@ -61,6 +62,7 @@ class App:
         self._build_gui()
         names = self.project.snapshot_names()
         self.load_snapshot("refined" if "refined" in names else names[-1])
+        self._refresh_dense()
         self.server.on_client_connect(self._on_connect)
 
     # ---------------------------------------------------------------- GUI
@@ -82,6 +84,14 @@ class App:
                 self.g_corr = gui.add_checkbox("Prior → refined", initial_value=True)
                 self.g_traj = gui.add_checkbox("Trajectories", initial_value=True)
                 self.g_scale = gui.add_slider("Camera size", min=0.2, max=5.0, step=0.1, initial_value=1.0)
+            with gui.add_folder("Dense / splat"):
+                self.g_dense_pts = gui.add_checkbox("Dense points", initial_value=False, disabled=True)
+                self.g_mesh = gui.add_dropdown("Mesh", options=("off",), initial_value="off", disabled=True)
+                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=False, disabled=True)
+                self.g_dense_md = gui.add_markdown("")
+                self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
+                self.g_mesh.on_update(lambda _: self._draw_mesh())
+                self.g_splat.on_update(lambda _: self._draw_splat())
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation")
             self.g_legend = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
@@ -108,6 +118,22 @@ class App:
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""))
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
+            with gui.add_folder("Dense (COLMAP MVS)"):
+                gui.add_markdown("PatchMatch stereo: " + ("CUDA available" if dense.has_cuda() else
+                                 "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
+                self.g_mesh_method = gui.add_dropdown("Mesh method", options=dense.MESH_METHODS + ("both",),
+                                                      initial_value="delaunay")
+                b = gui.add_button("Run dense (all)", disabled=not dense.has_cuda())
+                b.on_click(lambda _: self.run_stage("dense"))
+                self.g_buttons["dense"] = b
+                for stage in pipeline.DENSE_STAGES:
+                    b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()))
+                    b.on_click(lambda _, s=stage: self.run_stage(s))
+                    self.g_buttons[stage] = b
+            with gui.add_folder("Gaussian splat (nerfstudio)", expand_by_default=False):
+                gui.add_markdown("Train on the host: `scripts/splat <project>` (nerfstudio container, GPU). "
+                                 "It writes `splat/splat_enu.ply`, aligned with the mesh.")
+                gui.add_button("Reload dense / splat").on_click(lambda _: self._refresh_dense())
             self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
             self.g_status = gui.add_markdown("idle")
 
@@ -335,6 +361,16 @@ class App:
                 pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
             elif stage == "export":
                 pipeline.stage_export(project, report)
+            elif stage == "dense" or stage in pipeline.DENSE_STAGES:
+                seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
+                m = self.g_mesh_method.value
+                methods = dense.MESH_METHODS if m == "both" else (m,)
+                self._ticker(stage, t0)
+                for k, st in enumerate(seq):
+                    self.g_progress.value = 100.0 * k / len(seq)
+                    self._stage_label = st
+                    pipeline.stage_dense(project, report, st, methods)
+                self._refresh_dense()
             self.g_status.content = f"**{stage}** done in {time.time() - t0:.0f} s"
             self.refresh_snapshot_list(select="refined" if stage == "refine" else None)
         except Exception as e:  # surface failures in the GUI instead of killing the thread silently
@@ -347,9 +383,11 @@ class App:
             self.g_progress.visible = False
 
     def _ticker(self, stage, t0):
+        self._stage_label = stage
+
         def tick():
             while self.running:
-                self.g_status.content = f"running **{stage}** … {time.time() - t0:.0f} s"
+                self.g_status.content = f"running **{self._stage_label}** … {time.time() - t0:.0f} s"
                 time.sleep(1.0)
         threading.Thread(target=tick, daemon=True).start()
 
@@ -385,6 +423,47 @@ class App:
                 h.position = cams.centers[i]
                 h.wxyz = cams.wxyz(i)
         self._draw_lines(cams)
+
+    # ------------------------------------------------------------- dense / splat
+    def _refresh_dense(self):
+        self.dense = gdata.dense_artifacts(self.project.path)
+        meshes = tuple(self.dense["meshes"])
+        self.g_dense_pts.disabled = self.dense["fused"] is None
+        self.g_splat.disabled = self.dense["splat"] is None
+        self.g_mesh.options = ("off",) + meshes
+        self.g_mesh.disabled = not meshes
+        have = [k for k, v in (("dense points", self.dense["fused"]), ("splat", self.dense["splat"])) if v] + \
+            [f"mesh ({m})" for m in meshes]
+        self.g_dense_md.content = "available: " + (", ".join(have) if have else "nothing yet (Run tab)")
+        self._draw_dense_points()
+        self._draw_mesh()
+        self._draw_splat()
+
+    def _draw_dense_points(self):
+        if self.g_dense_pts.value and self.dense["fused"]:
+            pts, cols, n = gdata.load_fused(self.dense["fused"])
+            self.server.scene.add_point_cloud("/dense/points", points=pts, colors=cols,
+                                              point_size=self.g_point_size.value * 0.5, precision="float32")
+            self.g_dense_md.content = f"dense points: {len(pts):,} of {n:,} shown"
+        else:
+            self.server.scene.remove_by_name("/dense/points")
+
+    def _draw_mesh(self):
+        method = self.g_mesh.value
+        if method != "off" and method in self.dense["meshes"]:
+            mesh = gdata.load_mesh(self.dense["meshes"][method])
+            self.server.scene.add_mesh_trimesh("/dense/mesh", mesh)
+            self.g_dense_md.content = f"mesh ({method}): {len(mesh.faces):,} faces"
+        else:
+            self.server.scene.remove_by_name("/dense/mesh")
+
+    def _draw_splat(self):
+        if self.g_splat.value and self.dense["splat"]:
+            c, cov, rgb, op = gdata.load_splat(self.dense["splat"])
+            self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
+            self.g_dense_md.content = f"splat: {len(c):,} gaussians"
+        else:
+            self.server.scene.remove_by_name("/dense/splat")
 
     def serve_forever(self):
         while True:
