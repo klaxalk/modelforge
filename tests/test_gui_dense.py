@@ -14,9 +14,10 @@ from modelforge import dense
 from tests.test_dense_chain import make_workspace
 from tests.test_splat_to_enu import make_splat
 
-REAL = os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames")
+REAL = os.environ.get("MODELFORGE_TEST_PROJECT",  # any refined project
+                      os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames"))
 pytestmark = pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "images.bin")),
-                                reason="needs a refined project in data/berlin_3_1_frames")
+                                reason="needs a refined project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
 
 
 def free_port():

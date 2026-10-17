@@ -10,7 +10,8 @@ import pytest
 from modelforge import projects
 from modelforge.dji import ingest
 
-REAL = os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames")
+REAL = os.environ.get("MODELFORGE_TEST_PROJECT",  # any refined project
+                      os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames"))
 
 
 def touch(path, nbytes=10):
@@ -71,7 +72,7 @@ def free_port():
 
 
 @pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "images.bin")),
-                    reason="needs a refined project in data/berlin_3_1_frames")
+                    reason="needs a refined project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
 def test_gui_switches_projects(tmp_path):
     from modelforge.gui.app import App
     root = str(tmp_path)
@@ -91,8 +92,9 @@ def test_gui_switches_projects(tmp_path):
         app.projects.g_list.value = "real"
         app.projects.open_selected()
         assert app.project is not None and app.snap.name == "refined"
-        assert len(app.cam_handles) == len(app.project.names) == 300
-        assert "300 images" in app.g_header.content
+        n = len(os.listdir(os.path.join(REAL, "images")))
+        assert len(app.cam_handles) == len(app.project.names) == n
+        assert f"{n} images" in app.g_header.content
 
         app.open_project(os.path.join(root, "fresh"))
         assert app.project is None and not app.cam_handles and "no images yet" in app.g_header.content

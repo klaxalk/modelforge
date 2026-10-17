@@ -72,8 +72,11 @@ Still untested on the GPU:
   images saves only 31%, and COLMAP is a Release build, so most of the cost is
   fixed per view and its cause is unknown. Investigate before a full-clip,
   full-resolution dense run (300 views would take hours).
-- The GUI on the GPU: splat from the Run tab, and the View tab overlay
-  (checked numerically only).
+- The GUI on the GPU: the GUI tests pass on `berlin_test`, and the Run tab
+  detects CUDA + nerfstudio. A Run-tab check (`build/gui_gpu_check.py`,
+  gitignored: dense at 640, splat Stop, splat run) was stopped during stereo,
+  so a complete dense run, splat and Stop from the GUI and the View overlay
+  are unchecked. `data/berlin_test/dense/` is incomplete since then.
 - The full test suite, and the GUI tests that need `berlin_3_1_frames` (not
   copied to this machine; rebuild it with extract + SfM).
 
@@ -604,7 +607,8 @@ Code layout:
       a finished job never shows "running".
     - Every widget has a hover `hint`.
     - Plus the dense stages (a
-    "Run dense (all)" button plus one per stage, with a mesh-method picker),
+    "Run dense (all)" button plus one per stage, with a mesh-method picker
+    and a max-image-size picker: full / 2000 / 1200 / 640 px),
     each run in a background thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
     events move the existing frustums (throttled to 4 Hz), and each round
     reloads the snapshot.
@@ -621,7 +625,9 @@ Things to know:
   units.
 - Tests:
   - `tests/test_gui_smoke.py` runs the app logic headlessly on
-    `data/berlin_3_1_frames` (skipped if absent).
+    `data/berlin_3_1_frames` (skipped if absent). It, `test_gui_dense.py` and
+    `test_projects.py` take any refined project from `MODELFORGE_TEST_PROJECT`
+    (e.g. `data/berlin_test`).
   - `tests/test_gui_ingest.py` goes empty project → two pieces → plan →
     preview → extract → features/pairs.
 

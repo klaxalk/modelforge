@@ -6,9 +6,10 @@ import socket
 import numpy as np
 import pytest
 
-PROJECT = os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames")
+PROJECT = os.environ.get("MODELFORGE_TEST_PROJECT",  # any refined project
+                         os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1_frames"))
 pytestmark = pytest.mark.skipif(not os.path.exists(os.path.join(PROJECT, "sparse", "refined", "images.bin")),
-                                reason="needs a refined project in data/berlin_3_1_frames")
+                                reason="needs a refined project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
 
 
 def free_port():
@@ -41,7 +42,7 @@ def test_snapshots_and_color_modes(app):
 
 def test_inspect(app):
     app.load_snapshot("refined")
-    app.select(150)
+    app.select(len(app.project.names) // 2)
     assert app.g_image.image.shape[1] == 960
     assert "keypoints observed" in app.g_inspect_md.content
 

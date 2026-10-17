@@ -23,6 +23,8 @@ from modelforge.gui.data import Project
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 
+DENSE_SIZES = {"full": -1, "2000 px": 2000, "1200 px": 1200, "640 px (quick)": 640}  # -> max_image_size
+
 STAGE_HINTS = {
     "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
                 "camera). A few minutes on CPU.",
@@ -198,6 +200,10 @@ class App:
                     "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
                     hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
                          "closes holes and may balloon over open areas.")
+                self.g_dense_size = gui.add_dropdown(
+                    "Max image size", options=tuple(DENSE_SIZES), initial_value="full",
+                    hint="Longest image side for undistort + stereo (applied when undistort runs). Smaller is "
+                         "much faster and smaller on disk, with a coarser mesh; 640 is a quick check.")
                 b = gui.add_button("Run dense (all)", disabled=not dense.has_cuda(),
                                    hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
                                         "Needs CUDA; long (hours for 300 full-res images).")
@@ -561,7 +567,7 @@ class App:
                     self._run_splat(project)
                     report = pipeline.Report(project)  # splat.run wrote its stats
                 else:
-                    pipeline.stage_dense(project, report, st, methods)
+                    pipeline.stage_dense(project, report, st, methods, DENSE_SIZES[self.g_dense_size.value])
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
