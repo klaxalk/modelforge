@@ -19,20 +19,23 @@ sharpest frame in a window around each target is kept.
   time: s = pts.
 The step is --spacing X (m or s), or S_total / --num-images N.
 
+This module holds the per-video machinery; modelforge.dji.ingest combines one or more
+videos (each with a time range) into one project.
+
 Outputs (in OUT/):
-  images/frame_NNNNN.jpg  selected frames, EXIF GPS = aligned prior
-  poses.json              per-image priors + conventions + alignment + sampling report
-  poses.csv               same, flat
+  images/<video>_NNNNN.jpg  selected frames (NNNNN = video frame), EXIF GPS = aligned prior
+  poses.json                per-image priors + sources + conventions + alignment + sampling report
+  poses.csv                 same, flat
+  ingest.json               the sources + settings used (editable in the GUI Ingest tab)
 
 Usage:
     python -m modelforge.dji.extract data/clip.MP4 -o data/clip_frames --num-images 300
+    python -m modelforge.dji.extract data/a.MP4 data/b.MP4 -o data/site --num-images 500
 """
 
 import argparse
-import csv
 import json
 import math
-import os
 import subprocess
 import sys
 
@@ -40,8 +43,6 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from modelforge.dji.djmd import decode
-from modelforge.dji.srt import parse_srt
 
 DEFAULT_LEAD_FRAMES = 20.7  # measured on DJI NEO2, docs/djmd_format.md
 SAMPLE_PERIOD_FRAMES = 3  # aircraft and gimbal records update at 10 Hz on 29.97 fps video
@@ -333,22 +334,28 @@ def select_sharpest(mp4, windows, n_frames):
 
 
 def main():
+    from modelforge.dji import ingest
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("video")
-    ap.add_argument("-o", "--output", required=True, help="output directory")
+    ap.add_argument("videos", nargs="*", help="one or more DJI videos (or --plan)")
+    ap.add_argument("-o", "--output", required=True, help="project directory")
+    ap.add_argument("--plan", help="ingest.json with sources + settings (as written by the GUI); "
+                                   "replaces the videos and sampling options")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="re-extract into a project that has images (old outputs move to previous/)")
     ap.add_argument("--sampling", choices=("distance", "time"), default="distance",
                     help="sampling curve: travelled distance + rotation credit (default), or video time")
     amount = ap.add_mutually_exclusive_group()
-    amount.add_argument("--num-images", type=int, default=300, help="number of images to export (default 300)")
+    amount.add_argument("--num-images", type=int, default=300,
+                        help="number of images over all videos (default 300)")
     amount.add_argument("--spacing", type=float, help="step along the curve instead: meters (distance) or seconds (time)")
     ap.add_argument("--rot-weight", type=float,
                     help="distance mode: meters credited per degree of view rotation "
                          "(default: median look-at depth * pi/180; 0 = pure distance)")
     ap.add_argument("--window", type=float, default=0.5,
                     help="fraction of the spacing searched for the sharpest frame (default 0.5)")
-    ap.add_argument("--start", type=float, default=0.0, help="start time [s]")
-    ap.add_argument("--end", type=float, default=float("inf"), help="end time [s]")
-    ap.add_argument("--srt", help="SRT sidecar (default: next to the video)")
+    ap.add_argument("--start", type=float, default=0.0, help="start time [s], applied to every video")
+    ap.add_argument("--end", type=float, help="end time [s], applied to every video")
+    ap.add_argument("--srt", help="SRT sidecar (single video only; default: next to the video)")
     ap.add_argument("--lead", type=float, help="telemetry lead [frames]; skips estimation")
     ap.add_argument("--yaw-source", choices=("aircraft", "gimbal"), default="aircraft",
                     help="camera heading source (default aircraft). The NEO2 gimbal has no yaw axis; its "
@@ -357,92 +364,23 @@ def main():
     ap.add_argument("--quality", type=int, default=95, help="JPEG quality")
     args = ap.parse_args()
 
-    meta = decode(args.video)
-    n = len(meta)
-    aircraft, gimbal = build_streams(meta)
-
-    srt_path = args.srt or next((os.path.splitext(args.video)[0] + e for e in (".SRT", ".srt")
-                                 if os.path.exists(os.path.splitext(args.video)[0] + e)), None)
-    srt = parse_srt(srt_path) if srt_path else None
-
-    if args.lead is not None:
-        align = {"method": "manual", "lead_frames": args.lead}
+    if args.plan:
+        d = json.load(open(args.plan))
+        sources = [ingest.Source(**x) for x in d["sources"]]
+        settings = ingest.Settings(**d.get("settings", {}))
     else:
-        align = (estimate_lead_srt(srt, gimbal, n) if srt else None) \
-            or estimate_lead_flow(args.video, gimbal, n) \
-            or {"method": "default", "lead_frames": DEFAULT_LEAD_FRAMES}
-    lead = align["lead_frames"]
-    align["lead_s"] = round(lead / 29.97, 3)
-    print(f"telemetry lead: {lead} frames ({align['lead_s']} s) via {align['method']}", file=sys.stderr)
-
-    pts = np.array([m.pts for m in meta])
-    valid = (np.arange(n) - lead >= 0) & (pts >= args.start) & (pts <= args.end)
-
-    s, sampling = sampling_curve(args.sampling, pts, aircraft, gimbal, lead, args.yaw_source, valid,
-                                 args.rot_weight)
-    windows, plan = plan_windows(s, valid, args.num_images if args.spacing is None else None,
-                                 args.spacing, args.window)
-    sampling.update(plan)
-    print(f"sampling: {sampling}", file=sys.stderr)
-
-    os.makedirs(os.path.join(args.output, "images"), exist_ok=True)
-    origin = None
-    records = []
-    for k, rgb, sharp in select_sharpest(args.video, windows, n):
-        a = dict(zip(AIRCRAFT_COLS, aircraft(k - lead)[0]))
-        g = dict(zip(GIMBAL_COLS, gimbal(k - lead)[0]))
-        if origin is None:
-            origin = (a["lat"], a["lon"], a["rel_alt_m"])
-        enu = ecef_to_enu(lla_to_ecef(a["lat"], a["lon"], a["rel_alt_m"]), origin)
-
-        yaw = g["gimbal_yaw_deg"] if args.yaw_source == "gimbal" else a["ac_yaw_deg"]
-        pitch, roll = g["gimbal_pitch_deg"], g["gimbal_roll_deg"]
-        r_world_cam = R_ENU_NED @ r_ned_body(yaw, pitch, roll) @ R_BODY_CAM
-        r_cam_world = r_world_cam.T
-
-        name = f"frame_{k:05d}.jpg"
-        Image.fromarray(rgb).save(os.path.join(args.output, "images", name), quality=args.quality,
-                                  exif=make_exif(a["lat"], a["lon"], a["rel_alt_m"]))
-        records.append({
-            "image": name, "frame": k, "pts": float(pts[k]), "s": float(s[k]), "sharpness": round(sharp, 2),
-            **{c: float(a[c]) for c in AIRCRAFT_COLS}, **{c: float(g[c]) for c in GIMBAL_COLS},
-            "cam_yaw_deg": float(yaw), "cam_pitch_deg": float(pitch), "cam_roll_deg": float(roll),
-            "enu_x": float(enu[0]), "enu_y": float(enu[1]), "enu_z": float(enu[2]),
-            "q_world_from_cam": [float(x) for x in rot_to_quat(r_world_cam)],
-            "colmap_qvec": [float(x) for x in rot_to_quat(r_cam_world)],
-            "colmap_tvec": [float(x) for x in -r_cam_world @ enu],
-        })
-        if len(records) % 50 == 0:
-            print(f"{len(records)} frames written (t={pts[k]:.1f}s)", file=sys.stderr)
-
-    out = {
-        "source": os.path.abspath(args.video),
-        "srt": os.path.abspath(srt_path) if srt_path else None,
-        "alignment": align,
-        "yaw_source": args.yaw_source,
-        "sampling": sampling,
-        "enu_origin_lla": origin,
-        "conventions": {
-            "world": "local ENU (x east, y north, z up) [m], origin = first image; z from rel_alt (above takeoff)",
-            "camera": "OpenCV (x right, y down, z forward)",
-            "attitude": "NED yaw-pitch-roll (ZYX) [deg]; cam_yaw from yaw_source, cam_pitch/roll from the "
-                        "earth-stabilized gimbal; cam_pitch < 0 looks down",
-            "q_world_from_cam": "(w,x,y,z), rotates camera-frame vectors into ENU",
-            "colmap_qvec_tvec": "cam_from_world, as in COLMAP images.txt",
-            "exif_gps_altitude": "rel_alt [m above takeoff]; local by design",
-            "telemetry": "every value is resampled at (frame - lead) to match the image content",
-        },
-        "images": records,
-    }
-    json.dump(out, open(os.path.join(args.output, "poses.json"), "w"), indent=1)
-    with open(os.path.join(args.output, "poses.csv"), "w", newline="") as f:
-        flat = [{k: (" ".join(f"{x:.9g}" for x in v) if isinstance(v, list) else v) for k, v in r.items()}
-                for r in records]
-        if flat:
-            w = csv.DictWriter(f, fieldnames=list(flat[0]))
-            w.writeheader()
-            w.writerows(flat)
-    print(f"wrote {len(records)} images + poses to {args.output}", file=sys.stderr)
+        if not args.videos:
+            ap.error("give at least one video, or --plan")
+        if args.srt and len(args.videos) > 1:
+            ap.error("--srt needs a single video")
+        sources = [ingest.Source(v, args.start, args.end, lead=args.lead, srt=args.srt) for v in args.videos]
+        settings = ingest.Settings(args.sampling, args.num_images, args.spacing, args.rot_weight, args.window,
+                                   args.yaw_source, args.quality)
+    try:
+        ingest.run(args.output, sources, settings, overwrite=args.overwrite,
+                   log=lambda m: print(m, file=sys.stderr, flush=True))
+    except (FileExistsError, ValueError) as e:
+        sys.exit(f"error: {e}")
 
 
 if __name__ == "__main__":

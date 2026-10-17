@@ -56,11 +56,23 @@ export   → nerfstudio transforms.json + sparse_pc.ply
 
 ### Ingest (implemented)
 
-- Decodes djmd and estimates the telemetry lead (about 0.72 s on NEO2).
+- Decodes djmd and estimates the telemetry lead (about 0.72 s on NEO2), per
+  video.
 - Rebuilds the 10 Hz streams and reads them at `frame − lead`.
 - Samples frames along ds = |v|·dt + w·Δθ, with N images as the user's input.
+- **Several sources per project.** A source is a video plus a time range,
+  saved in `ingest.json`.
+  - All sources share one spacing and one ENU frame. The reference is the
+    chronologically first source. Other flights are lifted by their
+    takeoff-altitude difference.
+  - Images carry a `source` index. Relative priors and time-neighbour pairs
+    stay within a source.
+  - Refinement estimates a position offset per source, bootstrapped from
+    cross-source matches whose points were triangulated twice.
 - Outputs JPEGs with EXIF GPS, plus `poses.json` (ENU, cam rotation, COLMAP
   qvec/tvec).
+- GUI Ingest tab: pick videos and ranges, preview frames and telemetry, see
+  the planned images, extract.
 - See `CLAUDE.md` and `djmd_format.md`.
 
 ### Refinement cost

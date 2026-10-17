@@ -85,9 +85,13 @@ class Project:
     def __init__(self, path, thumb_width=192):
         self.path = path
         self.priors, self.meta = priors_mod.load(path)
-        self.names = sorted(self.priors, key=lambda n: self.priors[n].frame)
+        self.names = priors_mod.by_order(self.priors)
         self.index = {n: i for i, n in enumerate(self.names)}
-        self.pts = np.array([self.priors[n].pts for n in self.names])
+        self.pts = np.array([self.priors[n].pts for n in self.names])  # per video
+        self.time = np.array([self.priors[n].time for n in self.names])  # project timeline
+        self.source = np.array([self.priors[n].source for n in self.names])
+        self.source_names = [s.get("prefix", f"source {k}") for k, s in enumerate(self.meta.get("sources", []))] \
+            or [os.path.splitext(os.path.basename(self.meta.get("source", "video")))[0]]
         self.thumb_width = thumb_width
         self._thumbs = {}
         n = len(self.names)

@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
 done
 project="$(dirname "$video")/$(basename "${video%.*}")_frames"
 
-scripts/dev python -m modelforge.dji.extract "$video" -o "$project" --num-images "$num_images"
+scripts/dev python -m modelforge.dji.extract "$video" -o "$project" --num-images "$num_images" --overwrite
 scripts/dev python -m modelforge.pipeline "$project"  # features, pairs, match, refine, export
 
 if nvidia-smi -L >/dev/null 2>&1; then

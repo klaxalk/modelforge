@@ -85,7 +85,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
-    model.use_relative, relative priors between time-consecutive images (except
+    model.use_relative, relative priors between time-consecutive images of one source (except
     model.rel_rejected). No gauge fixing: the priors pin position, rotation and
     metric scale in ENU.
     """
@@ -120,8 +120,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
         problem.add_residual_block(cost, prior_loss, [pose.params])
         n_abs += 1
     if model.use_relative and relative:
-        names = sorted(poses, key=lambda n: priors[n].frame)
-        for a, b in robust.consecutive_pairs(names):
+        for a, b in robust.consecutive_pairs(priors, poses):
             if (a, b) in model.rel_rejected:
                 continue
             R, t = robust.relative_prior(priors[a], priors[b])

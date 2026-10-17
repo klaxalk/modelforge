@@ -17,6 +17,8 @@ After each BA the residuals are computed exactly as the Ceres functors define th
              whitened squared norm matches chi2_3's median; clamped per round and
              floored, because the poses also feel the priors (no spiral to zero);
   flag       priors beyond chi2_6 at `outlier_quantile` lose their term next round;
+Multi-video projects also get a position offset per source (update_source_offsets),
+estimated after every round's BA, starting with round 0.
 """
 
 import copy
@@ -24,7 +26,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from modelforge.sfm.priors import Prior, PriorSigmas, rot_to_quat_xyzw  # noqa: F401 (re-export)
+from modelforge.sfm.priors import Prior, PriorSigmas, by_order, rot_to_quat_xyzw, same_source_consecutive  # noqa: F401
 
 CHI2_3_MEDIAN = 2.3660
 CHI2_6 = {0.99: 16.812, 0.999: 22.458}
@@ -78,6 +80,8 @@ class PriorModel:
     use_relative: bool = True
     calibrate: bool = True
     estimate_systematic: bool = True
+    estimate_source_offsets: bool = True  # multi-video projects: per-source position offset
+    source_offsets: dict = field(default_factory=dict)  # source -> ENU offset [m] added to its priors
     boresight: np.ndarray = field(default_factory=lambda: np.zeros(3))  # rad, camera frame
     dt: float = 0.0  # s
     abs_rejected: set = field(default_factory=set)  # image names
@@ -95,22 +99,25 @@ class PriorModel:
                 "boresight_deg": np.round(np.degrees(self.boresight), 3).tolist(),
                 "boresight_norm_deg": round(float(np.degrees(np.linalg.norm(self.boresight))), 3),
                 "dt_ms": round(self.dt * 1000, 1),
+                "source_offsets_m": {str(k): np.round(v, 3).tolist() for k, v in sorted(self.source_offsets.items())},
                 "abs_rejected": sorted(self.abs_rejected), "rel_rejected": len(self.rel_rejected)}
 
 
 def corrected_priors(priors, model):
-    """Priors with the systematic corrections (boresight, time offset) applied."""
+    """Priors with the systematic corrections (boresight, time offset, source offsets) applied."""
     B = exp_so3(model.boresight)
     out = {}
     for name, p in priors.items():
         R = B @ p.R_cw
         C = p.center + (p.velocity if p.velocity is not None else 0.0) * model.dt
-        out[name] = Prior.from_pose(p.name, p.frame, p.pts, R, C, p.velocity)
+        C = C + model.source_offsets.get(p.source, 0.0)
+        out[name] = Prior.from_pose(p.name, p.frame, p.pts, R, C, p.velocity, p.source, p.order, p.time)
     return out
 
 
-def consecutive_pairs(names_by_time):
-    return list(zip(names_by_time[:-1], names_by_time[1:]))
+def consecutive_pairs(priors, names):
+    """Relative-prior pairs: time-consecutive images of the same source."""
+    return same_source_consecutive(priors, names)
 
 
 def relative_prior(pi, pj):
@@ -148,8 +155,7 @@ def residuals(rec, priors, model):
         C = -R.T @ t
         abs_res[n] = (log_so3(R @ p.R_cw.T), R @ (p.center - C), p.covariance(model.abs_sigmas))
     rel_res = {}
-    names = sorted(poses, key=lambda n: priors[n].frame)
-    for a, b in consecutive_pairs(names):
+    for a, b in consecutive_pairs(priors, poses):
         Ri, ti = poses[a]
         Rj, tj = poses[b]
         Rp, tp = relative_prior(priors[a], priors[b])
@@ -176,6 +182,7 @@ def _estimate_systematic(model, rec, priors_raw):
     V = np.array([priors_raw[n].velocity for n in names])
     # world-frame position error C_param - C_prior = -R^T r_pos
     D = np.array([-_pose(rec, rec.find_image_with_name(n))[0].T @ raw_abs[n][1] for n in names])
+    D -= np.array([model.source_offsets.get(priors_raw[n].source, np.zeros(3)) for n in names])
     keep = np.ones(len(names), bool)
     for _ in range(2):  # fit, drop the worst 20 %, refit
         v, d = V[keep].ravel(), D[keep].ravel()
@@ -228,6 +235,138 @@ def update(model, rec, priors_raw):
     rep["rel_rejected"] = len(model.rel_rejected)
     rep["model"] = model.summary()
     return rep
+
+
+# --- multi-video: per-source position offsets ----------------------------------------
+# Each flight has its own GNSS bias (~1-3 m) and possibly takeoff-height error, so the
+# videos' priors disagree by a near-constant shift. Before the shift is known, each video
+# triangulates its own copy of the shared scene ("split" points); once corrected, the
+# tracks merge and the remaining shift shows up in the per-source prior residuals.
+
+def _point_ids(image):
+    return np.array([p.point3D_id if p.has_point3D() else -1 for p in image.points2D], np.int64)
+
+
+def split_point_edges(rec, priors, db_path):
+    """Per source pair (a, b), a < b: X_a - X_b over verified cross-source matches whose
+    keypoints have different 3D points (n_split), and the count already merged."""
+    import pycolmap
+    reg = {i: rec.image(i) for i in rec.reg_image_ids()}
+    src = {i: priors[im.name].source for i, im in reg.items() if im.name in priors}
+    ids, xyz = {}, {pid: p.xyz for pid, p in rec.points3D.items()}
+    db = pycolmap.Database.open(db_path)
+    pair_ids, geoms = db.read_two_view_geometries()
+    db.close()
+    edges = {}
+    for pid, g in zip(pair_ids, geoms):
+        i1, i2 = pycolmap.pair_id_to_image_pair(pid)
+        if i1 not in src or i2 not in src or src[i1] == src[i2]:
+            continue
+        m = np.asarray(g.inlier_matches)
+        if not len(m):
+            continue
+        for i in (i1, i2):
+            if i not in ids:
+                ids[i] = _point_ids(reg[i])
+        p1, p2 = ids[i1][m[:, 0]], ids[i2][m[:, 1]]
+        both = (p1 >= 0) & (p2 >= 0)
+        if src[i1] > src[i2]:
+            i1, i2, p1, p2 = i2, i1, p2, p1
+        e = edges.setdefault((src[i1], src[i2]), {"diffs": [], "merged": 0})
+        e["merged"] += int(np.sum(both & (p1 == p2)))
+        split = both & (p1 != p2)
+        e["diffs"] += [xyz[a] - xyz[b] for a, b in zip(p1[split], p2[split])]
+    return {k: {"n_split": len(v["diffs"]), "merged": v["merged"],
+                "median": np.median(np.array(v["diffs"]), axis=0) if v["diffs"] else np.zeros(3)}
+            for k, v in edges.items()}
+
+
+def _solve_offsets(edges, ref):
+    """Least squares o_b - o_a = median(X_a - X_b) on the source graph, o_ref = 0;
+    sources not connected to ref get no increment."""
+    connected, grow = {ref}, True
+    while grow:
+        grow = False
+        for a, b in edges:
+            if (a in connected) != (b in connected):
+                connected |= {a, b}
+                grow = True
+    unknown = sorted(connected - {ref})
+    if not unknown:
+        return {}
+    col = {s: k for k, s in enumerate(unknown)}
+    rows, rhs = [], []
+    for (a, b), e in edges.items():
+        if a not in connected or b not in connected:
+            continue
+        w = np.sqrt(e["n_split"])
+        row = np.zeros(len(unknown))
+        if b in col:
+            row[col[b]] += w
+        if a in col:
+            row[col[a]] -= w
+        rows.append(row)
+        rhs.append(w * e["median"])
+    x = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)[0]
+    return {s: x[col[s]] for s in unknown}
+
+
+def _residual_offsets(rec, priors_raw, model, ref, min_images=10):
+    """Per-source median of C_param - C_prior (corrected), relative to the reference source."""
+    priors = corrected_priors(priors_raw, model)
+    res = {}
+    for image_id in rec.reg_image_ids():
+        img = rec.image(image_id)
+        p = priors.get(img.name)
+        if p is None:
+            continue
+        R, t = _pose(rec, img)
+        res.setdefault(p.source, []).append(-R.T @ t - p.center)
+    med = {s: np.median(np.array(v), axis=0) for s, v in res.items() if len(v) >= min_images}
+    if ref not in med:
+        return {}
+    return {s: m - med[ref] for s, m in med.items() if s != ref}
+
+
+def _shift_cameras(rec, priors, inc):
+    """Move the cameras of each source by its offset increment (C += d)."""
+    for image_id in rec.reg_image_ids():
+        img = rec.image(image_id)
+        p = priors.get(img.name)
+        if p is None or p.source not in inc:
+            continue
+        frame = rec.frame(img.frame_id)
+        params = np.array(frame.rig_from_world.params)
+        R = _pose(rec, img)[0]
+        params[4:] -= R @ inc[p.source]  # t = -R C
+        pose = frame.rig_from_world
+        pose.params = params
+        frame.rig_from_world = pose
+
+
+def update_source_offsets(model, rec, priors_raw, db_path=None, min_split=30):
+    """One per-source offset update after a BA (no-op for single-source projects).
+    Reference = source of the first image. Split points drive the update while they
+    outnumber merged ones on an edge (bootstrap; the cameras are shifted too, because
+    their copies are not linked yet); afterwards the prior residuals do."""
+    sources = {p.source for p in priors_raw.values()}
+    if len(sources) < 2 or not model.estimate_source_offsets:
+        return None
+    ref = priors_raw[by_order(priors_raw)[0]].source
+    edges = split_point_edges(rec, priors_raw, db_path) if db_path else {}
+    use = {k: e for k, e in edges.items() if e["n_split"] >= max(min_split, e["merged"])}
+    if use:
+        inc, method = _solve_offsets(use, ref), "split_points"
+        _shift_cameras(rec, priors_raw, inc)  # so the next triangulation already merges the copies
+    else:
+        inc, method = _residual_offsets(rec, priors_raw, model, ref), "residuals"
+    for s, d in inc.items():
+        model.source_offsets[s] = model.source_offsets.get(s, np.zeros(3)) + d
+    return {"method": method, "reference": int(ref),
+            "increment_m": {str(s): np.round(d, 3).tolist() for s, d in sorted(inc.items())},
+            "offsets_m": {str(s): np.round(d, 3).tolist() for s, d in sorted(model.source_offsets.items())},
+            "edges": {f"{a}-{b}": {"n_split": e["n_split"], "merged": e["merged"],
+                                   "median_m": np.round(e["median"], 3).tolist()} for (a, b), e in edges.items()}}
 
 
 def copy_model(model):

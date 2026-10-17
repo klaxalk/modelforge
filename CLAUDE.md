@@ -37,13 +37,18 @@ have **never been run on real data**:
 The project is being moved to a machine with an NVIDIA GPU to test these.
 Follow "Migrating to a GPU machine" below, then the GPU test checklist.
 
+Multi-video ingest (GUI Ingest tab, per-source offsets) is done. It is tested
+on synthetic data and on pieces of the one sample clip, but **not yet on two
+different flights**.
+
 Open items, in priority order:
 1. Run the GPU checklist and fix whatever breaks.
-2. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
-   weakly constrained. Trim or downweight that segment.
-3. Calibration is biased low (~0.7×) in weakly constrained directions. The
+2. Test multi-video ingest on real separate flights of one site.
+3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
+   weakly constrained. It can now be trimmed with the source range.
+4. Calibration is biased low (~0.7×) in weakly constrained directions. The
    fix is redundancy-aware variance component estimation.
-4. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+5. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
 
 ## Migrating to a GPU machine
 
@@ -94,7 +99,7 @@ separately.
 
 ```bash
 MODELFORGE_GPU=1 scripts/dev python -c "import pycolmap; print(pycolmap.has_cuda)"   # True
-MODELFORGE_GPU=1 scripts/dev pytest -q tests          # expect 18 passed, 1 skipped (the no-CUDA error test)
+MODELFORGE_GPU=1 scripts/dev pytest -q tests          # expect 25 passed, 1 skipped (the no-CUDA error test)
 # dense on the existing refined project (or run scripts/process data/berlin_3_1.MP4 from scratch)
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/berlin_3_1_frames --stages dense --mesh delaunay
 #   faster first try: add --dense-max-image-size 1200
@@ -120,10 +125,10 @@ modelforge/
 ├── data/            # Input footage and outputs. Contents are gitignored (only data/.gitignore is tracked)
 ├── docs/            # architecture.md (design + milestones), djmd_format.md
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
-│   ├── dji/            # djmd decoder, SRT parser, frame extraction with time-aligned priors
+│   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
 │   ├── export/         # nerfstudio transforms.json, splat_to_enu
-│   ├── gui/            # viser app + data layer
+│   ├── gui/            # viser app, Ingest tab, data layer
 │   ├── dense.py        # COLMAP MVS stages
 │   └── pipeline.py     # CLI driving all stages
 ├── resources/
@@ -136,7 +141,7 @@ modelforge/
 ├── scripts/splat      # nerfstudio splatfacto train + export + ENU conversion
 ├── scripts/process    # video -> extract -> sfm -> (GPU) dense + splat, end to end
 ├── README.md          # human quick start
-├── tests/             # pytest (19 tests): prior BA, robust priors, dense chain, splat, GUI
+├── tests/             # pytest (26 tests): prior BA, robust priors, multi-source, dense chain, splat, GUI
 ├── build/             # gitignored local build logs
 ├── .gitmodules
 └── CLAUDE.md
@@ -185,21 +190,58 @@ Key facts (details in `docs/djmd_format.md`):
 
 ## Frame extraction (workstream 1)
 
-`python -m modelforge.dji.extract X.MP4 -o OUT [--num-images N | --spacing X] [--sampling distance|time] [--start s --end s]`
-writes:
-- `OUT/images/frame_NNNNN.jpg`: one image per sampling target, the sharpest
-  frame (Laplacian variance) within ±`window`/2 of the spacing. NNNNN is the
-  true video frame index. EXIF GPS holds the aligned position, with
-  altitude = `rel_alt`.
-- `OUT/poses.json` / `poses.csv`, one entry per image:
-  - WGS84 position, and local ENU position (origin = first image)
+A project can be built from **one or more videos**. Each **source** is a video
+plus a time range. The same video can appear several times, as several pieces.
+Use the GUI Ingest tab, or the CLI:
+`python -m modelforge.dji.extract A.MP4 [B.MP4 ...] -o PROJECT [--num-images N | --spacing X] [--sampling distance|time] [--start s --end s] [--overwrite]`.
+`--plan ingest.json` takes the sources and settings from a plan file instead.
+The code is split in two:
+- `modelforge/dji/extract.py`: per-video machinery (streams, lead, sampling
+  curve, sharpest-frame selection) and the CLI.
+- `modelforge/dji/ingest.py`: `Source`, `Settings`, `make_plan`, `preview`,
+  `run`. It combines sources into one project.
+
+Output:
+- `PROJECT/images/<video stem>_NNNNN.jpg`: one image per sampling target, the
+  sharpest frame (Laplacian variance) within ±`window`/2 of the spacing.
+  NNNNN is the true video frame index. EXIF GPS holds the aligned position,
+  with altitude = `alt_m`. Older single-video projects use `frame_NNNNN.jpg`,
+  and the loaders don't care.
+- `PROJECT/poses.json` / `poses.csv`, one entry per image:
+  - `source` (index into `sources[]`), `frame`/`pts` (per video), `time_s`
+    (project timeline)
+  - WGS84 position, and local ENU position
   - camera attitude
   - raw aircraft and gimbal values
   - `q_world_from_cam` (ENU ← OpenCV camera)
   - COLMAP `qvec`/`tvec` (cam_from_world)
-  - an `alignment` report
+  - top level: `sources[]` (alignment, alt offset, sampling per source), `plan`
+    (copy of ingest.json at extraction), `ground_z`, `enu_origin_lla`
+- `PROJECT/ingest.json`: the editable plan (sources + settings). The GUI saves
+  it on every edit.
+- Re-extracting needs `--overwrite` (or the GUI checkbox). Old images and
+  everything derived from them (databases, sparse, dense, splat, report) are
+  **moved** to `PROJECT/previous/<time>/`, never deleted.
 
-How the extractor works:
+Multiple sources:
+- **Order.** Sources are ordered chronologically by SRT wall clock (else list
+  order). The first one is the reference: the ENU origin is its first image,
+  and z comes from its `rel_alt`.
+- **Altitude.** Other flights are lifted by the difference of their takeoff
+  altitudes, median(`abs_alt` − `rel_alt`). On the sample clip that value is
+  −31.011 m with zero spread, i.e. constant per flight. Pieces of the same
+  flight get 0.
+- **One spacing for all.** S_total over all sources / N, so images spread in
+  proportion to each piece's distance + rotation. w is one value for the
+  project.
+- **One camera.** Sources must share one resolution (a single COLMAP camera);
+  `run` refuses otherwise.
+- **No cross-source chains.** Relative priors and time-neighbour pairs stay
+  within a source. Look-at overlap pairs connect the sources.
+- **Per-source offsets.** Refinement estimates a position offset per source
+  for each flight's GNSS bias; see "Robust priors".
+
+How the extractor works (per video):
 - It estimates the telemetry lead per clip. The SRT method (`pp_current` vs.
   gimbal yaw, 0.1-frame grid) is preferred. Optical flow is the fallback, then
   a default of 20.7 frames. `--lead` overrides all of them.
@@ -218,7 +260,7 @@ How the extractor works:
 - Camera attitude = yaw from the aircraft + pitch/roll from the gimbal.
   `--yaw-source gimbal` exists only for models whose gimbal can yaw.
 
-Results on the sample clip:
+Results on the sample clip (single source):
 - Lead 21.6 frames (0.72 s), median yaw residual 0.05°.
 - Pitch/roll vs. `pp_current`: median 0.17°.
 - Frame indices verified exact against ffmpeg `select`.
@@ -289,6 +331,26 @@ Relative priors (`RelativePosePriorCost`) link time-consecutive images.
   the rotation between images (~2% of the turn).
 - Residuals are re-implemented in numpy and verified equal to the Ceres
   functors (`robust.residuals`).
+
+**Per-source offsets** (multi-video projects; `update_source_offsets`):
+- When: after every round's BA, **starting with round 0**.
+- What: one ENU position offset per source, added to that source's priors.
+  The reference source (the one with the first image) stays at 0. This covers
+  each flight's GNSS bias and any takeoff-height error.
+- Bootstrap: biased videos first triangulate separate copies of the shared
+  scene. While split points outnumber merged ones on a source pair, the
+  offsets are solved by least squares on the source graph from
+  median(X_a − X_b) over verified cross-source matches.
+  `split_point_edges` reads the inlier matches from `database.db`. The
+  cameras of that source are moved at once, so the next triangulation
+  merges the copies.
+- Afterwards: the per-source median position residual, relative to the
+  reference.
+- δt estimation subtracts the offsets first.
+- Synthetic test: a 0.6/0.4/0.3 shift is recovered to 1 cm. Round 0 uses
+  split points, and round 1 has already merged.
+- No per-source heading or time offset: the lead is estimated per video, and
+  rotations are image-constrained.
 
 Results on `berlin_3_1` (CLI flags `--no-relative`, `--no-calibration`,
 `--no-systematic` for ablations):
@@ -390,19 +452,42 @@ Code layout:
   `sparse/round_N[_tri]`, `refined`) and thumbnails into numpy. Poses are
   world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
   scalar-first quaternion of R_wc).
-- `modelforge/gui/app.py`, with four tabs:
+- `modelforge/gui/ingest.py`: the **Ingest** tab (first tab when the
+  project has no images yet). `python -m modelforge.gui.app data/new_site`
+  works on a new or empty folder.
+  - **Videos**: lists videos found next to the project and in `data/`
+    (folders holding a `poses.json`/`ingest.json` are skipped), or takes a
+    path. "Add as source" adds the whole clip.
+  - **Sources**: one folder per source, with a stats line, a range
+    multi-slider, Enabled, a lead override, Preview, "Add piece" (a second
+    range of the same video) and Remove. Clips decode in a background planner
+    thread, a few seconds each, cached by `ingest.load_clip`.
+  - **Sampling**: N over all sources, spacing, rotation credit, window, yaw
+    source. The plan summary and warnings update live, and every edit saves
+    `ingest.json`.
+  - **Frame preview**: source + time slider. It shows the video frame
+    (ffmpeg accurate seek), the aligned telemetry and a white frustum in 3D.
+    "Start here" / "End here" set the range.
+  - **3D**: each source's track, bright in its colour inside the range and
+    grey outside, plus the planned image positions. **Plot**: altitude, speed
+    and gimbal pitch on the project timeline, with planned images marked.
+  - **Extract**: runs `ingest.run` with progress. A project with images needs
+    the Overwrite box ticked. Afterwards the app reloads the project
+    (`App.load_project`) and the Run tab takes over.
+- `modelforge/gui/app.py`, with tabs Ingest / View / Inspect / Plots / Run:
   - **View**: snapshot picker and stats, including the calibrated prior model.
     A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview
     mesh and `splat_enu.ply` (viser gaussian splats), each enabled once its
     file exists. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
-    can be coloured by position or rotation deviation, reprojection error, or
-    time.
+    can be coloured by position or rotation deviation, reprojection error,
+    time, or source. Stats list the per-source offsets.
   - **Inspect**: click a camera to see its image, with observations in green,
     residuals × gain in red, and unmatched keypoints in grey.
-  - **Plots**: Plotly charts of deviation vs. video time and a point-error
-    histogram.
-  - **Run**: pairs, match, refine (live), export, and the dense stages (a
+  - **Plots**: Plotly charts of deviation vs. project time (colour = source)
+    and a point-error histogram.
+  - **Run**: "Run SfM (all)", or features, pairs, match, refine (live), export
+    one at a time, plus the dense stages (a
     "Run dense (all)" button plus one per stage, with a mesh-method picker),
     each run in a background thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
     events move the existing frustums (throttled to 4 Hz), and each round
@@ -416,8 +501,13 @@ Things to know:
   updates hold the GIL during Ceres' Python callbacks.
 - Triangulation is RANSAC-based, so runs are not bit-identical. Medians are
   stable, extremes vary.
-- Tests: `tests/test_gui_smoke.py` runs the app logic headlessly on
-  `data/berlin_3_1_frames` (skipped if absent).
+- Lines use `thickness_units="screen"` (pixels). viser's default is world
+  units.
+- Tests:
+  - `tests/test_gui_smoke.py` runs the app logic headlessly on
+    `data/berlin_3_1_frames` (skipped if absent).
+  - `tests/test_gui_ingest.py` goes empty project → two pieces → plan →
+    preview → extract → features/pairs.
 
 ## Reusing COLMAP
 

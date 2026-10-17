@@ -1,7 +1,8 @@
-"""modelforge web GUI (viser): inspect snapshots, compare priors vs refined, run stages live.
+"""modelforge web GUI (viser): ingest videos, run stages live, inspect snapshots and products.
 
 Usage (in the dev container; port 8080 is published by compose.yaml):
-    python -m modelforge.gui.app data/clip_frames [--port 8080]
+    python -m modelforge.gui.app data/site [--port 8080]
+The project folder may be new or empty: the Ingest tab builds it from one or more videos.
 """
 
 import argparse
@@ -18,8 +19,10 @@ from plotly.subplots import make_subplots
 from modelforge import dense, pipeline
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
+from modelforge.gui.ingest import IngestPanel, source_color
 
-COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "uniform")
+COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "source", "uniform")
+SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
 UNITS = {"position deviation": "m", "rotation deviation": "deg", "reprojection error": "px", "time": "s"}
 PRIOR_COLOR = (150, 150, 150)
 SELECTED_COLOR = (255, 255, 255)
@@ -48,7 +51,8 @@ def rot_dev_deg(Ra, Rb):
 
 class App:
     def __init__(self, project_path, port=8080):
-        self.project = Project(project_path)
+        self.path = project_path
+        self.project = Project(project_path) if os.path.exists(os.path.join(project_path, "poses.json")) else None
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
         self.server.scene.set_up_direction("+z")
         self.server.gui.configure_theme(control_width="large")
@@ -60,19 +64,24 @@ class App:
         self.fov, self.aspect = np.radians(53.0), 16 / 9
         self._last_live = 0.0
         self._build_gui()
-        names = self.project.snapshot_names()
-        self.load_snapshot("refined" if "refined" in names else names[-1])
+        if self.project:
+            names = self.project.snapshot_names()
+            self.load_snapshot("refined" if "refined" in names else names[-1])
         self._refresh_dense()
         self.server.on_client_connect(self._on_connect)
 
     # ---------------------------------------------------------------- GUI
     def _build_gui(self):
         gui = self.server.gui
-        gui.add_markdown(f"### modelforge\n`{self.project.path}` · {len(self.project.names)} images")
+        self.g_header = gui.add_markdown(self._header())
         tabs = gui.add_tab_group()
+        if self.project is None:  # new project: start where the work starts
+            with tabs.add_tab("Ingest", viser.Icon.VIDEO):
+                self.ingest = IngestPanel(self, gui)
 
         with tabs.add_tab("View", viser.Icon.EYE):
-            self.g_snapshot = gui.add_dropdown("Snapshot", options=tuple(self.project.snapshot_names()))
+            names = tuple(self.project.snapshot_names()) if self.project else ("priors",)
+            self.g_snapshot = gui.add_dropdown("Snapshot", options=names)
             self.g_snapshot.on_update(lambda _: self.load_snapshot(self.g_snapshot.value))
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
@@ -114,7 +123,10 @@ class App:
         with tabs.add_tab("Run", viser.Icon.PLAYER_PLAY):
             gui.add_markdown("Stages run in the background; poses update live during BA.")
             self.g_buttons = {}
-            for stage in ("pairs", "match", "refine", "export"):
+            b = gui.add_button("Run SfM (all)", hint="features → pairs → match → refine → export")
+            b.on_click(lambda _: self.run_stage("sfm"))
+            self.g_buttons["sfm"] = b
+            for stage in pipeline.SFM_STAGES:
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""))
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
@@ -137,9 +149,39 @@ class App:
             self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
             self.g_status = gui.add_markdown("idle")
 
+        if self.project is not None:
+            with tabs.add_tab("Ingest", viser.Icon.VIDEO):
+                self.ingest = IngestPanel(self, gui)
+
+    def _header(self):
+        if self.project is None:
+            return f"### modelforge\n`{self.path}` · no images yet"
+        n_src = len(set(self.project.source.tolist()))
+        return (f"### modelforge\n`{self.path}` · {len(self.project.names)} images"
+                + (f" from {n_src} sources" if n_src > 1 else ""))
+
+    def load_project(self):
+        """(Re)load PROJECT after extraction: new images, no snapshots yet."""
+        with self.lock:
+            for h in list(self.cam_handles.values()) + list(self.prior_handles.values()):
+                h.remove()
+            self.cam_handles, self.prior_handles, self.selected, self.snap = {}, {}, None, None
+            self.project = Project(self.path)
+            self.g_header.content = self._header()
+            names = tuple(self.project.snapshot_names())
+            self.g_snapshot.options = names
+            self.load_snapshot("refined" if "refined" in names else names[-1])
+            self._refresh_dense()
+
     def _on_connect(self, client):
-        c = self.snap.cams if self.snap else self.project.prior_cams
-        centers = c.centers[c.valid]
+        if self.project is None:
+            prev = self.ingest.prev
+            if not prev:
+                return
+            centers = np.concatenate([x["track"] for x in prev["sources"]])
+        else:
+            c = self.snap.cams if self.snap else self.project.prior_cams
+            centers = c.centers[c.valid]
         mid = centers.mean(0)
         extent = float(np.linalg.norm(centers.max(0) - centers.min(0)))
         client.camera.up_direction = (0.0, 0.0, 1.0)
@@ -148,6 +190,8 @@ class App:
 
     # ------------------------------------------------------------- loading
     def load_snapshot(self, name):
+        if self.project is None:
+            return
         with self.lock:
             self.snap = self.project.load_snapshot(name)
             if self.snap.intrinsics:
@@ -187,7 +231,9 @@ class App:
         if mode == "reprojection error":
             return self.snap.reproj_error if self.snap.reproj_error is not None else np.full(len(pos), np.nan)
         if mode == "time":
-            return self.project.pts
+            return self.project.time
+        if mode == "source":
+            return self.project.source.astype(float)
         return None
 
     # ------------------------------------------------------------- drawing
@@ -232,18 +278,19 @@ class App:
         v = cams.valid
         if self.g_corr.value and self.snap.name != "priors" and v.any():
             seg = np.stack([pc.centers[v], cams.centers[v]], axis=1).astype(np.float32)
-            self.server.scene.add_line_segments("/corrections", seg, colors=(255, 80, 80), thickness=2.0)
+            self.server.scene.add_line_segments("/corrections", seg, colors=(255, 80, 80), thickness=2.0,
+                                                thickness_units="screen")
         else:
             self.server.scene.add_line_segments("/corrections", np.zeros((0, 2, 3), np.float32), colors=(0, 0, 0))
         if self.g_traj.value:
             p = pc.centers
             self.server.scene.add_line_segments("/traj/prior", np.stack([p[:-1], p[1:]], 1).astype(np.float32),
-                                                colors=PRIOR_COLOR, thickness=1.5)
+                                                colors=PRIOR_COLOR, thickness=1.5, thickness_units="screen")
             c = cams.centers
             ok = v[:-1] & v[1:]
             self.server.scene.add_line_segments("/traj/estimate",
                                                 np.stack([c[:-1][ok], c[1:][ok]], 1).astype(np.float32),
-                                                colors=(70, 134, 251), thickness=2.0)
+                                                colors=(70, 134, 251), thickness=2.0, thickness_units="screen")
         else:
             for name in ("/traj/prior", "/traj/estimate"):
                 self.server.scene.add_line_segments(name, np.zeros((0, 2, 3), np.float32), colors=(0, 0, 0))
@@ -270,6 +317,9 @@ class App:
                          f"{r['pos_m']:.3f} m + {r['pos_per_m'] * 100:.2f} % of baseline")
             lines.append(f"boresight {pm['boresight_norm_deg']:.2f}° · time offset {pm['dt_ms']:.1f} ms · "
                          f"rejected priors: {len(pm['abs_rejected'])} abs, {pm['rel_rejected']} rel")
+            for k, o in pm.get("source_offsets_m", {}).items():
+                lines.append(f"source {int(k) + 1} offset: {np.linalg.norm(o):.2f} m "
+                             f"(E {o[0]:+.2f}, N {o[1]:+.2f}, U {o[2]:+.2f})")
         self.g_stats.content = "  \n".join(lines)
 
     def _prior_model(self, snapshot):
@@ -285,15 +335,16 @@ class App:
         s = self.snap
         pos, rot = self.deviations()
         v = s.cams.valid
-        t = self.project.pts
+        t = self.project.time
+        col = ["rgb(%d,%d,%d)" % source_color(k) for k in self.project.source[v]]
         fig = make_subplots(rows=3, cols=1, vertical_spacing=0.09,
                             subplot_titles=("position deviation from prior [m]",
                                             "rotation deviation from prior [deg]", "point reprojection error [px]"))
-        fig.add_trace(go.Scatter(x=t[v], y=pos[v], mode="markers", marker=dict(size=4), name="pos"), 1, 1)
-        fig.add_trace(go.Scatter(x=t[v], y=rot[v], mode="markers", marker=dict(size=4), name="rot"), 2, 1)
+        fig.add_trace(go.Scatter(x=t[v], y=pos[v], mode="markers", marker=dict(size=4, color=col), name="pos"), 1, 1)
+        fig.add_trace(go.Scatter(x=t[v], y=rot[v], mode="markers", marker=dict(size=4, color=col), name="rot"), 2, 1)
         if len(s.point_error):
             fig.add_trace(go.Histogram(x=np.clip(s.point_error, 0, 5), nbinsx=50, name="err"), 3, 1)
-        fig.update_xaxes(title_text="video time [s]", row=2, col=1)
+        fig.update_xaxes(title_text="time [s] (colour = source)", row=2, col=1)
         fig.update_layout(showlegend=False, margin=dict(l=40, r=10, t=30, b=30), height=640)
         self.g_plot.figure = fig
 
@@ -307,7 +358,9 @@ class App:
         img, st = self.project.inspect_image(self.snap, i, residual_gain=self.g_gain.value)
         self.g_image.image = img
         pos, rot = self.deviations()
-        md = [f"**{name}** · video t = {self.project.pts[i]:.2f} s"]
+        src = self.project.source_names[self.project.source[i]] if self.project.source[i] < len(
+            self.project.source_names) else ""
+        md = [f"**{name}** · {src} t = {self.project.pts[i]:.2f} s"]
         if self.snap.cams.valid[i] and self.snap.name != "priors":
             md.append(f"prior deviation: {pos[i]:.2f} m, {rot[i]:.2f}°")
         if st:
@@ -317,6 +370,11 @@ class App:
         self.g_inspect_md.content = "  \n".join(md)
 
     def _camera_colors(self):
+        if self.g_color.value == "source":
+            names = self.project.source_names
+            self.g_legend.content = "  \n".join(f"{SOURCE_SWATCH[k % len(SOURCE_SWATCH)]} {k + 1}. {n}"
+                                                 for k, n in enumerate(names))
+            return np.array([source_color(k) for k in self.project.source], np.uint8)
         vals = self.color_values()
         n = len(self.project.names)
         if vals is None:
@@ -337,7 +395,10 @@ class App:
 
     # ------------------------------------------------------------- running
     def run_stage(self, stage):
-        if self.running:
+        if self.running or self.ingest.running:
+            return
+        if self.project is None:
+            self.g_status.content = "no images yet: extract them in the Ingest tab first"
             return
         self.running = True
         for b in self.g_buttons.values():
@@ -347,20 +408,29 @@ class App:
         threading.Thread(target=self._run, args=(stage,), daemon=True).start()
 
     def _run(self, stage):
-        project, t0 = self.project.path, time.time()
+        project, t0 = self.path, time.time()
         self.g_status.content = f"running **{stage}** …"
         try:
             report = pipeline.Report(project)
             pri = self.project.priors
-            if stage == "pairs":
-                pipeline.stage_pairs(project, report, pri, self.project.meta)
-            elif stage == "match":
-                self._ticker(stage, t0)
-                pipeline.stage_match(project, report)
-            elif stage == "refine":
-                pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
-            elif stage == "export":
-                pipeline.stage_export(project, report)
+            if stage == "sfm" or stage in pipeline.SFM_STAGES:
+                seq = pipeline.SFM_STAGES if stage == "sfm" else (stage,)
+                if stage != "refine":
+                    self._ticker(stage, t0)
+                for k, st in enumerate(seq):
+                    self._stage_label = f"{st} ({k + 1}/{len(seq)})" if len(seq) > 1 else st
+                    if len(seq) > 1:
+                        self.g_progress.value = 100.0 * k / len(seq)
+                    if st == "features":
+                        pipeline.stage_features(project, report)
+                    elif st == "pairs":
+                        pipeline.stage_pairs(project, report, pri, self.project.meta)
+                    elif st == "match":
+                        pipeline.stage_match(project, report)
+                    elif st == "refine":
+                        pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
+                    elif st == "export":
+                        pipeline.stage_export(project, report)
             elif stage == "dense" or stage in pipeline.DENSE_STAGES:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
                 m = self.g_mesh_method.value
@@ -372,7 +442,7 @@ class App:
                     pipeline.stage_dense(project, report, st, methods)
                 self._refresh_dense()
             self.g_status.content = f"**{stage}** done in {time.time() - t0:.0f} s"
-            self.refresh_snapshot_list(select="refined" if stage == "refine" else None)
+            self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm") else None)
         except Exception as e:  # surface failures in the GUI instead of killing the thread silently
             traceback.print_exc()
             self.g_status.content = f"**{stage}** failed: `{e}`"
@@ -387,7 +457,8 @@ class App:
 
         def tick():
             while self.running:
-                self.g_status.content = f"running **{self._stage_label}** … {time.time() - t0:.0f} s"
+                if not self._stage_label.startswith("refine"):  # refine reports its own progress
+                    self.g_status.content = f"running **{self._stage_label}** … {time.time() - t0:.0f} s"
                 time.sleep(1.0)
         threading.Thread(target=tick, daemon=True).start()
 
@@ -426,7 +497,7 @@ class App:
 
     # ------------------------------------------------------------- dense / splat
     def _refresh_dense(self):
-        self.dense = gdata.dense_artifacts(self.project.path)
+        self.dense = gdata.dense_artifacts(self.path)
         meshes = tuple(self.dense["meshes"])
         self.g_dense_pts.disabled = self.dense["fused"] is None
         self.g_splat.disabled = self.dense["splat"] is None

@@ -4,7 +4,7 @@ View overlap is approximated with look-at points: the optical axis intersected
 with the ground plane at takeoff height (z = -rel_alt of the ENU origin), capped
 at max_depth. Two views overlap when their look-at points are close relative to
 the viewing distance and their axes point in similar directions; this also pairs
-revisits of the same spot from different passes.
+revisits of the same spot from different passes, and overlaps between videos.
 """
 
 import os
@@ -13,7 +13,7 @@ import numpy as np
 
 
 def look_at_points(priors, ground_z, max_depth=150.0):
-    names = sorted(priors, key=lambda n: priors[n].frame)
+    names = sorted(priors, key=lambda n: priors[n].order)
     C = np.array([priors[n].center for n in names])
     A = np.array([priors[n].optical_axis for n in names])
     depth = np.full(len(names), max_depth)
@@ -27,10 +27,12 @@ def select(priors, ground_z, seq_neighbors=5, spatial_neighbors=15, max_axis_ang
            overlap_factor=0.5):
     names, P, A, depth = look_at_points(priors, ground_z)
     n = len(names)
+    src = [priors[x].source for x in names]
     pairs = set()
     for i in range(n):
         for j in range(i + 1, min(n, i + 1 + seq_neighbors)):
-            pairs.add((i, j))
+            if src[j] == src[i]:  # time neighbours only within one video piece
+                pairs.add((i, j))
     cos_max = np.cos(np.radians(max_axis_angle_deg))
     for i in range(n):
         d = np.linalg.norm(P - P[i], axis=1)

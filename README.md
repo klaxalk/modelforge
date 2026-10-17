@@ -19,10 +19,18 @@ scripts/process data/clip.MP4 --num-images 300     # video -> poses -> (GPU) mes
 scripts/dev python -m modelforge.gui.app data/clip_frames   # GUI on http://localhost:8080
 ```
 
+From the GUI: `scripts/dev python -m modelforge.gui.app data/site` on a new
+folder opens the **Ingest** tab. There you:
+- add one or more videos, and cut each into pieces (time ranges) using the
+  flight track, telemetry plots and frame preview;
+- set the number of images, check the planned positions, and extract;
+- then run SfM and the dense stages from the **Run** tab.
+
 Step by step:
 
 ```bash
 scripts/dev python -m modelforge.dji.extract data/clip.MP4 -o data/clip_frames --num-images 300
+#   several videos into one project: ... extract data/a.MP4 data/b.MP4 -o data/site --num-images 500
 scripts/dev python -m modelforge.pipeline data/clip_frames                       # SfM, CPU is fine
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/clip_frames --stages dense
 scripts/splat data/clip_frames                                                   # nerfstudio, GPU
@@ -33,6 +41,7 @@ scripts/splat data/clip_frames                                                  
 | Path | What |
 |---|---|
 | `images/`, `poses.json` | sampled frames (by travelled distance + view rotation), time-aligned priors, EXIF GPS |
+| `ingest.json` | the sources (video + time range) and sampling settings |
 | `sparse/refined/` | refined COLMAP model (poses, intrinsics, points) |
 | `transforms.json`, `sparse_pc.ply` | nerfstudio dataset (ENU world) |
 | `dense/fused.ply` | dense point cloud |

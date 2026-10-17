@@ -60,7 +60,7 @@ def stage_features(project, report):
 
 
 def stage_pairs(project, report, pri, meta):
-    ground_z = -meta["enu_origin_lla"][2]
+    ground_z = meta.get("ground_z", -meta["enu_origin_lla"][2])
     pp = pairs.select(pri, ground_z)
     pairs.write(project, pp)
     report.set("pairs", {"num_pairs": len(pp), "ground_z": ground_z})
@@ -121,13 +121,16 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
         rec.write(out)
+        offsets = robust.update_source_offsets(model, rec, pri, db_path)
         ev = refine.evaluate(rec, pri)
         calib = robust.update(model, rec, pri) if i >= model.start_round else {"model": model.summary(), "skipped": True}
         results[f"round_{i}"] = {"thresholds": vars(rnd), "after_triangulation": tri, "ba": ba, "after_ba": ev,
-                                 "prior_model": calib, "seconds": round(time.time() - t0, 1)}
+                                 "prior_model": calib, "source_offsets": offsets, "seconds": round(time.time() - t0, 1)}
         log(f"round {i} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, median {tri['point_error_px']['median']}px "
             f"-> BA {ba['iterations']} it ({ba['termination']}), median {ev['point_error_px']['median']}px, "
             f"prior dev pos {ev['prior_deviation']['position_m']} rot {ev['prior_deviation']['rotation_deg']}")
+        if offsets:
+            log(f"   source offsets ({offsets['method']}): {offsets['offsets_m']}")
         m = calib["model"]
         if not calib.get("skipped"):
             log(f"   prior model: scales {calib.get('scales')} | abs {m['abs_sigmas']} rel {m['rel_sigmas']} | "

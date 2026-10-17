@@ -41,11 +41,21 @@ class Prior:
     center: np.ndarray  # ENU
     R_cw: np.ndarray
     velocity: np.ndarray = None  # ENU [m/s], aligned like the pose
+    source: int = 0  # ingest source (video piece); relative priors stay within one
+    order: int = None  # global capture order (poses.json order); defaults to frame
+    time: float = None  # project timeline [s]; defaults to pts
+
+    def __post_init__(self):
+        if self.order is None:
+            self.order = self.frame
+        if self.time is None:
+            self.time = self.pts
 
     @classmethod
-    def from_pose(cls, name, frame, pts, R_cw, center, velocity=None):
+    def from_pose(cls, name, frame, pts, R_cw, center, velocity=None, source=0, order=None, time=None):
         q = rot_to_quat_xyzw(R_cw)
-        return cls(name, frame, pts, np.r_[q, -R_cw @ center], np.asarray(center, float), R_cw, velocity)
+        return cls(name, frame, pts, np.r_[q, -R_cw @ center], np.asarray(center, float), R_cw, velocity,
+                   source, order, time)
 
     def rigid(self):
         r = pycolmap.Rigid3d()
@@ -93,7 +103,7 @@ def load(project):
     """Return (priors by image name, poses.json metadata)."""
     meta = json.load(open(os.path.join(project, "poses.json")))
     priors = {}
-    for r in meta["images"]:
+    for k, r in enumerate(meta["images"]):
         qw, qx, qy, qz = r["colmap_qvec"]
         t = np.array(r["colmap_tvec"])
         R_cw = quat_wxyz_to_rot((qw, qx, qy, qz))
@@ -103,5 +113,17 @@ def load(project):
             center=np.array([r["enu_x"], r["enu_y"], r["enu_z"]]),
             R_cw=R_cw,
             velocity=np.array([r["vel_e"], r["vel_n"], -r["vel_d"]]),
+            source=r.get("source", 0), order=k, time=r.get("time_s", r["pts"]),
         )
     return priors, meta
+
+
+def by_order(priors, names=None):
+    """Image names in capture order."""
+    return sorted(priors if names is None else names, key=lambda n: priors[n].order)
+
+
+def same_source_consecutive(priors, names):
+    """Time-consecutive image pairs (a, b) within one source, in capture order."""
+    names = by_order(priors, names)
+    return [(a, b) for a, b in zip(names[:-1], names[1:]) if priors[a].source == priors[b].source]

@@ -4,6 +4,7 @@ import re
 
 _KV = re.compile(r"\[(\w+)\s*:\s*([^\]]*)\]")
 _ALT = re.compile(r"rel_alt:\s*([-\d.]+)\s+abs_alt:\s*([-\d.]+)")
+_DATETIME = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:[.,]\d+)?")
 
 
 def parse_srt(path):
@@ -11,10 +12,14 @@ def parse_srt(path):
 
     `pp_current` / `pp_target` are parsed into (w, x, y, z) tuples; they are the
     camera attitude and, unlike the djmd track, in sync with the video.
+    `datetime` is the wall-clock line (camera local time) as a string.
     """
     entries = []
     for block in open(path, encoding="utf-8", errors="replace").read().strip().split("\n\n"):
         e = {k: v.strip() for k, v in _KV.findall(block)}
+        d = _DATETIME.search(block)
+        if d:
+            e["datetime"] = d.group(0).replace(",", ".")
         m = _ALT.search(block)
         if m:
             e["rel_alt"], e["abs_alt"] = m.groups()
