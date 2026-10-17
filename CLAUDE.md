@@ -40,7 +40,7 @@ modelforge/
 ├── docker/Dockerfile  # dev image (COLMAP + pycolmap + pyceres)
 ├── compose.yaml       # `dev` service; compose.gpu.yaml = CUDA override
 ├── scripts/dev        # run a command in the dev container
-├── tests/             # pytest; test_m0_prior_ba.py = pycolmap/pyceres prior-BA check
+├── tests/             # pytest: M0 prior-BA check, GUI smoke test
 ├── build/             # gitignored local build logs
 ├── .gitmodules
 └── CLAUDE.md
@@ -167,6 +167,42 @@ Results on `berlin_3_1` (300 images, CPU):
   and only weakly with yaw rate (r = 0.11).
 - Largest position deviations (2–5 m) are in the last ~10 s (landing).
 - Runtime: matching 698 s (CPU, 2398 pairs) dominates. Refinement takes 83 s.
+
+## GUI (M2, viser)
+
+`scripts/dev python -m modelforge.gui.app PROJECT [--port 8080]`, then open
+http://localhost:8080. compose publishes 8080. viser 1.1.1 and plotly 7.1.0 are
+pinned in the image.
+
+Code layout:
+- `modelforge/gui/data.py`: a `Project` turns priors, snapshots (`priors`,
+  `sparse/round_N[_tri]`, `refined`) and thumbnails into numpy. Poses are
+  world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
+  scalar-first quaternion of R_wc).
+- `modelforge/gui/app.py`, with four tabs:
+  - **View**: snapshot picker and stats. Layers: points, cameras with
+    thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
+    can be coloured by position or rotation deviation, reprojection error, or
+    time.
+  - **Inspect**: click a camera to see its image, with observations in green,
+    residuals × gain in red, and unmatched keypoints in grey.
+  - **Plots**: Plotly charts of deviation vs. video time and a point-error
+    histogram.
+  - **Run**: pairs, match, refine (live), export, each run in a background
+    thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
+    events move the existing frustums (throttled to 4 Hz), and each round
+    reloads the snapshot.
+
+Things to know:
+- Points far outside the flight area are hidden, and the cloud uses float32.
+  Unfiltered BA output contains points 100+ km away, which overflow viser's
+  default float16.
+- Live refine takes about 2× the headless time (171 s vs 83 s). The scene
+  updates hold the GIL during Ceres' Python callbacks.
+- Triangulation is RANSAC-based, so runs are not bit-identical. Medians are
+  stable, extremes vary.
+- Tests: `tests/test_gui_smoke.py` runs the app logic headlessly on
+  `data/berlin_3_1_frames` (skipped if absent).
 
 ## Reusing COLMAP
 

@@ -82,7 +82,10 @@ def stage_match(project, report):
     report.set("match", stats)
 
 
-def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS):
+def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None):
+    """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done";
+    "ba" events carry the live Reconstruction (poses are updated every iteration)."""
+    emit = progress or (lambda event: None)
     db_path = os.path.join(project, "database.db")
     image_path = os.path.join(project, "images")
     rec = refine.init_from_database(db_path, pri)
@@ -90,18 +93,23 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS):
     t_start = time.time()
     for i, rnd in enumerate(rounds):
         t0 = time.time()
+        emit({"phase": "triangulate", "round": i, "rounds": len(rounds), "rec": rec})
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", f"round_{i}_tri"), rnd)
         tri = refine.evaluate(rec, pri)
-        ba = refine.prior_ba(rec, pri, loss_scale_px=rnd.loss_scale_px)
+        live = rec
+        ba = refine.prior_ba(rec, pri, loss_scale_px=rnd.loss_scale_px,
+                             on_iteration=lambda s, i=i: emit({"phase": "ba", "round": i, "rounds": len(rounds),
+                                                               "iteration": s.iteration, "cost": s.cost, "rec": live}))
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
         rec.write(out)
         ev = refine.evaluate(rec, pri)
         results[f"round_{i}"] = {"thresholds": vars(rnd), "after_triangulation": tri, "ba": ba, "after_ba": ev,
                                  "seconds": round(time.time() - t0, 1)}
-        log(f"round {i} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, {tri['mean_reproj_error_px']}px "
-            f"-> BA {ba['iterations']} it, {ev['points3D']} pts, {ev['mean_reproj_error_px']}px, "
+        log(f"round {i} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, median {tri['point_error_px']['median']}px "
+            f"-> BA {ba['iterations']} it ({ba['termination']}), median {ev['point_error_px']['median']}px, "
             f"prior dev pos {ev['prior_deviation']['position_m']} rot {ev['prior_deviation']['rotation_deg']}")
+        emit({"phase": "round_done", "round": i, "rounds": len(rounds), "rec": rec, "eval": ev})
     # final triangulation at the tightest threshold so the exported cloud matches the refined poses
     rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), rounds[-1])
     rec.extract_colors_for_all_images(image_path)
@@ -110,6 +118,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS):
     results["seconds"] = round(time.time() - t_start, 1)
     report.set("refine", results)
     log(f"refine final: {results['final']}")
+    emit({"phase": "done", "rec": rec, "eval": results["final"]})
     return rec
 
 
