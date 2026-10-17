@@ -78,6 +78,6 @@ def test_run_mesh_stage_from_gui(app, project):
     t0 = time.time()
     while app.running and time.time() - t0 < 120:
         time.sleep(0.2)
-    assert "done" in app.g_status.content, app.g_status.content
+    assert "finished" in app.g_state.content, app.g_state.content
     assert os.path.exists(os.path.join(project, "dense", "meshed-delaunay.ply"))
     assert os.path.exists(os.path.join(project, "dense", "preview-delaunay.ply"))

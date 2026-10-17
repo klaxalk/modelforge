@@ -59,7 +59,8 @@ def test_source_offset_is_recovered(tmp_path):
     print(f"offset est {np.round(est, 3)} true {-offset}")
     assert methods[0] == "split_points"  # the videos first triangulate separate copies of the scene
     assert np.linalg.norm(est + offset) < 0.03
-    assert methods[1] == "residuals"  # the cameras moved with the offset, so round 1 merges
+    edges = rep["edges"]["0-1"]
+    assert edges["merged"] > 10 * edges["n_split"]  # the cameras moved with the offset, so the copies merged
     assert ba["num_rel_priors"] <= len(pri) - 2  # never across the two sources
     pos = [np.linalg.norm(refine.center_of(np.array(rec.frame(rec.image(i).frame_id).rig_from_world.params))
                           - gt[rec.image(i).name]) for i in rec.reg_image_ids()]

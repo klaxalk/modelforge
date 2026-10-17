@@ -322,6 +322,19 @@ runs with absolute priors only. Each update does, in order:
 2. **calibrate**: rescale each block (abs rot, abs pos, rel rot, rel pos) so
    the median whitened d² = χ²₃ median. Clamped to ×2 per round, with floors.
 3. **flag**: priors beyond χ²₆ at 99.9% lose their term in the next round.
+   Cameras with fewer than 100 observations (`min_obs_to_reject`) are never
+   flagged: they can't overrule their prior, and losing it lets them drift.
+
+**Loss on the absolute priors is Huber** (scale 3σ). Relative priors stay
+Cauchy.
+- Why: Cauchy's pull fades with distance. A camera seeing few points, each in
+  a 2-view track that slides with it, escaped 35 m in round 0 and stayed
+  there. This happened on two pieces of `berlin_3_1`, frame 2998, 15
+  observations.
+- Huber's pull stays constant, and gross prior outliers are rejected by step 3
+  anyway.
+- Single-video `berlin_3_1`, Cauchy → Huber: error median/p90 0.517/1.250 →
+  0.490/1.139 px, prior deviation max 1.81 → 1.77 m. Refine takes 121 → 181 s.
 
 Relative priors (`RelativePosePriorCost`) link time-consecutive images.
 - COLMAP's cost is rigid in the camera frame: the prior displacement gets
@@ -344,11 +357,16 @@ Relative priors (`RelativePosePriorCost`) link time-consecutive images.
   `split_point_edges` reads the inlier matches from `database.db`. The
   cameras of that source are moved at once, so the next triangulation
   merges the copies.
-- Afterwards: the per-source median position residual, relative to the
-  reference.
+- Split points are the **only** estimator. Once the copies merge, the
+  leftover split points measure ~0 and the offsets settle.
+- A per-source median prior residual was tried and dropped. On two pieces of
+  one flight (true offset 0) it reported ~1 m that wandered 0.5 m per round,
+  i.e. GNSS drift between the pieces, while the split points measured 6 mm.
+- Real null test, `berlin_3_1` cut at 263 s into 2 sources: final offset
+  3 cm, max prior deviation 2.7 m, error p90 1.165 px.
 - δt estimation subtracts the offsets first.
-- Synthetic test: a 0.6/0.4/0.3 shift is recovered to 1 cm. Round 0 uses
-  split points, and round 1 has already merged.
+- Synthetic test: a 0.6/0.4/0.3 shift is recovered to 2 cm in round 0, and
+  round 1 has already merged.
 - No per-source heading or time offset: the lead is estimated per video, and
   rotations are image-constrained.
 
@@ -487,7 +505,16 @@ Code layout:
   - **Plots**: Plotly charts of deviation vs. project time (colour = source)
     and a point-error histogram.
   - **Run**: "Run SfM (all)", or features, pairs, match, refine (live), export
-    one at a time, plus the dense stages (a
+    one at a time.
+    - A state line: ⏳ running stage k/n with stage/total time and a detail
+      line (BA round and iteration), then ✅ finished + next step, or ❌
+      failed + error.
+    - A **History** of finished stages with key numbers, and a **Log** of
+      the last 40 `pipeline.log` lines (`pipeline.LISTENERS`).
+    - The ticker and the final message share `App.lock` plus a run id, so
+      a finished job never shows "running".
+    - Every widget has a hover `hint`.
+    - Plus the dense stages (a
     "Run dense (all)" button plus one per stage, with a mesh-method picker),
     each run in a background thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
     events move the existing frustums (throttled to 4 Hz), and each round

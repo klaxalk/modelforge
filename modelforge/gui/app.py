@@ -21,6 +21,32 @@ from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.ingest import IngestPanel, source_color
 
+STAGE_HINTS = {
+    "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
+                "camera). A few minutes on CPU.",
+    "pairs": "Choose image pairs to match from the priors: time neighbours within each source plus views whose "
+             "look-at points overlap (catches revisits and links sources). Seconds.",
+    "match": "Match the selected pairs and verify them geometrically into database.db. The slowest SfM stage "
+             "on CPU (~12 min for 2400 pairs).",
+    "refine": "Start every camera at its prior, then 3 rounds of triangulate + bundle adjustment with "
+              "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min.",
+    "export": "Write transforms.json + sparse_pc.ply (nerfstudio dataset, ENU world) from sparse/refined. Seconds.",
+    "undistort": "Undistorted images + PINHOLE model into dense/ (COLMAP MVS workspace). Seconds.",
+    "stereo": "PatchMatch depth and normal maps for every image. CUDA only; the long one (~10 GB at full res).",
+    "fusion": "Fuse depth maps into dense/fused.ply (+ .vis for meshing).",
+    "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
+    "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
+}
+NEXT_STEP = {
+    "sfm": "View tab → snapshot **refined**; next: dense stages (GPU) or `scripts/splat`",
+    "features": "next: **pairs**", "pairs": "next: **match**", "match": "next: **refine**",
+    "refine": "View tab shows **refined**; next: **export**",
+    "export": "transforms.json written; next: dense stages (GPU) or `scripts/splat`",
+    "dense": "View tab → Dense / splat", "undistort": "next: **stereo**", "stereo": "next: **fusion**",
+    "fusion": "next: **mesh**", "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written",
+}
+LOG_LINES = 40
+
 COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "source", "uniform")
 SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
 UNITS = {"position deviation": "m", "rotation deviation": "deg", "reprojection error": "px", "time": "s"}
@@ -28,6 +54,11 @@ PRIOR_COLOR = (150, 150, 150)
 SELECTED_COLOR = (255, 255, 255)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
+
+
+def _fmt_s(sec):
+    sec = int(round(sec))
+    return f"{sec // 60} min {sec % 60:02d} s" if sec >= 60 else f"{sec} s"
 
 
 def colormap(values, vmax=None):
@@ -63,6 +94,8 @@ class App:
         self.running = False
         self.fov, self.aspect = np.radians(53.0), 16 / 9
         self._last_live = 0.0
+        self._run_id = 0
+        self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
         self._build_gui()
         if self.project:
             names = self.project.snapshot_names()
@@ -81,27 +114,42 @@ class App:
 
         with tabs.add_tab("View", viser.Icon.EYE):
             names = tuple(self.project.snapshot_names()) if self.project else ("priors",)
-            self.g_snapshot = gui.add_dropdown("Snapshot", options=names)
+            self.g_snapshot = gui.add_dropdown(
+                "Snapshot", options=names, hint="priors = telemetry poses; round_N_tri = after triangulation of "
+                "round N; round_N = after its bundle adjustment; refined = final model.")
             self.g_snapshot.on_update(lambda _: self.load_snapshot(self.g_snapshot.value))
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
-                self.g_points = gui.add_checkbox("Points", initial_value=True)
+                self.g_points = gui.add_checkbox("Points", initial_value=True,
+                                                 hint="Sparse 3D points of the snapshot.")
                 self.g_point_size = gui.add_slider("Point size", min=0.01, max=0.5, step=0.01, initial_value=0.08)
-                self.g_cams = gui.add_checkbox("Cameras", initial_value=True)
-                self.g_thumbs = gui.add_checkbox("Thumbnails", initial_value=True)
-                self.g_priors = gui.add_checkbox("Prior cameras", initial_value=False)
-                self.g_corr = gui.add_checkbox("Prior → refined", initial_value=True)
-                self.g_traj = gui.add_checkbox("Trajectories", initial_value=True)
+                self.g_cams = gui.add_checkbox("Cameras", initial_value=True,
+                                               hint="Camera frustums of the snapshot; click one to inspect it.")
+                self.g_thumbs = gui.add_checkbox("Thumbnails", initial_value=True,
+                                                 hint="Image thumbnails in the frustums (slower with many cameras).")
+                self.g_priors = gui.add_checkbox("Prior cameras", initial_value=False,
+                                                 hint="Grey frustums at the telemetry poses.")
+                self.g_corr = gui.add_checkbox("Prior → refined", initial_value=True,
+                                               hint="Red segments from each prior position to the estimated one.")
+                self.g_traj = gui.add_checkbox("Trajectories", initial_value=True,
+                                               hint="Grey: prior path; blue: estimated path.")
                 self.g_scale = gui.add_slider("Camera size", min=0.2, max=5.0, step=0.1, initial_value=1.0)
             with gui.add_folder("Dense / splat"):
-                self.g_dense_pts = gui.add_checkbox("Dense points", initial_value=False, disabled=True)
-                self.g_mesh = gui.add_dropdown("Mesh", options=("off",), initial_value="off", disabled=True)
-                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=False, disabled=True)
+                self.g_dense_pts = gui.add_checkbox("Dense points", initial_value=False, disabled=True,
+                                                    hint="dense/fused.ply (subsampled to 1.5M points). Enabled once "
+                                                         "fusion has run.")
+                self.g_mesh = gui.add_dropdown("Mesh", options=("off",), initial_value="off", disabled=True,
+                                               hint="Simplified preview of the dense mesh (≤300k faces).")
+                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=False, disabled=True,
+                                                hint="splat/splat_enu.ply from scripts/splat, in the same frame "
+                                                     "as the cameras and mesh.")
                 self.g_dense_md = gui.add_markdown("")
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
                 self.g_splat.on_update(lambda _: self._draw_splat())
-            self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation")
+            self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
+                                           hint="Deviation from the prior, mean reprojection error, capture "
+                                                "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
@@ -113,7 +161,8 @@ class App:
 
         with tabs.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
-            self.g_gain = gui.add_slider("Residual ×", min=1.0, max=50.0, step=1.0, initial_value=10.0)
+            self.g_gain = gui.add_slider("Residual ×", min=1.0, max=50.0, step=1.0, initial_value=10.0,
+                                         hint="Magnification of the red reprojection-residual lines.")
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
 
@@ -121,33 +170,47 @@ class App:
             self.g_plot = gui.add_plotly(go.Figure(), aspect=0.9)
 
         with tabs.add_tab("Run", viser.Icon.PLAYER_PLAY):
-            gui.add_markdown("Stages run in the background; poses update live during BA.")
+            self.g_state = gui.add_markdown("⚪ **idle**")
+            self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
             self.g_buttons = {}
-            b = gui.add_button("Run SfM (all)", hint="features → pairs → match → refine → export")
-            b.on_click(lambda _: self.run_stage("sfm"))
-            self.g_buttons["sfm"] = b
-            for stage in pipeline.SFM_STAGES:
-                b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""))
-                b.on_click(lambda _, s=stage: self.run_stage(s))
-                self.g_buttons[stage] = b
+            with gui.add_folder("Sparse (pose refinement, CPU)"):
+                b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
+                                   hint="Runs features → pairs → match → refine → export in sequence. "
+                                        "About 15-20 min on CPU for 300 images; matching dominates.")
+                b.on_click(lambda _: self.run_stage("sfm"))
+                self.g_buttons["sfm"] = b
+                for stage in pipeline.SFM_STAGES:
+                    b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
+                                       hint=STAGE_HINTS[stage])
+                    b.on_click(lambda _, s=stage: self.run_stage(s))
+                    self.g_buttons[stage] = b
             with gui.add_folder("Dense (COLMAP MVS)"):
                 gui.add_markdown("PatchMatch stereo: " + ("CUDA available" if dense.has_cuda() else
                                  "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
-                self.g_mesh_method = gui.add_dropdown("Mesh method", options=dense.MESH_METHODS + ("both",),
-                                                      initial_value="delaunay")
-                b = gui.add_button("Run dense (all)", disabled=not dense.has_cuda())
+                self.g_mesh_method = gui.add_dropdown(
+                    "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
+                    hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
+                         "closes holes and may balloon over open areas.")
+                b = gui.add_button("Run dense (all)", disabled=not dense.has_cuda(),
+                                   hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
+                                        "Needs CUDA; long (hours for 300 full-res images).")
                 b.on_click(lambda _: self.run_stage("dense"))
                 self.g_buttons["dense"] = b
                 for stage in pipeline.DENSE_STAGES:
-                    b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()))
+                    b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()),
+                                       hint=STAGE_HINTS[stage])
                     b.on_click(lambda _, s=stage: self.run_stage(s))
                     self.g_buttons[stage] = b
             with gui.add_folder("Gaussian splat (nerfstudio)", expand_by_default=False):
                 gui.add_markdown("Train on the host: `scripts/splat <project>` (nerfstudio container, GPU). "
                                  "It writes `splat/splat_enu.ply`, aligned with the mesh.")
-                gui.add_button("Reload dense / splat").on_click(lambda _: self._refresh_dense())
-            self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
-            self.g_status = gui.add_markdown("idle")
+                gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
+                               "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
+                    lambda _: self._refresh_dense())
+            with gui.add_folder("History"):
+                self.g_history = gui.add_markdown("_nothing run in this session_")
+            with gui.add_folder("Log", expand_by_default=False):
+                self.g_log = gui.add_markdown("")
 
         if self.project is not None:
             with tabs.add_tab("Ingest", viser.Icon.VIDEO):
@@ -396,84 +459,141 @@ class App:
     # ------------------------------------------------------------- running
     def run_stage(self, stage):
         if self.running or self.ingest.running:
+            self.g_state.content += "  \n_busy: wait for the running job to finish_"
             return
         if self.project is None:
-            self.g_status.content = "no images yet: extract them in the Ingest tab first"
+            self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         self.running = True
+        self._run_id = getattr(self, "_run_id", 0) + 1
         for b in self.g_buttons.values():
             b.disabled = True
         self.g_progress.visible = True
         self.g_progress.value = 0.0
-        threading.Thread(target=self._run, args=(stage,), daemon=True).start()
+        threading.Thread(target=self._run, args=(stage, self._run_id), daemon=True).start()
 
-    def _run(self, stage):
+    def _run(self, stage, run_id):
         project, t0 = self.path, time.time()
-        self.g_status.content = f"running **{stage}** …"
+        self._job = {"name": stage, "t0": t0, "label": stage, "stage_t0": t0, "detail": ""}
+        threading.Thread(target=self._ticker, args=(run_id,), daemon=True).start()
+        pipeline.LISTENERS.append(self._on_log)
+        final = None
         try:
             report = pipeline.Report(project)
             pri = self.project.priors
             if stage == "sfm" or stage in pipeline.SFM_STAGES:
                 seq = pipeline.SFM_STAGES if stage == "sfm" else (stage,)
-                if stage != "refine":
-                    self._ticker(stage, t0)
-                for k, st in enumerate(seq):
-                    self._stage_label = f"{st} ({k + 1}/{len(seq)})" if len(seq) > 1 else st
-                    if len(seq) > 1:
-                        self.g_progress.value = 100.0 * k / len(seq)
-                    if st == "features":
-                        pipeline.stage_features(project, report)
-                    elif st == "pairs":
-                        pipeline.stage_pairs(project, report, pri, self.project.meta)
-                    elif st == "match":
-                        pipeline.stage_match(project, report)
-                    elif st == "refine":
-                        pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
-                    elif st == "export":
-                        pipeline.stage_export(project, report)
-            elif stage == "dense" or stage in pipeline.DENSE_STAGES:
+            else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
-                m = self.g_mesh_method.value
-                methods = dense.MESH_METHODS if m == "both" else (m,)
-                self._ticker(stage, t0)
-                for k, st in enumerate(seq):
-                    self.g_progress.value = 100.0 * k / len(seq)
-                    self._stage_label = st
+            m = self.g_mesh_method.value
+            methods = dense.MESH_METHODS if m == "both" else (m,)
+            for k, st in enumerate(seq):
+                self._begin_stage(st, k, len(seq))
+                ts = time.time()
+                if st == "features":
+                    pipeline.stage_features(project, report)
+                elif st == "pairs":
+                    pipeline.stage_pairs(project, report, pri, self.project.meta)
+                elif st == "match":
+                    pipeline.stage_match(project, report)
+                elif st == "refine":
+                    pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
+                elif st == "export":
+                    pipeline.stage_export(project, report)
+                else:
                     pipeline.stage_dense(project, report, st, methods)
+                self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
+            if stage == "dense" or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
-            self.g_status.content = f"**{stage}** done in {time.time() - t0:.0f} s"
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm") else None)
+            final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
+                     f"{NEXT_STEP.get(stage, '')}")
         except Exception as e:  # surface failures in the GUI instead of killing the thread silently
             traceback.print_exc()
-            self.g_status.content = f"**{stage}** failed: `{e}`"
+            label = self._job["label"]
+            self._history(f"❌ **{label}** failed: `{e}`")
+            final = (f"❌ **{label} failed** after {_fmt_s(time.time() - t0)}: `{e}`  \n"
+                     "details in the Log folder and the server console")
         finally:
-            self.running = False
+            pipeline.LISTENERS.remove(self._on_log)
+            with self.lock:  # the ticker writes under the same lock and checks `running`
+                self.running = False
+                self.g_state.content = final or "❌ **stopped**"
             for b in self.g_buttons.values():
-                b.disabled = False
+                b.disabled = b is self.g_buttons.get("stereo") and not dense.has_cuda() or \
+                    b is self.g_buttons.get("dense") and not dense.has_cuda()
             self.g_progress.visible = False
 
-    def _ticker(self, stage, t0):
-        self._stage_label = stage
+    def _begin_stage(self, st, k, n):
+        j = self._job
+        j["label"] = f"{st} ({k + 1}/{n})" if n > 1 else st
+        j["stage_t0"], j["detail"] = time.time(), ""
+        if n > 1:
+            self.g_progress.value = 100.0 * k / n
+        self._on_log(f"--- {st} started")
 
-        def tick():
-            while self.running:
-                if not self._stage_label.startswith("refine"):  # refine reports its own progress
-                    self.g_status.content = f"running **{self._stage_label}** … {time.time() - t0:.0f} s"
-                time.sleep(1.0)
-        threading.Thread(target=tick, daemon=True).start()
+    def _ticker(self, run_id):
+        """Rewrites the state line every second until this run ends (no stale 'running' after it)."""
+        while True:
+            with self.lock:
+                if not self.running or self._run_id != run_id:
+                    return
+                j = self._job
+                now = time.time()
+                self.g_state.content = (
+                    f"⏳ **running {j['label']}** · stage {_fmt_s(now - j['stage_t0'])} · "
+                    f"total {_fmt_s(now - j['t0'])}" + (f"  \n{j['detail']}" if j["detail"] else ""))
+            time.sleep(1.0)
+
+    def _on_log(self, msg):
+        lines = getattr(self, "_log_lines", [])
+        for line in str(msg).splitlines():
+            lines.append(f"{time.strftime('%H:%M:%S')} {line[:240]}" + ("…" if len(line) > 240 else ""))
+        self._log_lines = lines[-LOG_LINES:]
+        self.g_log.content = "```\n" + "\n".join(self._log_lines) + "\n```"
+
+    def _history(self, line):
+        h = getattr(self, "_history_lines", [])
+        h.append(f"{time.strftime('%H:%M:%S')} {line}")
+        self._history_lines = h[-30:]
+        self.g_history.content = "  \n".join(reversed(self._history_lines))
+
+    @staticmethod
+    def _stage_summary(st, rep):
+        r = rep.get(st, {}) if st in pipeline.SFM_STAGES else rep.get("dense", {}).get(st, {})
+        try:
+            if st == "features":
+                return f"{r['images']} images, {r['keypoints']:,} keypoints"
+            if st == "pairs":
+                return f"{r['num_pairs']:,} pairs"
+            if st == "match":
+                return f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
+            if st == "refine":
+                f = r["final"]
+                e, d = f["point_error_px"], f["prior_deviation"]["position_m"]
+                return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "
+                        f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']})")
+            if st == "export":
+                return f"{r['frames']} frames → transforms.json"
+            if st == "fusion":
+                return f"{r.get('points', r)}"
+        except (KeyError, TypeError):
+            pass
+        text = str(r)
+        return text[:160] + ("…" if len(text) > 160 else "")
 
     def _on_refine_event(self, ev):
         phase, rnd, rounds = ev["phase"], ev.get("round", 0), ev.get("rounds", 1)
         if phase == "triangulate":
-            self.g_status.content = f"round {rnd + 1}/{rounds}: triangulating …"
+            self._job["detail"] = f"round {rnd + 1}/{rounds}: triangulating …"
             self.g_progress.value = 100.0 * rnd / rounds
         elif phase == "ba":
             now = time.time()
             if now - self._last_live < 0.25:  # throttle scene updates
                 return
             self._last_live = now
-            self.g_status.content = (f"round {rnd + 1}/{rounds}: BA iteration {ev['iteration']}, "
-                                     f"cost {ev['cost']:.4g}")
+            self._job["detail"] = (f"round {rnd + 1}/{rounds}: bundle adjustment iteration {ev['iteration']} "
+                                   f"(max 500), cost {ev['cost']:.4g}")
             self._update_cameras_live(ev["rec"])
         elif phase in ("round_done", "done"):
             with self.lock:

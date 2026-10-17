@@ -39,8 +39,13 @@ STAGES = SFM_STAGES + DENSE_STAGES
 GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": STAGES}
 
 
+LISTENERS = []  # callables(msg), e.g. the GUI log panel
+
+
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
+    for fn in LISTENERS:
+        fn(msg)
 
 
 class Report:

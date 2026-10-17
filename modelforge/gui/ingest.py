@@ -73,9 +73,15 @@ class IngestPanel:
         gui = self.gui
         self.g_md = gui.add_markdown("")
         with gui.add_folder("Videos"):
-            self.g_video = gui.add_dropdown("Video", options=("(none found)",))
-            self.g_video_path = gui.add_text("or path", initial_value="")
-            row = gui.add_button_group("", options=("Add as source", "Rescan"))
+            self.g_video = gui.add_dropdown("Video", options=("(none found)",),
+                                            hint="Videos found next to this project and in data/ "
+                                                 "(project folders are skipped). The .SRT sidecar is used if present.")
+            self.g_video_path = gui.add_text("or path", initial_value="",
+                                             hint="Any video path inside the container (repo = /workspace); "
+                                                  "overrides the dropdown.")
+            row = gui.add_button_group("", options=("Add as source", "Rescan"),
+                                       hint="Add as source: the whole clip becomes a new source (narrow it with its "
+                                            "range). Rescan: look for new videos.")
             row.on_click(lambda e: self.add_source() if e.target.value == "Add as source" else self.rescan())
         self.g_sources = gui.add_folder("Sources")
         with self.g_sources:
@@ -83,35 +89,54 @@ class IngestPanel:
         with gui.add_folder("Sampling"):
             st = self.settings
             self.g_sampling = gui.add_dropdown("Sampling", options=("distance", "time"), initial_value=st.sampling,
-                                               hint="distance: travelled distance + view-rotation credit")
-            self.g_num = gui.add_number("Images (all sources)", initial_value=st.num_images, min=1, step=1)
+                                               hint="distance: images at equal steps of travelled distance + "
+                                                    "view-rotation credit (none while hovering). time: equal steps "
+                                                    "of video time.")
+            self.g_num = gui.add_number("Images (all sources)", initial_value=st.num_images, min=1, step=1,
+                                        hint="Total images over all sources, spread by distance + rotation "
+                                             "(spacing = total / images).")
             self.g_spacing = gui.add_number("Spacing (0 = from images)", initial_value=st.spacing or 0.0, min=0.0,
-                                            step=0.1, hint="m (distance) or s (time)")
+                                            step=0.1, hint="Fixed step between images in m (distance) or s (time) "
+                                                           "instead of a total image count. 0 = use Images.")
             self.g_rotw = gui.add_number("Rotation credit m/° (−1 = auto)",
                                          initial_value=-1.0 if st.rot_weight is None else st.rot_weight,
-                                         min=-1.0, step=0.01)
+                                         min=-1.0, step=0.01,
+                                         hint="Metres of travel one degree of view rotation counts as, so turns "
+                                              "on the spot still get images. −1 = median look-at depth × π/180.")
             self.g_window = gui.add_slider("Sharpest-frame window", min=0.1, max=1.0, step=0.05,
-                                           initial_value=st.window)
+                                           initial_value=st.window,
+                                           hint="Fraction of the spacing searched around each target for the "
+                                                "sharpest frame (Laplacian variance).")
             self.g_yaw = gui.add_dropdown("Yaw source", options=("aircraft", "gimbal"), initial_value=st.yaw_source,
-                                          hint="aircraft unless the gimbal can yaw (not the NEO2)")
+                                          hint="Camera heading from the aircraft yaw (NEO2: the gimbal cannot "
+                                               "yaw). gimbal only for drones whose gimbal yaws and reports a true "
+                                               "heading.")
             for h in (self.g_sampling, self.g_num, self.g_spacing, self.g_rotw, self.g_window, self.g_yaw):
                 h.on_update(lambda _: self._settings_changed())
         self.g_plan_md = gui.add_markdown("")
         with gui.add_folder("Frame preview"):
-            self.g_pv_source = gui.add_dropdown("Source", options=("-",))
-            self.g_pv_time = gui.add_slider("Time [s]", min=0.0, max=1.0, step=0.1, initial_value=0.0)
+            self.g_pv_source = gui.add_dropdown("Source", options=("-",), hint="Source to preview.")
+            self.g_pv_time = gui.add_slider("Time [s]", min=0.0, max=1.0, step=0.1, initial_value=0.0,
+                                            hint="Video time; shows the frame, the aligned telemetry and a white "
+                                                 "camera in the 3D view.")
             self.g_pv_image = gui.add_image(np.zeros((36, 64, 3), np.uint8))
             self.g_pv_md = gui.add_markdown("")
-            row = gui.add_button_group("Set range", options=("Start here", "End here"))
+            row = gui.add_button_group("Set range", options=("Start here", "End here"),
+                                       hint="Set the previewed source's range start or end to the current time.")
             row.on_click(lambda e: self._set_range_here(e.target.value == "Start here"))
             self.g_pv_source.on_update(lambda _: self._preview_source_changed())
             self.g_pv_time.on_update(lambda _: self.request_preview())
-        self.g_show = gui.add_checkbox("Show flight plan in 3D", initial_value=True)
+        self.g_show = gui.add_checkbox("Show flight plan in 3D", initial_value=True,
+                                       hint="Tracks per source (bright inside the range, grey outside) and dots at "
+                                            "the planned image positions.")
         self.g_show.on_update(lambda _: self._draw_scene())
         self.g_plot = gui.add_plotly(go.Figure(), aspect=1.0)
         self.g_overwrite = gui.add_checkbox("Overwrite existing images", initial_value=False,
-                                            hint="old images and everything derived from them move to previous/")
-        self.g_extract = gui.add_button("Extract images + priors", icon=viser.Icon.PHOTO)
+                                            hint="Old images and everything derived from them (databases, sparse, "
+                                                 "dense, splat, report) move to previous/<time>/, nothing is deleted.")
+        self.g_extract = gui.add_button("Extract images + priors", icon=viser.Icon.PHOTO,
+                                        hint="Write images/, poses.json and poses.csv for the plan. Decodes each "
+                                             "video once (pieces late in a video take longer). Then: Run tab.")
         self.g_extract.on_click(lambda _: self.extract())
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_status = gui.add_markdown("")
@@ -130,7 +155,7 @@ class IngestPanel:
     def add_source(self):
         v = self.g_video_path.value.strip() or self.g_video.value
         if not v or v == "(none found)" or not os.path.exists(v):
-            self.g_status.content = f"video not found: `{v}`"
+            self.g_status.content = f"❌ video not found: `{v}`"
             return
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
@@ -155,11 +180,18 @@ class IngestPanel:
                     md = gui.add_markdown("analysing …")
                     end = s.end if s.end is not None else max(s.start + 1.0, 1.0)
                     rng = gui.add_multi_slider("Range [s]", min=0.0, max=max(end, 1.0), step=0.5,
-                                               initial_value=(s.start, end), min_range=0.5, disabled=True)
-                    en = gui.add_checkbox("Enabled", initial_value=s.enabled)
+                                               initial_value=(s.start, end), min_range=0.5, disabled=True,
+                                               hint="Video time range used from this source. Trim takeoff, landing "
+                                                    "or near-horizontal views here; the track turns grey outside.")
+                    en = gui.add_checkbox("Enabled", initial_value=s.enabled,
+                                          hint="Untick to leave this source out of the plan without removing it.")
                     lead = gui.add_number("Lead [frames] (−1 = auto)", initial_value=-1.0 if s.lead is None else s.lead,
-                                          min=-1.0, step=0.1)
-                    btn = gui.add_button_group("", options=("Preview", "Add piece", "Remove"))
+                                          min=-1.0, step=0.1,
+                                          hint="How many frames the djmd telemetry runs ahead of the video. "
+                                               "Auto = estimated from the SRT (21.6 on the NEO2 sample).")
+                    btn = gui.add_button_group("", options=("Preview", "Add piece", "Remove"),
+                                               hint="Preview: show this source in Frame preview. Add piece: another "
+                                                    "range of the same video. Remove: drop the source.")
                 rng.on_update(lambda _, k=k: self._range_changed(k))
                 en.on_update(lambda _, k=k: self._enabled_changed(k))
                 lead.on_update(lambda _, k=k: self._lead_changed(k))
@@ -237,7 +269,7 @@ class IngestPanel:
                 break
             w = self._source_widgets[k]
             if not w["ready"]:
-                w["md"].content = "analysing (decoding telemetry, estimating lead) …"
+                w["md"].content = "⏳ analysing: decoding telemetry, estimating the lead …"
                 c = ingest.load_clip(s.video, s.lead, s.srt)
                 w["range"].max = round(c.duration, 1)
                 end = c.duration if s.end is None else min(s.end, c.duration)
@@ -433,10 +465,10 @@ class IngestPanel:
         if self.running or self.app.running:
             return
         if not self.plan or not self.plan.num_images:
-            self.g_status.content = "nothing to extract"
+            self.g_status.content = "⚪ nothing to extract: the plan selects no images"
             return
         if self.app.project and not self.g_overwrite.value:
-            self.g_status.content = "this project already has images: tick **Overwrite** to re-extract " \
+            self.g_status.content = "⚪ this project already has images: tick **Overwrite** to re-extract " \
                                     "(old outputs move to `previous/`)"
             return
         self.running = True
@@ -449,16 +481,18 @@ class IngestPanel:
         try:
             def progress(done, total, msg):
                 self.g_progress.value = 100.0 * done / max(total, 1)
-                self.g_status.content = f"extracting {done}/{total} · {msg} · {time.time() - t0:.0f} s"
-            self.g_status.content = "extracting … (decoding up to the first selected frame)"
+                self.g_status.content = f"⏳ **extracting** {done}/{total} images · {msg} · {time.time() - t0:.0f} s"
+            self.g_status.content = "⏳ **extracting** … decoding up to the first selected frame"
             ingest.run(self.path, self.sources, self.settings, progress=progress, overwrite=self.g_overwrite.value,
                        log=lambda m: print(m, flush=True))
             self.g_overwrite.value = False
             self.app.load_project()
-            self.g_status.content = f"extracted in {time.time() - t0:.0f} s · next: Run tab → **Run SfM (all)**"
+            n = len(self.app.project.names)
+            self.g_status.content = (f"✅ **extracted {n} images** in {time.time() - t0:.0f} s "
+                                     f"· {time.strftime('%H:%M:%S')}  \nnext: Run tab → **Run SfM (all)**")
         except Exception as e:
             traceback.print_exc()
-            self.g_status.content = f"extraction failed: `{e}`"
+            self.g_status.content = f"❌ **extraction failed**: `{e}`"
         finally:
             self.running = False
             self.g_extract.disabled = False

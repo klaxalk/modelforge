@@ -87,6 +87,10 @@ class PriorModel:
     abs_rejected: set = field(default_factory=set)  # image names
     rel_rejected: set = field(default_factory=set)  # (name_i, name_j)
     outlier_quantile: float = 0.999
+    # A camera seeing few points cannot overrule its prior: rejecting it lets the pose drift
+    # (berlin_3_1 pieces: 56 observations -> 40 m off). Its large residual means the image
+    # solution is weak, not that the prior is wrong.
+    min_obs_to_reject: int = 100
     start_round: int = 1  # round 0 runs with unconverged intrinsics and 40 px thresholds
     max_scale_change: float = 2.0  # per round
     floors: tuple = (0.1, 0.1, 0.02, 0.01)  # abs rot deg, abs pos m, rel rot deg, rel pos m
@@ -227,7 +231,8 @@ def update(model, rec, priors_raw):
     thr = CHI2_6[model.outlier_quantile]
     d2_abs = {n: sum(_d2_blocks(*r)) for n, r in abs_res.items()}
     d2_rel = {k: sum(_d2_blocks(*r)) for k, r in rel_res.items()}
-    model.abs_rejected = {n for n, d in d2_abs.items() if d > thr}
+    nobs = {rec.image(i).name: rec.image(i).num_points3D for i in rec.reg_image_ids()}
+    model.abs_rejected = {n for n, d in d2_abs.items() if d > thr and nobs.get(n, 0) >= model.min_obs_to_reject}
     model.rel_rejected = {k for k, d in d2_rel.items() if d > thr} if model.use_relative else set()
     rep["abs_d2_median"] = round(float(np.median(list(d2_abs.values()))), 3)
     rep["rel_d2_median"] = round(float(np.median(list(d2_rel.values()))), 3) if d2_rel else None
@@ -240,8 +245,8 @@ def update(model, rec, priors_raw):
 # --- multi-video: per-source position offsets ----------------------------------------
 # Each flight has its own GNSS bias (~1-3 m) and possibly takeoff-height error, so the
 # videos' priors disagree by a near-constant shift. Before the shift is known, each video
-# triangulates its own copy of the shared scene ("split" points); once corrected, the
-# tracks merge and the remaining shift shows up in the per-source prior residuals.
+# triangulates its own copy of the shared scene ("split" points), and the median
+# difference between the copies measures the shift directly.
 
 def _point_ids(image):
     return np.array([p.point3D_id if p.has_point3D() else -1 for p in image.points2D], np.int64)
@@ -311,23 +316,6 @@ def _solve_offsets(edges, ref):
     return {s: x[col[s]] for s in unknown}
 
 
-def _residual_offsets(rec, priors_raw, model, ref, min_images=10):
-    """Per-source median of C_param - C_prior (corrected), relative to the reference source."""
-    priors = corrected_priors(priors_raw, model)
-    res = {}
-    for image_id in rec.reg_image_ids():
-        img = rec.image(image_id)
-        p = priors.get(img.name)
-        if p is None:
-            continue
-        R, t = _pose(rec, img)
-        res.setdefault(p.source, []).append(-R.T @ t - p.center)
-    med = {s: np.median(np.array(v), axis=0) for s, v in res.items() if len(v) >= min_images}
-    if ref not in med:
-        return {}
-    return {s: m - med[ref] for s, m in med.items() if s != ref}
-
-
 def _shift_cameras(rec, priors, inc):
     """Move the cameras of each source by its offset increment (C += d)."""
     for image_id in rec.reg_image_ids():
@@ -344,25 +332,27 @@ def _shift_cameras(rec, priors, inc):
         frame.rig_from_world = pose
 
 
-def update_source_offsets(model, rec, priors_raw, db_path=None, min_split=30):
+def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
     """One per-source offset update after a BA (no-op for single-source projects).
-    Reference = source of the first image. Split points drive the update while they
-    outnumber merged ones on an edge (bootstrap; the cameras are shifted too, because
-    their copies are not linked yet); afterwards the prior residuals do."""
+    Reference = source of the first image. The increment comes from split points only:
+    a direct geometric measurement of how far apart the sources' copies of the scene are.
+    The cameras are shifted with it, so the next triangulation merges the copies. Once
+    merged, the split points left over measure ~0 and the offsets settle.
+
+    (Per-source median prior residuals were tried as a second estimator and rejected: on
+    two pieces of one flight they reported a ~1 m offset that wandered by 0.5 m per round,
+    i.e. GNSS drift between the pieces, while the split points measured 6 mm.)"""
     sources = {p.source for p in priors_raw.values()}
     if len(sources) < 2 or not model.estimate_source_offsets:
         return None
     ref = priors_raw[by_order(priors_raw)[0]].source
-    edges = split_point_edges(rec, priors_raw, db_path) if db_path else {}
-    use = {k: e for k, e in edges.items() if e["n_split"] >= max(min_split, e["merged"])}
-    if use:
-        inc, method = _solve_offsets(use, ref), "split_points"
-        _shift_cameras(rec, priors_raw, inc)  # so the next triangulation already merges the copies
-    else:
-        inc, method = _residual_offsets(rec, priors_raw, model, ref), "residuals"
+    edges = split_point_edges(rec, priors_raw, db_path)
+    use = {k: e for k, e in edges.items() if e["n_split"] >= min_split}
+    inc = _solve_offsets(use, ref) if use else {}
+    _shift_cameras(rec, priors_raw, inc)
     for s, d in inc.items():
         model.source_offsets[s] = model.source_offsets.get(s, np.zeros(3)) + d
-    return {"method": method, "reference": int(ref),
+    return {"method": "split_points" if use else "none", "reference": int(ref),
             "increment_m": {str(s): np.round(d, 3).tolist() for s, d in sorted(inc.items())},
             "offsets_m": {str(s): np.round(d, 3).tolist() for s, d in sorted(model.source_offsets.items())},
             "edges": {f"{a}-{b}": {"n_split": e["n_split"], "merged": e["merged"],

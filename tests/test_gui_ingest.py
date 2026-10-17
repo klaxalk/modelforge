@@ -36,7 +36,7 @@ def app(tmp_path_factory):
 def test_empty_project_starts(app):
     assert app.project is None and "no images yet" in app.g_header.content
     app.run_stage("pairs")
-    assert "Ingest tab" in app.g_status.content
+    assert "Ingest tab" in app.g_state.content
 
 
 def test_plan_two_pieces(app):
@@ -70,7 +70,7 @@ def test_extract_and_run_first_stages(app):
     for stage in ("features", "pairs"):
         app.run_stage(stage)
         wait(lambda: not app.running, timeout=300)
-        assert "done" in app.g_status.content, app.g_status.content
+        assert "finished" in app.g_state.content, app.g_state.content
     pairs = open(os.path.join(app.path, "pairs.txt")).read().split("\n")
     assert len([x for x in pairs if x]) > 0
     p.extract()  # project has images now: needs the overwrite box

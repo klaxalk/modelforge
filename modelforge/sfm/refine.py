@@ -104,7 +104,12 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
 
     ba = pycolmap.create_default_ceres_bundle_adjuster(ba_options, ba_config, rec)
     problem = ba.problem
-    prior_loss = pyceres.CauchyLoss(prior_loss_scale)  # on whitened residuals (sigma units)
+    # Losses on whitened residuals (sigma units). Absolute: Huber, whose pull on a far-off camera
+    # stays constant. Cauchy's fades, so a camera seeing few points (each in 2-view tracks that
+    # slide with it) ran off 35 m in round 0 on berlin_3_1 pieces; gross prior outliers are
+    # handled by explicit rejection instead. Relative: Cauchy (heavy-tailed, ~23 % rejected).
+    abs_loss = pyceres.HuberLoss(prior_loss_scale)
+    prior_loss = pyceres.CauchyLoss(prior_loss_scale)
     poses = {}
     for image_id in rec.reg_image_ids():
         img = rec.image(image_id)
@@ -117,7 +122,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
             continue
         prior = priors[name]
         cost = pycolmap.cost_functions.AbsolutePosePriorCost(prior.covariance(model.abs_sigmas), prior.rigid())
-        problem.add_residual_block(cost, prior_loss, [pose.params])
+        problem.add_residual_block(cost, abs_loss, [pose.params])
         n_abs += 1
     if model.use_relative and relative:
         for a, b in robust.consecutive_pairs(priors, poses):
