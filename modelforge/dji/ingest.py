@@ -24,6 +24,7 @@ Usage: python -m modelforge.dji.extract A.MP4 [B.MP4 ...] -o PROJECT, or the GUI
 
 import csv
 import datetime
+import glob
 import json
 import math
 import os
@@ -43,7 +44,8 @@ from modelforge.dji.srt import parse_srt
 PLAN_FILE = "ingest.json"
 # Everything derived from the images; moved to PROJECT/previous/<time>/ on re-extraction.
 OUTPUTS = ("images", "poses.json", "poses.csv", "features.db", "database.db", "database.db-wal", "database.db-shm",
-           "pairs.txt", "sparse", "dense", "transforms.json", "sparse_pc.ply", "report.json", "splat", "nerfstudio")
+           "pairs.txt", "sparse", "dense", "transforms.json", "sparse_pc.ply", "report.json", "splat", "nerfstudio",
+           "export", "images_*")  # images_N: downscaled frames for splat training
 VIDEO_EXTS = (".mp4", ".mov")
 
 
@@ -342,12 +344,10 @@ def archive_outputs(project):
     """Move image-derived outputs to PROJECT/previous/<time>/ (nothing is deleted)."""
     dst = os.path.join(project, "previous", time.strftime("%Y%m%d-%H%M%S"))
     moved = False
-    for name in OUTPUTS:
-        p = os.path.join(project, name)
-        if os.path.lexists(p):
-            os.makedirs(dst, exist_ok=True)
-            shutil.move(p, os.path.join(dst, name))
-            moved = True
+    for p in sorted(q for name in OUTPUTS for q in glob.glob(os.path.join(project, name))):
+        os.makedirs(dst, exist_ok=True)
+        shutil.move(p, os.path.join(dst, os.path.basename(p)))
+        moved = True
     return dst if moved else None
 
 

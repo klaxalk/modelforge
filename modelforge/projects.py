@@ -6,7 +6,7 @@ results and final results.
                 dense/fused.ply, dense/meshed-*.ply, dense/textured-*/, splat/splat_enu.ply
   intermediate: images/ (the extracted frames, needed by every later stage), features.db,
                 database.db, pairs.txt, sparse/round_*, dense/images, dense/sparse, dense/stereo
-                (PatchMatch maps, ~10 GB), dense/preview-*.ply, nerfstudio/ (training runs),
+                (PatchMatch maps, ~10 GB), dense/preview-*.ply, nerfstudio/ (training runs), images_N/,
                 splat/splat.ply, previous/ (archived earlier extractions)
 
 `clean` deletes the intermediates that are only needed to re-run stages, never the final
@@ -33,6 +33,7 @@ FINAL = (
     ("dense/textured-delaunay", "textured mesh (Delaunay)"),
     ("dense/textured-poisson", "textured mesh (Poisson)"),
     ("splat/splat_enu.ply", "Gaussian splat (ENU)"),
+    ("export", "exported mesh / splat"),
 )
 INTERMEDIATE = (
     ("images", "extracted frames"),
@@ -45,6 +46,7 @@ INTERMEDIATE = (
     ("dense/stereo", "PatchMatch depth/normal maps"),
     ("dense/preview-*.ply", "GUI mesh previews"),
     ("nerfstudio", "splatfacto training runs"),
+    ("images_*", "downscaled frames for splat training"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("previous", "archived earlier extractions"),
 )

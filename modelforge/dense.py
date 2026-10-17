@@ -11,7 +11,7 @@ Everything stays in the refined world frame, i.e. ENU like transforms.json, so t
 mesh lines up with the cameras (and with the splat after export.splat_to_enu).
 Delaunay (visibility-based, keeps open surfaces) suits drone scenes better than
 Poisson, which closes the surface; it has no pycolmap binding, so it runs through
-the COLMAP CLI.
+the COLMAP CLI. QUALITY holds the speed/detail presets (default "low").
 """
 
 import os
@@ -23,6 +23,20 @@ import pycolmap
 
 COLMAP_BIN = shutil.which("colmap") or "/opt/colmap/bin/colmap"
 MESH_METHODS = ("delaunay", "poisson")
+
+# Quality presets: image size for undistort, PatchMatch options for stereo. PatchMatch cost per
+# pixel ~ num_samples x (2 window_radius + 1)^2 / window_step^2 and does not depend on the number
+# of source images. Measured on berlin_test (20 views, 640 px, RTX 3090, both passes + fusion):
+#   COLMAP defaults            170 s   43.5k fused points
+#   num_samples 7               90 s   42.6k  (same accuracy against the SfM points)
+#   + window_step 2             39 s   38.2k  (same accuracy, ~12% fewer points)
+QUALITY = {
+    "low": {"max_image_size": 640, "window_step": 2, "num_samples": 7},
+    "medium": {"max_image_size": 1200, "num_samples": 7},
+    "high": {"max_image_size": -1, "num_samples": 7},
+    "max": {"max_image_size": -1},  # COLMAP defaults at full resolution
+}
+DEFAULT_QUALITY = "low"
 
 
 def workspace(project):
@@ -48,13 +62,16 @@ def undistort(project, max_image_size=-1):
             "height": int(cam.height), "seconds": round(time.time() - t0, 1)}
 
 
-def stereo(project, max_image_size=-1, geom_consistency=True):
+def stereo(project, max_image_size=-1, geom_consistency=True, **patch_match):
+    """PatchMatch on the undistorted workspace; extra keywords set PatchMatchOptions (see QUALITY)."""
     if not has_cuda():
         raise RuntimeError("COLMAP PatchMatch stereo needs CUDA, and this pycolmap was built without it. "
                            "Run the dense stages in the CUDA container: MODELFORGE_GPU=1 scripts/dev ...")
     opts = pycolmap.PatchMatchOptions()
     opts.max_image_size = max_image_size
     opts.geom_consistency = geom_consistency
+    for k, v in patch_match.items():
+        setattr(opts, k, v)
     t0 = time.time()
     pycolmap.patch_match_stereo(workspace(project), options=opts)
     maps = os.listdir(os.path.join(workspace(project), "stereo", "depth_maps"))

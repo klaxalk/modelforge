@@ -11,6 +11,7 @@ import plyfile
 import pytest
 
 from modelforge import dense
+from modelforge.gui import app as gapp
 from tests.test_dense_chain import make_workspace
 from tests.test_splat_to_enu import make_splat
 
@@ -82,3 +83,52 @@ def test_run_mesh_stage_from_gui(app, project):
     assert "finished" in app.g_state.content, app.g_state.content
     assert os.path.exists(os.path.join(project, "dense", "meshed-delaunay.ply"))
     assert os.path.exists(os.path.join(project, "dense", "preview-delaunay.ply"))
+
+
+def test_tab_defaults(app):
+    assert dense.QUALITY[gapp.DENSE_QUALITY[app.g_dense_quality.value]] == dense.QUALITY["low"]
+    assert app.g_splat_disk.value is True and app.g_splat_down.value == 1
+
+
+def test_export_tab(app, project):
+    app._refresh_dense()
+    assert not app.g_export_buttons["mesh"].disabled and not app.g_export_buttons["splat"].disabled
+    assert app.g_export_mesh.options == ("delaunay",)
+
+    class Client:
+        sent = []
+
+        def send_file_download(self, name, data):
+            self.sent.append((name, len(data)))
+
+    def wait():
+        t0 = time.time()
+        while app._exporting and time.time() - t0 < 60:
+            time.sleep(0.1)
+
+    app.g_export_mesh_fmt.value = "glb"
+    app._export("mesh", Client(), download=True)
+    wait()
+    assert "✅" in app.g_export_md.content, app.g_export_md.content
+    assert Client.sent[-1][0].endswith("_mesh-delaunay.glb")
+    app.g_export_mesh_fmt.value = "obj"
+    app._export("mesh", Client(), download=True)
+    wait()
+    assert Client.sent[-1][0].endswith("_mesh-delaunay.obj")  # untextured: one file, sent as is
+    app.g_export_splat_fmt.value = "splat"
+    app._export("splat", None, download=False)
+    wait()
+    assert os.path.getsize(os.path.join(project, "export", os.path.basename(project) + "_splat.splat")) == 500 * 32
+    assert "export/" in app.g_export_md.content
+
+
+def test_download_payload_zips_several_files(tmp_path):
+    import io
+    import zipfile
+    paths = []
+    for name in ("m.obj", "m.mtl", "m.png"):
+        paths.append(str(tmp_path / name))
+        open(paths[-1], "w").write(name)
+    assert gapp._download_payload(paths[:1]) == ("m.obj", b"m.obj")
+    name, data = gapp._download_payload(paths)
+    assert name == "m.zip" and sorted(zipfile.ZipFile(io.BytesIO(data)).namelist()) == ["m.mtl", "m.obj", "m.png"]

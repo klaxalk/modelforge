@@ -164,7 +164,7 @@ class IngestPanel:
                                                  "dense, splat, report) move to previous/<time>/, nothing is deleted.")
         self.g_extract = gui.add_button("Extract images + priors", icon=viser.Icon.PHOTO,
                                         hint="Write images/, poses.json and poses.csv for the plan. Decodes each "
-                                             "video once (pieces late in a video take longer). Then: Run tab.")
+                                             "video once (pieces late in a video take longer). Then: Sparse tab.")
         self.g_extract.on_click(lambda _: self.extract())
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_status = gui.add_markdown("")
@@ -519,7 +519,7 @@ class IngestPanel:
             self.app.load_project()
             n = len(self.app.project.names)
             self.g_status.content = (f"✅ **extracted {n} images** in {time.time() - t0:.0f} s "
-                                     f"· {time.strftime('%H:%M:%S')}  \nnext: Run tab → **Run SfM (all)**")
+                                     f"· {time.strftime('%H:%M:%S')}  \nnext: Sparse tab → **Run SfM (all)**")
         except Exception as e:
             traceback.print_exc()
             self.g_status.content = f"❌ **extraction failed**: `{e}`"

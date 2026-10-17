@@ -18,12 +18,15 @@ import viser
 from plotly.subplots import make_subplots
 
 from modelforge import dense, pipeline, projects, splat
+from modelforge.export import products
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 
-DENSE_SIZES = {"full": -1, "2000 px": 2000, "1200 px": 1200, "640 px (quick)": 640}  # -> max_image_size
+DENSE_QUALITY = {"low (640 px, fast)": "low", "medium (1200 px)": "medium", "high (full res)": "high",
+                 "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
+DENSE_QUALITY_DEFAULT = next(k for k, v in DENSE_QUALITY.items() if v == dense.DEFAULT_QUALITY)
 
 STAGE_HINTS = {
     "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
@@ -43,13 +46,14 @@ STAGE_HINTS = {
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
 }
 NEXT_STEP = {
-    "sfm": "View tab → snapshot **refined**; next: dense stages (GPU) or `scripts/splat`",
+    "sfm": "View tab → snapshot **refined**; next: Dense tab (GPU) or Splat tab",
     "features": "next: **pairs**", "pairs": "next: **match**", "match": "next: **refine**",
     "refine": "View tab shows **refined**; next: **export**",
-    "export": "transforms.json written; next: dense stages (GPU) or `scripts/splat`",
-    "dense": "View tab → Dense / splat", "undistort": "next: **stereo**", "stereo": "next: **fusion**",
-    "fusion": "next: **mesh**", "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written",
-    "splat": "View tab → Dense / splat → **Splat (ENU)**",
+    "export": "transforms.json written; next: Dense tab (GPU) or Splat tab",
+    "dense": "View tab → Dense / splat; Export tab for the mesh",
+    "undistort": "next: **stereo**", "stereo": "next: **fusion**", "fusion": "next: **mesh**",
+    "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written; Export tab",
+    "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
 }
 LOG_LINES = 40
 
@@ -65,6 +69,20 @@ _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60
 def _fmt_s(sec):
     sec = int(round(sec))
     return f"{sec // 60} min {sec % 60:02d} s" if sec >= 60 else f"{sec} s"
+
+
+def _download_payload(paths):
+    """(filename, bytes) for the browser: the file itself, or a .zip when the export has several files."""
+    if len(paths) == 1:
+        with open(paths[0], "rb") as f:
+            return os.path.basename(paths[0]), f.read()
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in paths:
+            z.write(p, os.path.basename(p))
+    return os.path.splitext(os.path.basename(paths[0]))[0] + ".zip", buf.getvalue()
 
 
 def colormap(values, vmax=None):
@@ -115,6 +133,10 @@ class App:
     def _build_gui(self):
         gui = self.server.gui
         self.g_header = gui.add_markdown(self._header())
+        # run state above the tabs, so it stays visible on every tab
+        self.g_state = gui.add_markdown("⚪ **idle**")
+        self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
+        self.g_buttons = {}
         tabs = gui.add_tab_group()
         with tabs.add_tab("Projects", viser.Icon.FOLDERS):
             self.projects = ProjectsPanel(self, gui)
@@ -178,72 +200,119 @@ class App:
         with tabs.add_tab("Plots", viser.Icon.CHART_LINE):
             self.g_plot = gui.add_plotly(go.Figure(), aspect=0.9)
 
-        with tabs.add_tab("Run", viser.Icon.PLAYER_PLAY):
-            self.g_state = gui.add_markdown("⚪ **idle**")
-            self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
-            self.g_buttons = {}
-            with gui.add_folder("Sparse (pose refinement, CPU)"):
-                b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
-                                   hint="Runs features → pairs → match → refine → export in sequence. "
-                                        "About 15-20 min on CPU for 300 images; matching dominates.")
-                b.on_click(lambda _: self.run_stage("sfm"))
-                self.g_buttons["sfm"] = b
-                for stage in pipeline.SFM_STAGES:
-                    b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
-                                       hint=STAGE_HINTS[stage])
-                    b.on_click(lambda _, s=stage: self.run_stage(s))
-                    self.g_buttons[stage] = b
-            with gui.add_folder("Dense (COLMAP MVS)"):
-                gui.add_markdown("PatchMatch stereo: " + ("CUDA available" if dense.has_cuda() else
-                                 "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
-                self.g_mesh_method = gui.add_dropdown(
-                    "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
-                    hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
-                         "closes holes and may balloon over open areas.")
-                self.g_dense_size = gui.add_dropdown(
-                    "Max image size", options=tuple(DENSE_SIZES), initial_value="full",
-                    hint="Longest image side for undistort + stereo (applied when undistort runs). Smaller is "
-                         "much faster and smaller on disk, with a coarser mesh; 640 is a quick check.")
-                b = gui.add_button("Run dense (all)", disabled=not dense.has_cuda(),
-                                   hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
-                                        "Needs CUDA; long (hours for 300 full-res images).")
-                b.on_click(lambda _: self.run_stage("dense"))
-                self.g_buttons["dense"] = b
-                for stage in pipeline.DENSE_STAGES:
-                    b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()),
-                                       hint=STAGE_HINTS[stage])
-                    b.on_click(lambda _, s=stage: self.run_stage(s))
-                    self.g_buttons[stage] = b
-            with gui.add_folder("Gaussian splat (nerfstudio)"):
-                why = splat.available()
-                gui.add_markdown("splatfacto: " + ("ready (GPU + nerfstudio found) · viewer on "
-                                                   f"http://localhost:{splat.VIEWER_PORT} while training"
-                                                   if why is None else f"**unavailable**: {why}"))
-                self.g_splat_method = gui.add_dropdown(
-                    "Method", options=splat.METHODS, initial_value="splatfacto",
-                    hint="splatfacto: default. splatfacto-big: more Gaussians and detail, more GPU memory and time.")
-                self.g_splat_iters = gui.add_number(
-                    "Iterations", initial_value=splat.DEFAULT_ITERATIONS, min=100, step=1000,
-                    hint="Training steps. 30000 is splatfacto's default (~20-40 min on a recent GPU); "
-                         "use a few thousand for a quick check.")
-                b = gui.add_button("Train + export splat", icon=viser.Icon.SPARKLES, disabled=why is not None,
-                                   hint="ns-train on transforms.json + sparse_pc.ply, then ns-export and conversion "
-                                        "to splat/splat_enu.ply in the project's ENU frame (aligned with the "
-                                        "cameras and the mesh). Progress and the log appear here.")
-                b.on_click(lambda _: self.run_stage("splat"))
-                self.g_buttons["splat"] = b
-                self.g_splat_stop = gui.add_button("Stop splat training", icon=viser.Icon.PLAYER_STOP, disabled=True,
-                                                   hint="Terminate ns-train / ns-export. Nothing is converted; "
-                                                        "checkpoints written so far stay in nerfstudio/.")
-                self.g_splat_stop.on_click(lambda _: self._splat_job.stop() if self._splat_job else None)
-                gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
-                               "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
-                    lambda _: self._refresh_dense())
-            with gui.add_folder("History"):
-                self.g_history = gui.add_markdown("_nothing run in this session_")
-            with gui.add_folder("Log", expand_by_default=False):
-                self.g_log = gui.add_markdown("")
+        with tabs.add_tab("Sparse", viser.Icon.CAMERA):
+            gui.add_markdown("Pose refinement on the CPU: features → pairs → match → refine → export "
+                             "(nerfstudio dataset).")
+            b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
+                               hint="Runs features → pairs → match → refine → export in sequence. "
+                                    "About 15-20 min on CPU for 300 images; matching dominates.")
+            b.on_click(lambda _: self.run_stage("sfm"))
+            self.g_buttons["sfm"] = b
+            for stage in pipeline.SFM_STAGES:
+                b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
+                                   hint=STAGE_HINTS[stage])
+                b.on_click(lambda _, s=stage: self.run_stage(s))
+                self.g_buttons[stage] = b
 
+        with tabs.add_tab("Dense", viser.Icon.GRID_DOTS):
+            gui.add_markdown("COLMAP MVS. PatchMatch stereo: " + (
+                "CUDA available" if dense.has_cuda() else
+                "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
+            self.g_dense_quality = gui.add_dropdown(
+                "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
+                hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
+                     "stages run). low: 640 px, fast PatchMatch (default, minutes). medium: 1200 px. high: full "
+                     "resolution. max: COLMAP defaults at full resolution (hours for 300 images).")
+            self.g_mesh_method = gui.add_dropdown(
+                "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
+                hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
+                     "closes holes and may balloon over open areas.")
+            b = gui.add_button("Run dense (all)", icon=viser.Icon.PLAYER_TRACK_NEXT, disabled=not dense.has_cuda(),
+                               hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
+                                    "Needs CUDA. Time depends on Quality.")
+            b.on_click(lambda _: self.run_stage("dense"))
+            self.g_buttons["dense"] = b
+            for stage in pipeline.DENSE_STAGES:
+                b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()),
+                                   hint=STAGE_HINTS[stage])
+                b.on_click(lambda _, s=stage: self.run_stage(s))
+                self.g_buttons[stage] = b
+
+        with tabs.add_tab("Splat", viser.Icon.SPARKLES):
+            why = splat.available()
+            gui.add_markdown("nerfstudio splatfacto: " + ("ready (GPU + nerfstudio found) · viewer on "
+                                                          f"http://localhost:{splat.VIEWER_PORT} while training"
+                                                          if why is None else f"**unavailable**: {why}"))
+            self.g_splat_method = gui.add_dropdown(
+                "Method", options=splat.METHODS, initial_value="splatfacto",
+                hint="splatfacto: default. splatfacto-big: more Gaussians and detail, more GPU memory and time.")
+            self.g_splat_iters = gui.add_number(
+                "Iterations", initial_value=splat.DEFAULT_ITERATIONS, min=100, step=1000,
+                hint="Training steps. 30000 is splatfacto's default (~20-40 min on a recent GPU); "
+                     "use a few thousand for a quick check.")
+            self.g_splat_disk = gui.add_checkbox(
+                "Cache images on disk", initial_value=True,
+                hint="On: images stay on disk and are streamed by worker processes, so large datasets fit in "
+                     "memory. Off: all images are preloaded into GPU memory (nerfstudio's default; it falls back "
+                     "to CPU memory above 500 images), a little faster for small projects.")
+            self.g_splat_down = gui.add_number(
+                "Downsample factor", initial_value=1, min=1, max=16, step=1,
+                hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
+                     "less detail. The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+            b = gui.add_button("Train + export splat", icon=viser.Icon.SPARKLES, disabled=why is not None,
+                               hint="ns-train on transforms.json + sparse_pc.ply, then ns-export and conversion "
+                                    "to splat/splat_enu.ply in the project's ENU frame (aligned with the "
+                                    "cameras and the mesh).")
+            b.on_click(lambda _: self.run_stage("splat"))
+            self.g_buttons["splat"] = b
+            self.g_splat_stop = gui.add_button("Stop splat training", icon=viser.Icon.PLAYER_STOP, disabled=True,
+                                               hint="Terminate ns-train / ns-export. Nothing is converted; "
+                                                    "checkpoints written so far stay in nerfstudio/.")
+            self.g_splat_stop.on_click(lambda _: self._splat_job.stop() if self._splat_job else None)
+            gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
+                           "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
+                lambda _: self._refresh_dense())
+
+        with tabs.add_tab("Export", viser.Icon.DOWNLOAD):
+            self.g_export_md = gui.add_markdown("")
+            with gui.add_folder("Mesh"):
+                self.g_export_mesh = gui.add_dropdown(
+                    "Mesh", options=("none",), initial_value="none", disabled=True,
+                    hint="Which dense mesh to export (enabled once the mesh stage has run).")
+                self.g_export_mesh_fmt = gui.add_dropdown(
+                    "Format", options=products.MESH_FORMATS, initial_value="glb",
+                    hint="glb: one textured glTF file (Blender, web viewers, Cesium). obj: .obj + .mtl + texture. "
+                         "Both Y-up as those tools expect. ply: COLMAP's files as they are, in ENU (z up).")
+                self.g_export_textured = gui.add_checkbox(
+                    "Textured", initial_value=True,
+                    hint="Use the textured mesh (texture stage) if it exists; off: the vertex-coloured mesh.")
+                self.g_export_buttons = {}
+                b = gui.add_button("Export mesh", icon=viser.Icon.FILE_EXPORT, disabled=True,
+                                   hint="Write the mesh into PROJECT/export/ (+ export/georef.json).")
+                b.on_click(lambda e: self._export("mesh", e.client, download=False))
+                self.g_export_buttons["mesh"] = b
+                b = gui.add_button("Download mesh", icon=viser.Icon.DOWNLOAD, disabled=True,
+                                   hint="Export, then send it to this browser (OBJ and textured PLY as a .zip).")
+                b.on_click(lambda e: self._export("mesh", e.client, download=True))
+                self.g_export_buttons["mesh_dl"] = b
+            with gui.add_folder("Splat"):
+                self.g_export_splat_fmt = gui.add_dropdown(
+                    "Format", options=products.SPLAT_FORMATS, initial_value="ply",
+                    hint="ply: standard 3DGS PLY with all SH bands (SuperSplat, Postshot, gsplat). splat: compact "
+                         "32 bytes per Gaussian, colour only (antimatter15-style web viewers). Both in ENU (z up).")
+                b = gui.add_button("Export splat", icon=viser.Icon.FILE_EXPORT, disabled=True,
+                                   hint="Write the splat into PROJECT/export/ (+ export/georef.json).")
+                b.on_click(lambda e: self._export("splat", e.client, download=False))
+                self.g_export_buttons["splat"] = b
+                b = gui.add_button("Download splat", icon=viser.Icon.DOWNLOAD, disabled=True,
+                                   hint="Export, then send it to this browser.")
+                b.on_click(lambda e: self._export("splat", e.client, download=True))
+                self.g_export_buttons["splat_dl"] = b
+
+        with gui.add_folder("History"):
+            self.g_history = gui.add_markdown("_nothing run in this session_")
+        with gui.add_folder("Log", expand_by_default=False):
+            self.g_log = gui.add_markdown("")
 
     def _header(self):
         if self.project is None:
@@ -567,7 +636,7 @@ class App:
                     self._run_splat(project)
                     report = pipeline.Report(project)  # splat.run wrote its stats
                 else:
-                    pipeline.stage_dense(project, report, st, methods, DENSE_SIZES[self.g_dense_size.value])
+                    pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value])
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
@@ -601,7 +670,8 @@ class App:
             self._job["detail"] = f"training step {step:,} / {iters:,} ({pct:.1f} %)"
         try:
             splat.run(project, self.g_splat_method.value, iters, on_line=self._on_log, on_progress=progress,
-                      job=self._splat_job)
+                      job=self._splat_job, cache="disk" if self.g_splat_disk.value else "gpu",
+                      downscale=int(self.g_splat_down.value))
         finally:
             self.g_splat_stop.disabled = True
             self._splat_job = None
@@ -711,10 +781,62 @@ class App:
         self.g_mesh.disabled = not meshes
         have = [k for k, v in (("dense points", self.dense["fused"]), ("splat", self.dense["splat"])) if v] + \
             [f"mesh ({m})" for m in meshes]
-        self.g_dense_md.content = "available: " + (", ".join(have) if have else "nothing yet (Run tab)")
+        self.g_dense_md.content = "available: " + (", ".join(have) if have else "nothing yet (Dense / Splat tabs)")
         self._draw_dense_points()
         self._draw_mesh()
         self._draw_splat()
+        self._refresh_export()
+
+    # ------------------------------------------------------------- export
+    def _refresh_export(self, message=None):
+        have = products.available(self.path)
+        meshes = tuple(have["meshes"])
+        self.g_export_mesh.options = meshes or ("none",)
+        self.g_export_mesh.disabled = not meshes
+        busy = getattr(self, "_exporting", False)
+        for k, b in self.g_export_buttons.items():
+            b.disabled = busy or not (meshes if k.startswith("mesh") else have["splat"])
+        mesh_list = ", ".join(m + (" (textured)" if v["textured"] else "") for m, v in have["meshes"].items())
+        lines = [f"mesh: {mesh_list}" if meshes else "mesh: none yet (Dense tab)",
+                 "splat: splat/splat_enu.ply" if have["splat"] else "splat: none yet (Splat tab)"]
+        out = products.out_dir(self.path)
+        if os.path.isdir(out):
+            files = sorted(f for f in os.listdir(out) if os.path.isfile(os.path.join(out, f)))
+            lines.append(f"`export/`: {len(files)} files ({projects.human(projects.size(out))})")
+        if message:
+            lines.append(message)
+        self.g_export_md.content = "  \n".join(lines)
+
+    def _export(self, what, client, download):
+        if getattr(self, "_exporting", False):
+            return
+        self._exporting = True
+        self._refresh_export(f"⏳ exporting {what} …")
+
+        def work():
+            msg = None
+            try:
+                t0 = time.time()
+                if what == "mesh":
+                    paths = products.export_mesh(self.path, self.g_export_mesh.value, self.g_export_mesh_fmt.value,
+                                                 self.g_export_textured.value)
+                else:
+                    paths = products.export_splat(self.path, self.g_export_splat_fmt.value)
+                rel = [os.path.relpath(p, self.path) for p in paths]
+                msg = f"✅ wrote `{rel[0]}`" + (f" (+{len(rel) - 1} files)" if len(rel) > 1 else "") + \
+                    f" in {time.time() - t0:.1f} s"
+                self._history(f"✅ **export {what}** · `{rel[0]}`")
+                if download and client is not None:
+                    name, data = _download_payload(paths)
+                    client.send_file_download(name, data)
+                    msg += f" · sent `{name}` ({len(data) / 1e6:.1f} MB) to the browser"
+            except Exception as e:
+                traceback.print_exc()
+                msg = f"❌ export {what} failed: `{e}`"
+            finally:
+                self._exporting = False
+                self._refresh_export(msg)
+        threading.Thread(target=work, daemon=True).start()
 
     def _draw_dense_points(self):
         if self.g_dense_pts.value and self.dense["fused"]:

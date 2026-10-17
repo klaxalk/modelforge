@@ -163,12 +163,16 @@ def stage_export(project, report, rec=None):
     log(f"export: {path}")
 
 
-def stage_dense(project, report, stage, mesh_methods=("delaunay",), max_image_size=-1):
+def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dense.DEFAULT_QUALITY,
+                max_image_size=None):
+    """One dense stage. `quality` is a dense.QUALITY preset; `max_image_size` overrides its image size."""
+    q = dict(dense.QUALITY[quality])
+    size = q.pop("max_image_size") if max_image_size is None else max_image_size
     rep = report.data.get("dense", {})
     if stage == "undistort":
-        rep = {"undistort": dense.undistort(project, max_image_size=max_image_size)}  # new workspace
+        rep = {"undistort": {**dense.undistort(project, max_image_size=size), "quality": quality}}  # new workspace
     elif stage == "stereo":
-        rep["stereo"] = dense.stereo(project, max_image_size=max_image_size)
+        rep["stereo"] = {**dense.stereo(project, max_image_size=size, **q), "quality": quality}
     elif stage == "fusion":
         rep["fusion"] = dense.fusion(project)
     elif stage == "mesh":
@@ -195,8 +199,11 @@ def main():
                     help=f"comma-separated stages {STAGES} or groups {tuple(GROUPS)} (default: sfm)")
     ap.add_argument("--mesh", default="delaunay", choices=dense.MESH_METHODS + ("both",),
                     help="dense meshing method (default delaunay: keeps open surfaces)")
-    ap.add_argument("--dense-max-image-size", type=int, default=-1,
-                    help="downscale images for PatchMatch/fusion (-1 = full resolution)")
+    ap.add_argument("--dense-quality", default=dense.DEFAULT_QUALITY, choices=tuple(dense.QUALITY),
+                    help=f"dense speed/detail preset (default {dense.DEFAULT_QUALITY}: 640 px, fast PatchMatch); "
+                         "max = COLMAP defaults at full resolution")
+    ap.add_argument("--dense-max-image-size", type=int,
+                    help="override the preset's image size for PatchMatch/fusion (-1 = full resolution)")
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
     ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
@@ -224,7 +231,7 @@ def main():
     methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)
     for stage in DENSE_STAGES:
         if stage in stages:
-            stage_dense(args.project, report, stage, methods, args.dense_max_image_size)
+            stage_dense(args.project, report, stage, methods, args.dense_quality, args.dense_max_image_size)
 
 
 if __name__ == "__main__":

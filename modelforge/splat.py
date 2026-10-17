@@ -4,14 +4,17 @@ nerfstudio lives in its own venv (/opt/nerfstudio, docker/Dockerfile NERFSTUDIO=
 its pins (viser 1.0.0, opencv 4.10, numpy<2) clash with ours; this module runs its CLIs as
 subprocesses:
   train    ns-train <method> --data PROJECT --output-dir PROJECT/nerfstudio
-           (loads our sparse_pc.ply as initial points; viewer on :7007 while training)
+           (loads our sparse_pc.ply as initial points; viewer on :7007 while training).
+           Images are cached on disk by default (cache="disk": nothing preloaded into RAM or
+           GPU memory, for large datasets); downscale N trains on PROJECT/images_N/, made here.
   export   ns-export gaussian-splat -> PROJECT/splat/splat.ply (nerfstudio's normalized frame)
   convert  modelforge.export.splat_to_enu -> PROJECT/splat/splat_enu.ply (ENU, aligned with
            the refined cameras and the COLMAP mesh)
 Stats go to report.json["splat"]. The GUI Run tab and scripts/splat both call `run`.
 
 Usage (CUDA container):
-    python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000] [extra ns-train args]
+    python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
+        [--cache disk|cpu|gpu] [--downscale 2] [extra ns-train args]
 """
 
 import argparse
@@ -26,6 +29,7 @@ import time
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
+CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps memory use flat
 VIEWER_PORT = 7007
 # nerfstudio's progress table rows: "29910 (99.70%)   12.345 ms   1 s, 230.21 ms ..."
 _PROGRESS = re.compile(r"^\s*(\d+)\s+\((\d+(?:\.\d+)?)%\)")
@@ -88,15 +92,47 @@ def _stream(cmd, on_line, job):
         raise RuntimeError(f"{os.path.basename(cmd[0])} exited with code {rc} (see the log)")
 
 
-def train_command(project, method="splatfacto", iterations=None, extra=()):
+def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1):
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
+    if cache not in CACHE_MODES:
+        raise ValueError(f"cache must be one of {CACHE_MODES}")
     cmd = [os.path.join(NS_BIN, "ns-train"), method, "--data", project,
            "--output-dir", os.path.join(project, "nerfstudio"),
-           "--viewer.quit-on-train-completion", "True", "--viewer.websocket-port", str(VIEWER_PORT)]
+           "--viewer.quit-on-train-completion", "True", "--viewer.websocket-port", str(VIEWER_PORT),
+           "--pipeline.datamanager.cache-images", cache]
     if iterations:
         cmd += ["--max-num-iterations", str(int(iterations))]
-    return cmd + list(extra)
+    # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
+    # auto-picking a leftover images_2/ for images wider than 1600 px
+    return cmd + list(extra) + ["nerfstudio-data", "--downscale-factor", str(int(downscale))]
+
+
+def prepare_downscaled(project, factor, on_line=print):
+    """PROJECT/images_<factor>/<name> for every transforms.json frame (nerfstudio's layout for
+    --downscale-factor). Sizes are floor(w / factor), as nerfstudio rescales the cameras."""
+    import json
+
+    from PIL import Image
+    if factor <= 1:
+        return None
+    out = os.path.join(project, f"images_{factor}")
+    os.makedirs(out, exist_ok=True)
+    frames = json.load(open(os.path.join(project, "transforms.json")))["frames"]
+    made = 0
+    for f in frames:
+        src = os.path.join(project, f["file_path"])
+        dst = os.path.join(out, os.path.basename(f["file_path"]))
+        with Image.open(src) as im:
+            size = (im.width // factor, im.height // factor)
+            if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+                with Image.open(dst) as old:
+                    if old.size == size:
+                        continue
+            im.convert("RGB").resize(size, Image.BICUBIC).save(dst, quality=95)
+            made += 1
+    on_line(f"splat: images_{factor}/ ready ({made} of {len(frames)} images written)")
+    return out
 
 
 def parse_progress(line):
@@ -112,7 +148,8 @@ def latest_config(project, method):
     return max(configs, key=os.path.getmtime)
 
 
-def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None):
+def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
+        cache="disk", downscale=1):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"])."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
@@ -130,8 +167,10 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         if p and on_progress:
             on_progress(*p)
 
-    on_line(f"splat: training {method} (viewer on http://localhost:{VIEWER_PORT})")
-    _stream(train_command(project, method, iterations, extra), line, job)
+    prepare_downscaled(project, int(downscale), on_line)
+    on_line(f"splat: training {method}, cache {cache}, downscale {downscale} "
+            f"(viewer on http://localhost:{VIEWER_PORT})")
+    _stream(train_command(project, method, iterations, extra, cache, downscale), line, job)
     t_train = time.time() - t0
     config = latest_config(project, method)
     out_dir = os.path.join(project, "splat")
@@ -142,7 +181,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     enu = os.path.join(out_dir, "splat_enu.ply")
     splat_to_enu.convert(os.path.join(out_dir, "splat.ply"),
                          os.path.join(os.path.dirname(config), "dataparser_transforms.json"), enu)
-    stats = {"method": method, "iterations": iterations or DEFAULT_ITERATIONS, "config": config, "splat": enu,
+    stats = {"method": method, "iterations": iterations or DEFAULT_ITERATIONS, "cache": cache,
+             "downscale": int(downscale), "config": config, "splat": enu,
              "num_gaussians": _num_vertices(enu), "train_seconds": round(t_train, 1),
              "seconds": round(time.time() - t0, 1)}
     Report(project).set("splat", stats)
@@ -160,10 +200,13 @@ def main():
     ap.add_argument("project")
     ap.add_argument("--method", choices=METHODS, default="splatfacto")
     ap.add_argument("--iterations", type=int, help=f"training steps (default {DEFAULT_ITERATIONS})")
+    ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
+                    help="where training images are kept (default disk: low memory, for large datasets)")
+    ap.add_argument("--downscale", type=int, default=1, help="train on images downscaled by this factor (default 1)")
     args, extra = ap.parse_known_args()
     try:
         run(os.path.abspath(args.project), args.method, args.iterations, extra,
-            on_line=lambda m: print(m, flush=True))
+            on_line=lambda m: print(m, flush=True), cache=args.cache, downscale=args.downscale)
     except (RuntimeError, ValueError, Stopped) as e:
         sys.exit(f"error: {e}")
 

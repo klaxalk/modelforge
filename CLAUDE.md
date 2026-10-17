@@ -34,10 +34,13 @@ Done:
 - M0–M3: prior-initialized refinement with self-calibrating robust priors.
 - M5: dense mesh (COLMAP MVS) and Gaussian splat (nerfstudio splatfacto).
 - Multi-video ingest: sources = video + time range, per-source offsets.
-- Web GUI with tabs Projects / Ingest / View / Inspect / Plots / Run.
+- Web GUI with tabs Projects / Ingest / View / Inspect / Plots / Sparse / Dense /
+  Splat / Export.
   - Projects: list, open, create; final vs. intermediate results; clean.
-  - Run: live state, history and log, hover hints.
-  - Splat: training from the GUI.
+  - Sparse / Dense / Splat: run each part; live state above the tabs,
+    history and log below, hover hints.
+  - Export: mesh (glb / obj / ply) and splat (ply / .splat), saved under
+    `export/` or downloaded in the browser.
 - **One image for everything** (`compose.gpu.yaml`): COLMAP (CUDA) +
   modelforge in `/opt/venv`, and nerfstudio + torch cu128 + gsplat in
   `/opt/nerfstudio`. The separate nerfstudio container and the Docker socket
@@ -73,10 +76,9 @@ Done:
   been built.
 
 Still open on the GPU:
-- **PatchMatch is slow**: ~4.5 s per view even at 640×360. 20 → 6 source
-  images saves only 31%, and COLMAP is a Release build, so most of the cost is
-  fixed per view and its cause is unknown. Investigate before a full-clip,
-  full-resolution dense run (300 views would take hours).
+- PatchMatch speed is explained and the default is now the fast `low` preset
+  (see "Quality presets"). Full-resolution dense on the full clip is still
+  untested.
 - The full test suite, and the GUI tests that need `berlin_3_1_frames` (not
   copied to this machine; rebuild it with extract + SfM).
 
@@ -86,8 +88,8 @@ Tested only partially:
   flights.**
 
 Open items, in priority order:
-1. Find out why PatchMatch stereo is slow (see above: ~4.2 s per view per
-   pass at 640 px), then run the full clip's dense stage.
+1. Run the full clip (all 300 images) through dense and splat (quality
+   `low`, then higher if wanted).
 2. Test multi-video ingest on real separate flights of one site.
 3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
    weakly constrained. Trim it with the source range.
@@ -153,9 +155,9 @@ MODELFORGE_GPU=1 scripts/dev /opt/nerfstudio/bin/python -c \
 MODELFORGE_GPU=1 scripts/dev pytest -q tests          # all pass except the no-CUDA error test (skipped)
 # dense on the existing refined project (or build a project in the GUI)
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/berlin_3_1_frames --stages dense --mesh delaunay
-#   faster first try: add --dense-max-image-size 1200
+#   default quality is low (640 px, fast PatchMatch); --dense-quality medium|high|max for more
 scripts/splat data/berlin_3_1_frames --iterations 2000   # quick splat check; viewer on :7007
-MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app   # :8080; Projects tab, Run → splat, View → Dense / splat
+MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app   # :8080; Projects, Dense, Splat, Export tabs; View → Dense / splat
 ```
 
 What to check:
@@ -186,7 +188,7 @@ modelforge/
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
-│   ├── export/         # nerfstudio transforms.json, splat_to_enu
+│   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab: mesh + splat files)
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
@@ -202,7 +204,7 @@ modelforge/
 ├── scripts/splat      # wrapper: modelforge.splat in the CUDA container
 ├── scripts/process    # video -> extract -> sfm -> (GPU) dense + splat, end to end
 ├── README.md          # human quick start
-├── tests/             # pytest (28 tests): prior BA, robust priors, multi-source, projects, dense, splat, GUI
+├── tests/             # pytest: prior BA, robust priors, multi-source, projects, dense, splat, export, GUI
 ├── build/             # gitignored local build logs
 ├── .gitmodules
 └── CLAUDE.md
@@ -473,9 +475,31 @@ The end products are a **dense mesh** and a **Gaussian splat**, both in the
 project's ENU frame, so they line up with each other and with the refined
 cameras.
 
-**Dense** (`modelforge/dense.py`, pipeline stage group `dense`, Run tab in the
+**Dense** (`modelforge/dense.py`, pipeline stage group `dense`, Dense tab in the
 GUI), run in the CUDA container:
-`MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline PROJECT --stages dense [--mesh delaunay|poisson|both] [--dense-max-image-size N]`
+`MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline PROJECT --stages dense [--mesh delaunay|poisson|both] [--dense-quality low|medium|high|max] [--dense-max-image-size N]`
+
+**Quality presets** (`dense.QUALITY`; the user wants the lowest quality by
+default, so the default is `low`):
+
+| Preset | Image size | PatchMatch | berlin_test, 20 views, stereo |
+|---|---|---|---|
+| **low** (default) | 640 px | `window_step 2`, `num_samples 7` | 39 s, 38.2k fused points |
+| medium | 1200 px | `num_samples 7` | |
+| high | full | `num_samples 7` | |
+| max | full | COLMAP defaults | 170 s at 640 px, 43.5k points |
+
+Why PatchMatch was slow:
+- Per pixel and sweep, it draws `num_samples` (15) source images by Monte
+  Carlo sampling and evaluates 4 NCC costs over an 11×11 window. So the cost
+  scales with `num_samples × window² / window_step²`, not with the number of
+  source images (20 → 6 sources saved only 31%).
+- During a run the GPU is at 100% and full boost clock (RTX 3090), so it is
+  compute time, not a setup problem.
+- Accuracy against the SfM points was the same for all of these settings
+  (median depth error 0.56–0.63%). `window_step 2` costs ~12% of the fused
+  points; `num_samples 7` alone costs nothing measurable and is 1.9× faster.
+- Benchmark scripts: `build/pm_bench.py`, `build/pm_e2e.py` (gitignored).
 
 | Stage | Output in `PROJECT/dense/` | Device |
 |---|---|---|
@@ -493,17 +517,43 @@ GUI), run in the CUDA container:
   `.vis` file Delaunay needs.
 - A perfectly planar scene crashes Delaunay's graph cut (degenerate CGAL
   triangulation). Real scenes are fine, and the synthetic test uses relief.
-- Untested here: PatchMatch on the real clip (no GPU). Expect a long run: 300 ×
-  1913×1074 images, 4 maps each, about 10 GB of depth/normal maps.
-  `--dense-max-image-size 1200` shrinks both time and size.
+- Full resolution (`high` / `max`) on 300 × 1913×1074 images means about
+  10 GB of depth/normal maps and a long run; untested on the full clip.
 
 **Splat**: there are two ways to run it. Both call `modelforge.splat.run`
 inside the CUDA dev container, where nerfstudio sits in its own venv at
 `/opt/nerfstudio`:
-- GUI: Run tab → "Gaussian splat" → method, iterations, then **Train + export
-  splat**. The progress bar shows the training step, there is a Stop button,
-  and the result is reloaded into the View tab.
-- Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [ns-train args]`.
+- GUI: Splat tab → method, iterations, **Cache images on disk** (default on),
+  **Downsample factor** (default 1), then **Train + export splat**. The
+  progress bar shows the training step, there is a Stop button, and the
+  result is reloaded into the View tab.
+- Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [--cache disk|cpu|gpu] [--downscale N] [ns-train args]`.
+- Disk cache = nerfstudio `--pipeline.datamanager.cache-images disk`: images
+  stay on disk and are streamed by worker processes, for large datasets. Off
+  means `gpu` (nerfstudio's default, which falls back to CPU above 500 images).
+- Downsample N trains on `PROJECT/images_N/`, written by
+  `splat.prepare_downscaled` (floor(w/N), as nerfstudio rescales the
+  cameras). The factor is always passed explicitly (`nerfstudio-data
+  --downscale-factor N`, last on the command line), because nerfstudio
+  otherwise auto-picks a leftover `images_2/` for images wider than 1600 px.
+  `images_N/` is an intermediate (Clean removes it; re-extraction archives it).
+
+**Export** (`modelforge/export/products.py`, Export tab, or
+`python -m modelforge.export.products PROJECT [--mesh-format glb|obj|ply] [--splat-format ply|splat]`):
+- Writes to `PROJECT/export/` (a final result).
+- Mesh:
+  - `glb` is one textured file; `obj` writes `.obj` + `.mtl` + texture.
+    Both are Y-up = (east, up, −north), as glTF and Blender expect.
+  - `ply` copies COLMAP's files as they are, in ENU.
+  - COLMAP's textured PLY has per-face UVs. They are unwelded to per-vertex
+    UVs, then identical position+UV pairs are merged. COLMAP's UVs use the
+    OpenGL convention (origin bottom-left), the same as trimesh; this was
+    checked against image colours.
+- Splat: `ply` (standard 3DGS, all SH bands) or `.splat` (32 bytes per
+  Gaussian, colour only). Both are in ENU.
+- `export/georef.json` records the ENU origin (lat, lon, alt) and the axes of
+  each exported file.
+- The GUI can also send the export to the browser (several files as a .zip).
 
 Why a separate venv: nerfstudio pins viser 1.0.0 and opencv 4.10 and wants
 numpy<2, which clash with `/opt/venv`. The two environments exchange only
@@ -583,8 +633,10 @@ Code layout:
     and gimbal pitch on the project timeline, with planned images marked.
   - **Extract**: runs `ingest.run` with progress. A project with images needs
     the Overwrite box ticked. Afterwards the app reloads the project
-    (`App.load_project`) and the Run tab takes over.
-- `modelforge/gui/app.py`, with tabs Ingest / View / Inspect / Plots / Run:
+    (`App.load_project`) and the Sparse tab takes over.
+- `modelforge/gui/app.py`, with tabs View / Inspect / Plots / Sparse / Dense /
+  Splat / Export. The run state line and progress bar sit above the tabs, and
+  History / Log below them, so they are visible from every tab:
   - **View**: snapshot picker and stats, including the calibrated prior model.
     A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview
     mesh and `splat_enu.ply` (viser gaussian splats), each enabled once its
@@ -596,8 +648,8 @@ Code layout:
     residuals × gain in red, and unmatched keypoints in grey.
   - **Plots**: Plotly charts of deviation vs. project time (colour = source)
     and a point-error histogram.
-  - **Run**: "Run SfM (all)", or features, pairs, match, refine (live), export
-    one at a time.
+  - **Sparse**: "Run SfM (all)", or features, pairs, match, refine (live),
+    export one at a time.
     - A state line: ⏳ running stage k/n with stage/total time and a detail
       line (BA round and iteration), then ✅ finished + next step, or ❌
       failed + error.
@@ -606,12 +658,15 @@ Code layout:
     - The ticker and the final message share `App.lock` plus a run id, so
       a finished job never shows "running".
     - Every widget has a hover `hint`.
-    - Plus the dense stages (a
-    "Run dense (all)" button plus one per stage, with a mesh-method picker
-    and a max-image-size picker: full / 2000 / 1200 / 640 px),
-    each run in a background thread. Refine uses `pipeline.stage_refine(progress=...)`. BA iteration
-    events move the existing frustums (throttled to 4 Hz), and each round
-    reloads the snapshot.
+    - Refine uses `pipeline.stage_refine(progress=...)`. BA iteration events
+      move the existing frustums (throttled to 4 Hz), and each round reloads
+      the snapshot.
+  - **Dense**: "Run dense (all)" plus one button per stage, with a Quality
+    picker (low default / medium / high / max) and a mesh-method picker. Each
+    run is in a background thread.
+  - **Splat**: method, iterations, disk cache, downsample factor, train, Stop.
+  - **Export**: mesh and splat exports (see "Export" above), with
+    `export/` status.
 
 Things to know:
 - Points far outside the flight area are hidden, and the cloud uses float32.
