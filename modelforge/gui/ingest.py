@@ -534,6 +534,17 @@ class IngestPanel:
         self.g_progress.visible, self.g_progress.value = True, 0.0
         threading.Thread(target=self._extract, daemon=True).start()
 
+    def extract_now(self):
+        """Extract synchronously (full pipeline on a project without images); raises on failure."""
+        if not self.plan or not self.plan.num_images:
+            raise RuntimeError("the Ingest plan selects no images: add a video and its range in the Ingest tab")
+        self.running = True
+        self.g_extract.disabled = True
+        self.g_progress.visible, self.g_progress.value = True, 0.0
+        self._extract()  # resets running / buttons itself
+        if self.app.project is None:
+            raise RuntimeError("extraction failed (details in the Ingest tab)")
+
     def _extract(self):
         t0 = time.time()
         try:

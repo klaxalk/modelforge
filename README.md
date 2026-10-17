@@ -25,7 +25,8 @@ folder opens the **Ingest** tab. There you:
   flight track, telemetry plots and frame preview;
 - set the number of images, check the planned positions, and extract;
 - then run SfM, the dense stages and the Gaussian splat from the **Sparse**, **Dense** and
-  **Splat** tabs, and export the mesh and splat (GLB / OBJ / PLY, PLY / .splat) from **Export**.
+  **Splat** tabs of the right panel, or all of them with **Run full pipeline**, and export the
+  mesh and splat (GLB / OBJ / PLY, PLY / .splat) from **Export** in the left panel.
 
 The **Projects** tab lists, opens and creates projects under `data/`. It
 shows each project's sources and its final vs. intermediate results, and can

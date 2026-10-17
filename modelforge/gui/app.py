@@ -45,8 +45,10 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
+    "all": "Full pipeline: sparse → splat → dense.",
 }
 NEXT_STEP = {
+    "all": "View tab: refined cameras, mesh and splat; Export tab for the files",
     "sfm": "View tab → snapshot **refined**; next: Dense tab (GPU) or Splat tab",
     "features": "next: **pairs**", "pairs": "next: **match**", "match": "next: **refine**",
     "refine": "View tab shows **refined**; next: **export**",
@@ -139,15 +141,23 @@ class App:
         self.g_state = gui.add_markdown("⚪ **idle**")
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_buttons = {}
+        b = gui.add_button("Run full pipeline", icon=viser.Icon.PLAYER_TRACK_NEXT_FILLED, color="green",
+                           hint="Sparse → splat → dense in one go, with the settings of the tabs below (and the "
+                                "Ingest plan: images are extracted first if the project has none yet). Stages that "
+                                "need a GPU are skipped without one.")
+        b.on_click(lambda _: self.run_stage("all"))
+        self.g_buttons["all"] = b
+        # Two panels: the right (main) one runs the methods, the left one holds everything else.
+        self.left = gui.add_panel()
         tabs = gui.add_tab_group()
-        with tabs.add_tab("Projects", viser.Icon.FOLDERS):
+        with self.left.add_tab("Projects", viser.Icon.FOLDERS):
             self.projects = ProjectsPanel(self, gui)
-        with tabs.add_tab("Videos", viser.Icon.MOVIE):
+        with self.left.add_tab("Videos", viser.Icon.MOVIE):
             self.videos = VideosPanel(self, gui)
-        with tabs.add_tab("Ingest", viser.Icon.VIDEO):
+        with self.left.add_tab("Ingest", viser.Icon.VIDEO):
             self.ingest = IngestPanel(self, gui)
 
-        with tabs.add_tab("View", viser.Icon.EYE):
+        with self.left.add_tab("View", viser.Icon.EYE):
             names = tuple(self.project.snapshot_names()) if self.project else ("priors",)
             self.g_snapshot = gui.add_dropdown(
                 "Snapshot", options=names, hint="priors = telemetry poses; round_N_tri = after triangulation of "
@@ -194,14 +204,14 @@ class App:
             for h in (self.g_corr, self.g_traj):
                 h.on_update(lambda _: self._draw_lines())
 
-        with tabs.add_tab("Inspect", viser.Icon.PHOTO):
+        with self.left.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
             self.g_gain = gui.add_slider("Residual ×", min=1.0, max=50.0, step=1.0, initial_value=10.0,
                                          hint="Magnification of the red reprojection-residual lines.")
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
 
-        with tabs.add_tab("Plots", viser.Icon.CHART_LINE):
+        with self.left.add_tab("Plots", viser.Icon.CHART_LINE):
             self.g_plot = gui.add_plotly(go.Figure(), aspect=0.9)
 
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
@@ -286,7 +296,7 @@ class App:
                            "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                 lambda _: self._refresh_dense())
 
-        with tabs.add_tab("Export", viser.Icon.DOWNLOAD):
+        with self.left.add_tab("Export", viser.Icon.DOWNLOAD):
             self.g_export_md = gui.add_markdown("")
             with gui.add_folder("Mesh"):
                 self.g_export_mesh = gui.add_dropdown(
@@ -326,6 +336,12 @@ class App:
             self.g_history = gui.add_markdown("_nothing run in this session_")
         with gui.add_folder("Log", expand_by_default=False):
             self.g_log = gui.add_markdown("")
+        self._place_panels()
+
+    def _place_panels(self):
+        self.left.dock_left()
+        self.left.set_width(420)
+        self.server.gui.main_panel.dock_right()
 
     def _header(self):
         if self.project is None:
@@ -612,7 +628,7 @@ class App:
         if self.running or self.ingest.running:
             self.g_state.content += "  \n_busy: wait for the running job to finish_"
             return
-        if self.project is None:
+        if self.project is None and stage != "all":  # the full pipeline extracts them itself
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         self.running = True
@@ -630,9 +646,25 @@ class App:
         pipeline.LISTENERS.append(self._on_log)
         final = None
         try:
+            if stage == "all" and self.project is None:
+                self._begin_stage("extract", 0, 1)
+                self.ingest.extract_now()
+                self._history(f"✅ **extract** · {len(self.project.names)} images")
             report = pipeline.Report(project)
             pri = self.project.priors
-            if stage == "sfm" or stage in pipeline.SFM_STAGES:
+            if stage == "all":
+                seq, skipped = list(pipeline.SFM_STAGES), []
+                if splat.available() is None:
+                    seq.append("splat")
+                else:
+                    skipped.append(f"splat ({splat.available()})")
+                if dense.has_cuda():
+                    seq += list(pipeline.DENSE_STAGES)
+                else:
+                    skipped.append("dense (no CUDA)")
+                for sk in skipped:
+                    self._history(f"⚪ **skipped** {sk}")
+            elif stage == "sfm" or stage in pipeline.SFM_STAGES:
                 seq = pipeline.SFM_STAGES if stage == "sfm" else (stage,)
             elif stage == "splat":
                 seq = ("splat",)
@@ -659,9 +691,9 @@ class App:
                 else:
                     pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value])
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat") or stage in pipeline.DENSE_STAGES:
+            if stage in ("dense", "splat", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
-            self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm") else None)
+            self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm", "all") else None)
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
         except Exception as e:  # surface failures in the GUI instead of killing the thread silently

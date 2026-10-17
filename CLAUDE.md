@@ -34,8 +34,11 @@ Done:
 - M0–M3: prior-initialized refinement with self-calibrating robust priors.
 - M5: dense mesh (COLMAP MVS) and Gaussian splat (nerfstudio splatfacto).
 - Multi-video ingest: sources = video + time range, per-source offsets.
-- Web GUI with tabs Projects / Videos / Ingest / View / Inspect / Plots / Sparse /
-  Dense / Splat / Export.
+- Web GUI with two docked panels:
+  - left (`gui.add_panel()`): Projects / Videos / Ingest / View / Inspect /
+    Plots / Export;
+  - right (main): run state, **Run full pipeline**, Sparse / Dense / Splat,
+    history and log.
   - Projects: list, open, create; final vs. intermediate results; clean.
   - Videos: the shared video library (upload from the browser, info, used-by,
     add to project, download, rename, delete).
@@ -704,9 +707,17 @@ Code layout:
   - **Extract**: runs `ingest.run` with progress. A project with images needs
     the Overwrite box ticked. Afterwards the app reloads the project
     (`App.load_project`) and the Sparse tab takes over.
-- `modelforge/gui/app.py`, with tabs View / Inspect / Plots / Sparse / Dense /
-  Splat / Export. The run state line and progress bar sit above the tabs, and
-  History / Log below them, so they are visible from every tab:
+- `modelforge/gui/app.py`. Layout, as the user asked:
+  - The **left panel** (`self.left = gui.add_panel()`, `dock_left`, 420 px)
+    holds Projects / Videos / Ingest / View / Inspect / Plots / Export.
+  - The **right (main) panel** (`main_panel.dock_right()`) only runs the
+    methods: header, run state + progress, **Run full pipeline**, tabs
+    Sparse / Dense / Splat, then History / Log.
+  - **Run full pipeline** (stage `all`) runs SfM → splat → dense (the user's
+    order) with the tabs' settings. A project without images is extracted
+    first from its Ingest plan (`IngestPanel.extract_now`). Splat / dense
+    are skipped, with a History note, without nerfstudio / CUDA.
+  - Tabs:
   - **View**: snapshot picker and stats, including the calibrated prior model.
     A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview
     mesh and `splat_enu.ply` (viser gaussian splats), each enabled once its
