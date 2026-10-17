@@ -22,6 +22,96 @@ modelforge fixes that. There are three workstreams:
    refinement. Output is a nerfstudio dataset (`transforms.json` +
    `sparse_pc.ply`).
 
+## Status (2026-10-17) and next steps
+
+Milestones M0–M3 and M5 (dense mesh + splat) are done and committed on `master`.
+Everything was developed on a machine **without an NVIDIA GPU**, so two steps
+have **never been run on real data**:
+- COLMAP PatchMatch stereo (`--stages dense`, the `stereo` stage), and the
+  dense stages after it on real depth maps. They were verified only on a
+  synthetic workspace.
+- nerfstudio splatfacto training plus export (`scripts/splat`). The ENU
+  conversion is unit-tested, and the `nerfstudio` service has never been
+  started.
+
+The project is being moved to a machine with an NVIDIA GPU to test these.
+Follow "Migrating to a GPU machine" below, then the GPU test checklist.
+
+Open items, in priority order:
+1. Run the GPU checklist and fix whatever breaks.
+2. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
+   weakly constrained. Trim or downweight that segment.
+3. Calibration is biased low (~0.7×) in weakly constrained directions. The
+   fix is redundancy-aware variance component estimation.
+4. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+
+## Migrating to a GPU machine
+
+The repo has **no git remote** yet. Move it with a remote push, a
+`git bundle`, or by copying the folder. `data/` and `build/` are gitignored and
+must be copied separately.
+
+1. Get the code:
+   - Clone (or unbundle), then run `git submodule update --init --recursive`.
+   - Pinned submodules: colmap `48af6d30`, nerfstudio `50e0e3c7` (v1.1.5+),
+     pyceres `2eeeca7`. pyceres must stay on that commit, because v2.6 doesn't
+     build with pybind11 3.1.
+2. Copy the data. Minimum is `data/berlin_3_1.MP4` (1.2 GB) and
+   `data/berlin_3_1.SRT`. Optional:
+   - `data/berlin_3_1_frames/` (2.1 GB). It skips the ~17 min CPU run of
+     extract + SfM and keeps the validated refined model.
+   - The database copies (`features.db`, `database.db`) and `dense/` can be
+     regenerated, so you can leave them behind.
+   - Keep file ownership as the host user (the container runs as host UID/GID).
+3. Prepare the host:
+   - Install an NVIDIA driver, Docker with Compose v2, and the **NVIDIA
+     Container Toolkit**. Then run `sudo nvidia-ctk runtime configure --runtime=docker`
+     and restart Docker.
+   - Check with `docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi`.
+4. Build the images:
+   - CUDA dev image:
+     `env UID=$(id -u) GID=$(id -g) docker compose -f compose.yaml -f compose.gpu.yaml build dev`
+     (`modelforge-dev:cuda`, ~12 GB, compiles COLMAP with CUDA).
+   - The CPU image (`docker compose build dev`) is optional. `scripts/dev`
+     without `MODELFORGE_GPU=1` uses it.
+   - `CUDA_ARCHITECTURES` defaults to `75;80;86;89;90`, set in
+     `docker/Dockerfile` and passed as a build arg. **For an RTX 50xx (Blackwell),
+     add `120`**. CUDA 12.8 supports it. Otherwise COLMAP's kernels won't run on it.
+   - Lower `JOBS` (default 6) if the build runs out of RAM.
+   - The nerfstudio image (`ghcr.io/nerfstudio-project/nerfstudio:1.1.5`) is
+     pulled on first `scripts/splat`. It is built on CUDA 11.8 with kernels for
+     sm 61–90 (see `resources/nerfstudio/Dockerfile`). So it covers Pascal to
+     Hopper, including RTX 20/30/40, but **not Blackwell (RTX 50xx)**. A
+     Blackwell GPU needs a custom nerfstudio image built on CUDA ≥ 12.8 with
+     a matching torch and gsplat. Swap that in for `image:` in
+     `compose.gpu.yaml`; `scripts/splat` does not change.
+5. Use `MODELFORGE_GPU=1` for every `scripts/dev` call on that machine. The CPU
+   and CUDA variants share the `dev` service name, so stop one before starting
+   the other: `docker compose down`.
+
+### GPU test checklist
+
+```bash
+MODELFORGE_GPU=1 scripts/dev python -c "import pycolmap; print(pycolmap.has_cuda)"   # True
+MODELFORGE_GPU=1 scripts/dev pytest -q tests          # expect 18 passed, 1 skipped (the no-CUDA error test)
+# dense on the existing refined project (or run scripts/process data/berlin_3_1.MP4 from scratch)
+MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/berlin_3_1_frames --stages dense --mesh delaunay
+#   faster first try: add --dense-max-image-size 1200
+scripts/splat data/berlin_3_1_frames                  # viewer on :7007 while training
+MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app data/berlin_3_1_frames   # :8080, View tab → Dense / splat
+```
+
+What to check:
+- `report.json` gets `dense.*` entries.
+- `dense/fused.ply` has millions of points.
+- `dense/meshed-delaunay.ply` and `textured-delaunay/` exist.
+- `splat/splat_enu.ply` overlays the mesh and the cameras in the GUI. A
+  misalignment means a bug in `splat_to_enu` or in how the dataparser
+  transform is read.
+- Expected size: about 10 GB of depth/normal maps at full resolution.
+- In the CUDA image, SIFT extraction and matching should also run on the GPU
+  (pycolmap `Device.auto`). Matching took 698 s on CPU. Re-measure it.
+
 ## Layout
 
 ```
@@ -362,12 +452,18 @@ The image is defined in `docker/Dockerfile` and `compose.yaml`. Rebuild with
   fast).
 
 **GPU:**
-- This machine currently has **no NVIDIA device on PCI**. `lspci` shows only an
-  AMD Radeon 680M, and the nvidia modules exist only for older kernels. So
-  everything is CPU-only.
-- `compose.gpu.yaml` gives a CUDA build: `nvidia/cuda:12.8.1-devel`,
-  `CUDA_ENABLED=ON`, `gpus: all`. Use it with `MODELFORGE_GPU=1 scripts/dev ...`.
-- Nerfstudio training will need a GPU host and is not in this image yet.
+- The original development machine had **no NVIDIA GPU**, only an AMD Radeon
+  680M. So everything up to now ran CPU-only. Setup on a GPU host is under
+  "Migrating to a GPU machine".
+- `compose.gpu.yaml`:
+  - Overrides `dev` with a CUDA build: `nvidia/cuda:12.8.1-devel-ubuntu24.04`,
+    `CUDA_ENABLED=ON`, `gpus: all`, image `modelforge-dev:cuda`. Use it with
+    `MODELFORGE_GPU=1 scripts/dev ...`. That image was built and validated
+    without a GPU: `has_cuda` is True and the tests pass.
+  - Adds the `nerfstudio` service (profile `nerfstudio`, only started by
+    `scripts/splat`). It uses its own official image, so nerfstudio is **not**
+    installed in the dev image.
+  - `build/nerfstudio-home` persists its caches.
 
 Tests: `scripts/dev pytest -q tests`.
 
