@@ -43,6 +43,8 @@ modelforge/
 ├── compose.yaml       # `dev` service; compose.gpu.yaml = CUDA dev image + `nerfstudio` service
 ├── scripts/dev        # run a command in the dev container (MODELFORGE_GPU=1: CUDA image)
 ├── scripts/splat      # nerfstudio splatfacto train + export + ENU conversion
+├── scripts/process    # video -> extract -> sfm -> (GPU) dense + splat, end to end
+├── README.md          # human quick start
 ├── tests/             # pytest (19 tests): prior BA, robust priors, dense chain, splat, GUI
 ├── build/             # gitignored local build logs
 ├── .gitmodules
@@ -168,7 +170,10 @@ Results on `berlin_3_1` (300 images, CPU):
   (R² 0.01), which **independently confirms the 0.72 s lead**.
 - Rotation scatter (~1°) doesn't correlate with the EIS correction (r = 0.05)
   and only weakly with yaw rate (r = 0.11).
-- Largest position deviations (2–5 m) are in the last ~10 s (landing).
+- Largest position deviations (2–5 m) are in the last ~10 s. That is not a
+  landing: the drone hovers at about 11 m and the gimbal tilts up to −4°, so
+  the views are near-horizontal and see mostly distant content. Camera
+  position is weakly constrained there, and the priors hold it.
 - Runtime: matching 698 s (CPU, 2398 pairs) dominates. Refinement takes 83 s.
 
 ## Robust priors (M3), `modelforge/sfm/robust.py`
@@ -207,7 +212,8 @@ Results on `berlin_3_1` (CLI flags `--no-relative`, `--no-calibration`,
   0.98° yaw. Relative σ: 0.12° + 0.8% of the turn, 0.017 m + 1.4% of the
   baseline.
 - B = 0.86° (mostly heading), δt = 11 ms.
-- 3 absolute priors rejected, one of them in the landing phase.
+- 3 absolute priors rejected, one of them in the final near-horizontal
+  hover segment.
 - 69 of 299 relative priors rejected. The tail is heavy and non-Gaussian, even
   for small turns.
 
@@ -215,7 +221,11 @@ Known limitations:
 - Calibration is biased low in directions the images constrain weakly
   (synthetic test: about 0.7× the true σ). Fixing this needs redundancy-aware
   variance component estimation.
-- Rounds 1–2 converge slowly with relative priors (~500 iterations).
+- Rounds 1–2 converge slowly with relative priors (~500 iterations). After
+  100 iterations the median camera has settled to 4.6 cm, but the weakly
+  constrained near-horizontal frames at t ≥ 515 s still move up to 3.6 m /
+  3.8°, so the iteration cap must stay. Cost reaches 0.25% of final by
+  iteration 100.
 - Pair gating was **not** implemented, by measurement. Geometries are
   uncalibrated (F only), and the ~2.5% false pairs are already removed by
   triangulation filtering.

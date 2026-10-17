@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# DJI video -> refined poses -> dense mesh + Gaussian splat, end to end.
+#   scripts/process data/clip.MP4 [--num-images N] [--mesh delaunay|poisson|both]
+# Project folder: data/<clip>_frames. Dense + splat need an NVIDIA GPU; without one
+# this stops after the nerfstudio export and prints the commands to run on a GPU host.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ $# -ge 1 ]] || { echo "usage: $0 VIDEO [--num-images N] [--mesh METHOD]" >&2; exit 2; }
+video="$(realpath --relative-to=. "$1")"
+shift
+[[ "$video" != ../* ]] || { echo "the video must be inside the repo (it is mounted at /workspace)" >&2; exit 1; }
+num_images=300
+mesh=delaunay
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --num-images) num_images="$2"; shift 2 ;;
+    --mesh) mesh="$2"; shift 2 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+done
+project="$(dirname "$video")/$(basename "${video%.*}")_frames"
+
+scripts/dev python -m modelforge.dji.extract "$video" -o "$project" --num-images "$num_images"
+scripts/dev python -m modelforge.pipeline "$project"  # features, pairs, match, refine, export
+
+if nvidia-smi -L >/dev/null 2>&1; then
+  MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline "$project" --stages dense --mesh "$mesh"
+  scripts/splat "$project"
+  echo "done: mesh in $project/dense/, splat in $project/splat/splat_enu.ply (both ENU)"
+else
+  cat >&2 <<EOF
+No NVIDIA GPU here: stopped after the nerfstudio export ($project/transforms.json).
+On a GPU host:
+  MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline $project --stages dense --mesh $mesh
+  scripts/splat $project
+EOF
+fi

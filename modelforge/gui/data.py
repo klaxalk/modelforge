@@ -150,7 +150,9 @@ class Project:
                 X = np.array([rec.point3D(o[1]).xyz for o in obs])
                 Xc = X @ R_cw.T + t
                 proj = np.asarray(cam_by_id[img.camera_id].img_from_cam(Xc))
-                reproj[i] = float(np.nanmean(np.linalg.norm(proj - xy, axis=1)))
+                err = np.linalg.norm(proj - xy, axis=1)
+                err = err[np.isfinite(err)]  # points behind the camera project to NaN before filtering
+                reproj[i] = float(err.mean()) if len(err) else np.nan
         pts = rec.points3D
         points = np.array([p.xyz for p in pts.values()]) if len(pts) else np.zeros((0, 3))
         colors = np.array([p.color for p in pts.values()], np.uint8) if len(pts) else np.zeros((0, 3), np.uint8)
