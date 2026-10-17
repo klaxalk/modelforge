@@ -19,12 +19,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 project="$(dirname "$video")/$(basename "${video%.*}")_frames"
+gpu=0; nvidia-smi -L >/dev/null 2>&1 && gpu=1
+export MODELFORGE_GPU=$gpu  # on a GPU host every step runs in the CUDA image (no CPU image needed)
 
 scripts/dev python -m modelforge.dji.extract "$video" -o "$project" --num-images "$num_images" --overwrite
 scripts/dev python -m modelforge.pipeline "$project"  # features, pairs, match, refine, export
 
-if nvidia-smi -L >/dev/null 2>&1; then
-  MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline "$project" --stages dense --mesh "$mesh"
+if [[ $gpu == 1 ]]; then
+  scripts/dev python -m modelforge.pipeline "$project" --stages dense --mesh "$mesh"
   scripts/splat "$project"
   echo "done: mesh in $project/dense/, splat in $project/splat/splat_enu.ply (both ENU)"
 else

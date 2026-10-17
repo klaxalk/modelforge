@@ -66,6 +66,9 @@ def available():
 def _env():
     env = dict(os.environ, PYTHONUNBUFFERED="1", TERM="dumb", COLUMNS="160")
     env["PATH"] = NS_BIN + os.pathsep + env.get("PATH", "")  # nerfstudio's own tools first
+    # torch >= 2.6 loads weights_only by default, which rejects nerfstudio 1.1.5 checkpoints
+    # (numpy scalars inside); they are our own, written by ns-train in this project
+    env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     for k in ("VIRTUAL_ENV", "PYTHONPATH"):  # keep /opt/venv and the repo out of its imports
         env.pop(k, None)
     return env

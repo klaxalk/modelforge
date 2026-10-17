@@ -43,24 +43,39 @@ Done:
   `/opt/nerfstudio`. The separate nerfstudio container and the Docker socket
   are gone.
 
-**Never run on a GPU** (this laptop has none), so test these first:
-1. **The CUDA image build with nerfstudio (`NERFSTUDIO=ON`) has never
-   completed.**
-   - A build on the laptop got through the cached COLMAP layers and the
-     torch 2.7.1+cu128 download, then was stopped on purpose while compiling
-     the gsplat kernels; the build was moved to the GPU machine.
-   - So the nerfstudio install itself is unverified. Its last line is a
-     self-check that prints the torch / CUDA / gsplat versions and whether
-     the prebuilt kernels load.
-   - torch 2.7.1+cu128 with gsplat 1.4.0 and nerfstudio 1.1.5 is not a
-     combination nerfstudio ships (its image uses torch 2.1.2+cu118).
-   - If the gsplat build from source fails, try installing gsplat without
-     `--no-binary` (kernels then compile by JIT on first use), or change the
-     torch pins.
-2. PatchMatch stereo and the dense stages after it on real depth maps. They
-   were verified only on a synthetic workspace.
-3. Splat training, export and ENU conversion end to end, from the GUI and
-   `scripts/splat`. The ENU conversion is unit-tested.
+**Verified on the GPU machine** (RTX 3090, sm_86) on `data/berlin_test`, a
+60 s piece of `berlin_3_1` (`--start 105 --end 165 --num-images 80`):
+- The CUDA image with nerfstudio builds. The self-check prints `torch
+  2.7.1+cu128 cuda 12.8 gsplat 1.4.0 prebuilt kernels True`. Three fixes were
+  needed:
+  - gsplat installs from its git tag: the PyPI sdist lacks the `glm`
+    submodule (`glm/glm.hpp: No such file`).
+  - `pillow<12` in the nerfstudio venv: its `pil_to_numpy` uses a Pillow
+    internal that changed in 12.
+  - `splat.py` sets `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` for nerfstudio:
+    torch >= 2.6 refuses its checkpoints (numpy scalars) by default.
+- SfM: 80/80 registered, error median 0.52 px, focal 1089 px. SIFT
+  extraction and matching run on the GPU (matching 1.7 s for 417 pairs).
+- Dense at `--dense-max-image-size 640`: 221k fused points, Delaunay mesh and
+  texture. 864 s, of which stereo is 845 s.
+- Splat, 2000 iterations: 328k Gaussians, 53 s for train + export + ENU.
+  ICP of `splat_enu.ply` onto `fused.ply` leaves < 10 cm horizontally,
+  0.1°, scale 0.999, so `splat_to_enu` is right. A 5–13 cm vertical offset
+  remains that shrinks away from the centre: MVS at 640 px sits on the
+  vegetation tops.
+- That image was built with a local override (`CUDA_ARCHITECTURES=86`,
+  `GSPLAT_ARCH_LIST=8.6`, `JOBS=8`). The committed full arch list has not
+  been built.
+
+Still untested on the GPU:
+- **PatchMatch is slow**: ~4.5 s per view even at 640×360. 20 → 6 source
+  images saves only 31%, and COLMAP is a Release build, so most of the cost is
+  fixed per view and its cause is unknown. Investigate before a full-clip,
+  full-resolution dense run (300 views would take hours).
+- The GUI on the GPU: splat from the Run tab, and the View tab overlay
+  (checked numerically only).
+- The full test suite, and the GUI tests that need `berlin_3_1_frames` (not
+  copied to this machine; rebuild it with extract + SfM).
 
 Tested only partially:
 - **Multi-video ingest.** Tested on synthetic data and on two pieces of the
@@ -68,8 +83,8 @@ Tested only partially:
   flights.**
 
 Open items, in priority order:
-1. Follow "Migrating to a GPU machine", then the GPU test checklist, and fix
-   whatever breaks.
+1. Find out why PatchMatch stereo is slow (see above), then run the full
+   clip's dense stage and check the GUI on the GPU.
 2. Test multi-video ingest on real separate flights of one site.
 3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
    weakly constrained. Trim it with the source range.

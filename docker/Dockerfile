@@ -63,10 +63,12 @@ RUN python -c "import pyceres, pycolmap; print('pycolmap', pycolmap.__version__,
 RUN pip install --no-cache-dir "viser==1.1.1" "plotly==7.1.0" "trimesh==5.1.0" "plyfile==1.1.5"
 
 # nerfstudio (splatfacto) in its own venv (CUDA image only, NERFSTUDIO=ON). It pins
-# viser==1.0.0 and opencv 4.10 and wants numpy<2, which clash with /opt/venv; the two
+# viser==1.0.0 and opencv 4.10 and wants numpy<2, which clash with /opt/venv (and needs
+# pillow<12: its pil_to_numpy uses a Pillow-internal encoder API that changed in 12); the two
 # environments only exchange files (transforms.json, PLY). Called as /opt/nerfstudio/bin/ns-*,
 # never put on PATH. torch for CUDA 12.8 (Blackwell-capable) instead of nerfstudio's cu118;
 # gsplat's CUDA kernels are compiled here for GSPLAT_ARCH_LIST, so training starts at once.
+# gsplat comes from its git tag: the PyPI sdist lacks the glm submodule the kernels include.
 # tiny-cuda-nn is not installed: only the NeRF methods need it, not splatfacto.
 ARG NERFSTUDIO=OFF
 ARG TORCH_VERSION=2.7.1
@@ -80,8 +82,9 @@ RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
       /opt/nerfstudio/bin/pip install --no-cache-dir "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
           --index-url "${TORCH_INDEX_URL}" && \
       TORCH_CUDA_ARCH_LIST="${GSPLAT_ARCH_LIST}" MAX_JOBS=${JOBS} \
-          /opt/nerfstudio/bin/pip install --no-cache-dir --no-build-isolation --no-binary gsplat "gsplat==1.4.0" && \
-      /opt/nerfstudio/bin/pip install --no-cache-dir "numpy<2" /src/nerfstudio && \
+          /opt/nerfstudio/bin/pip install --no-cache-dir --no-build-isolation \
+          "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0" && \
+      /opt/nerfstudio/bin/pip install --no-cache-dir "numpy<2" "pillow<12" /src/nerfstudio && \
       /opt/nerfstudio/bin/python -c "import torch, gsplat, nerfstudio; from gsplat.cuda._backend import _C; \
 print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gsplat', gsplat.__version__, 'prebuilt kernels', _C is not None)" ; \
     fi
