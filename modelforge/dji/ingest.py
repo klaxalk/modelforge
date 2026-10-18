@@ -67,7 +67,7 @@ class Settings:
     spacing: float = None  # m (distance) or s (time); overrides num_images
     rot_weight: float = None  # m/deg; None = median look-at depth * pi/180
     window: float = 0.5
-    yaw_source: str = "aircraft"
+    yaw_source: str = "auto"  # auto: per clip, the gimbal when its yaw is a true heading (Clip.yaw_source)
     quality: int = 95
     ros: dict = None  # kind "rosbag": topics, frames, pose source (modelforge.rosbag.ingest.ros_defaults)
 
@@ -121,12 +121,18 @@ def find_videos(root):
 
 # --- one analysed video ---------------------------------------------------------
 
+NO_YAW_AXIS = ("neo",)  # model names (lower case) whose gimbal cannot yaw
+YAWING_GIMBAL = ("mavic4", "mavic 4")  # model names whose gimbal yaw is the camera's true heading
+
+
 class Clip:
     """Decoded djmd telemetry of one video, its lead and per-frame aligned telemetry."""
 
     def __init__(self, video, srt_path=None, lead=None):
         self.video = video
         meta = decode(video)
+        from modelforge.dji.djmd import model_name
+        self.model = model_name(video)
         self.n = len(meta)
         self.pts = np.array([m.pts for m in meta])
         self.fps = (self.n - 1) / (self.pts[-1] - self.pts[0]) if self.n > 1 else 29.97
@@ -140,7 +146,7 @@ class Clip:
             self.align = {"method": "manual", "lead_frames": lead}
         else:
             self.align = (ex.estimate_lead_srt(srt, self.gimbal, self.n) if srt else None) \
-                or _cached_flow_lead(video, self.gimbal, self.n) \
+                or _cached_flow_lead(video, self.gimbal, self.n, self.pts) \
                 or {"method": "default", "lead_frames": ex.DEFAULT_LEAD_FRAMES}
         self.lead = self.align["lead_frames"]
         self.align["lead_s"] = round(self.lead / self.fps, 3)
@@ -149,14 +155,38 @@ class Clip:
         self.takeoff_abs_alt = float(np.median(d)) if len(d) and np.ptp(np.percentile(d, [5, 95])) < 1.0 else None
         self._tel = {}
 
-    def telemetry(self, yaw_source="aircraft"):
+    def yaw_source(self, setting="auto"):
+        """The camera heading source for this clip, "aircraft" or "gimbal". "auto" decides by the model
+        whether the gimbal can yaw (its yaw is then the camera's own heading): the NEO / NEO2 gimbal has
+        no yaw axis and reports yaw in an offset reference (aircraft yaw - 36.5 deg), the Mavic 4's gimbal
+        turns 360 deg. Unknown models: the gimbal unless its yaw sits over 20 deg from the aircraft yaw
+        for the whole clip (an offset reference). The data alone cannot tell: on the Mavic 4 clips the
+        difference was 1.4-5.1 deg with the same ~1 deg spread as the NEO2's offset."""
+        if setting != "auto":
+            return setting
+        if getattr(self, "_auto_yaw", None) is None:
+            model = (getattr(self, "model", "") or "").lower()
+            if any(k in model for k in NO_YAW_AXIS):
+                self._auto_yaw = "aircraft"
+            elif any(k in model for k in YAWING_GIMBAL):
+                self._auto_yaw = "gimbal"
+            else:
+                x = np.arange(self.n)
+                d = (self.gimbal(x)[:, 2] - self.aircraft(x)[:, 9] + 180.0) % 360.0 - 180.0
+                d = d[np.isfinite(d)]
+                self._auto_yaw = "gimbal" if len(d) and abs(float(np.median(d))) < 20.0 else "aircraft"
+        return self._auto_yaw
+
+    def telemetry(self, yaw_source="auto"):
         """Aligned per-frame arrays: aircraft (n, 10), gimbal (n, 3), camera yaw/pitch, lead-valid mask."""
+        yaw_source = self.yaw_source(yaw_source)
         if yaw_source not in self._tel:
-            x = np.clip(np.arange(self.n) - self.lead, 0, None)
+            x = np.clip(np.arange(self.n) - self.lead, 0, self.n - 1)  # a negative lead reads ahead
             a, g = self.aircraft(x), self.gimbal(x)
             yaw = g[:, 2] if yaw_source == "gimbal" else a[:, 9]
             self._tel[yaw_source] = {"a": a, "g": g, "yaw": yaw, "pitch": g[:, 0],
-                                     "valid": np.arange(self.n) - self.lead >= 0}
+                                     "valid": (np.arange(self.n) - self.lead >= 0)
+                                     & (np.arange(self.n) - self.lead <= self.n - 1)}
         return self._tel[yaw_source]
 
     def frame_image(self, t, width=640):
@@ -195,7 +225,7 @@ def _wall_start(srt, video):
 LEAD_CACHE = ".modelforge_leads.json"  # per video folder: optical-flow leads, keyed by file size + mtime
 
 
-def _cached_flow_lead(video, gimbal, n):
+def _cached_flow_lead(video, gimbal, n, pts=None):
     """ex.estimate_lead_flow (about a minute per clip) remembered on disk, so a clip without an SRT
     pays it once. The key (size, mtime) survives renames; a failed estimate is remembered too."""
     st = os.stat(video)
@@ -207,7 +237,7 @@ def _cached_flow_lead(video, gimbal, n):
         cache = {}
     if key in cache:
         return cache[key]
-    align = ex.estimate_lead_flow(video, gimbal, n)
+    align = ex.estimate_lead_flow(video, gimbal, n, pts=pts)
     if align is not None:
         align = {k: (float(v) if isinstance(v, (np.floating, float)) else v) for k, v in align.items()}
     try:
@@ -308,8 +338,8 @@ def make_plan(sources, settings):
     curves = {}
     for i, s in enabled:
         c = clips[i]
-        curves[i] = ex.sampling_curve(settings.sampling, c.pts, c.aircraft, c.gimbal, c.lead, settings.yaw_source,
-                                      valids[i], w)
+        curves[i] = ex.sampling_curve(settings.sampling, c.pts, c.aircraft, c.gimbal, c.lead,
+                                      c.yaw_source(settings.yaw_source), valids[i], w)
     totals = {i: float(curves[i][0][valids[i]][-1] - curves[i][0][valids[i]][0]) if valids[i].any() else 0.0
               for i, _ in enabled}
     total = sum(totals.values())
@@ -364,7 +394,7 @@ def enu(lat, lon, alt, origin):
     return (r @ (p.reshape(3, -1) - ex.lla_to_ecef(*origin)[:, None])).T
 
 
-def preview(plan, yaw_source="aircraft", step=3, origin=None):
+def preview(plan, yaw_source="auto", step=3, origin=None):
     """ENU flight tracks and planned image positions for display. origin (lat, lon, alt):
     pass the project's enu_origin_lla to overlay extracted cameras; default = first planned image."""
     if not plan.sources or not plan.num_images:
@@ -430,8 +460,9 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
     origin, records, seen = None, [], set()
     for sp in plan.sources:
         c = sp.clip
+        yaw_src = c.yaw_source(settings.yaw_source)
         log(f"{sp.prefix}: lead {c.lead} frames via {c.align['method']}, {len(sp.windows)} images, "
-            f"alt offset {sp.alt_offset:+.2f} m")
+            f"alt offset {sp.alt_offset:+.2f} m, camera heading from the {yaw_src} yaw")
         for k, rgb, sharp in ex.select_sharpest(c.video, sp.windows, c.n):
             name = f"{sp.prefix}_{k:05d}.jpg"
             if name in seen:  # overlapping pieces of one video
@@ -443,7 +474,7 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
             if origin is None:
                 origin = (a["lat"], a["lon"], alt)
             p = ex.ecef_to_enu(ex.lla_to_ecef(a["lat"], a["lon"], alt), origin)
-            yaw = g["gimbal_yaw_deg"] if settings.yaw_source == "gimbal" else a["ac_yaw_deg"]
+            yaw = g["gimbal_yaw_deg"] if yaw_src == "gimbal" else a["ac_yaw_deg"]
             pitch, roll = g["gimbal_pitch_deg"], g["gimbal_roll_deg"]
             r_world_cam = ex.R_ENU_NED @ ex.r_ned_body(yaw, pitch, roll) @ ex.R_BODY_CAM
             r_cam_world = r_world_cam.T
@@ -470,6 +501,7 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
         "srt": plan.sources[0].clip.srt_path,
         "alignment": plan.sources[0].clip.align,
         "yaw_source": settings.yaw_source,
+        "yaw_source_used": [sp.clip.yaw_source(settings.yaw_source) for sp in plan.sources],  # per source
         "sampling": plan.report,
         "warnings": plan.warnings,
         "plan": {"sources": [asdict(x) for x in sources], "settings": asdict(settings)},  # as in ingest.json

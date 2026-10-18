@@ -35,7 +35,7 @@ def test_flow_lead_is_cached_on_disk(tmp_path, monkeypatch):
     make_clip(clip)
     calls = []
 
-    def fake(video, gimbal, n):
+    def fake(video, gimbal, n, pts=None):
         calls.append(video)
         return {"method": "optical_flow", "lead_frames": 21.5, "corr": 0.55}
 
@@ -48,6 +48,6 @@ def test_flow_lead_is_cached_on_disk(tmp_path, monkeypatch):
     assert len(calls) == 1
     other = str(tmp_path / "d.mp4")
     make_clip(other, "2026-01-01T00:00:00Z")  # a failed estimate is remembered too
-    monkeypatch.setattr(ex, "estimate_lead_flow", lambda *a: calls.append("d") or None)
+    monkeypatch.setattr(ex, "estimate_lead_flow", lambda *a, **k: calls.append("d") or None)
     assert ingest._cached_flow_lead(other, None, 10) is None
     assert ingest._cached_flow_lead(other, None, 10) is None and calls.count("d") == 1

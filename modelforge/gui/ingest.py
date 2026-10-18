@@ -210,10 +210,13 @@ class IngestPanel:
                                            initial_value=st.window,
                                            hint="Fraction of the spacing searched around each target for the "
                                                 "sharpest frame (Laplacian variance).")
-            self.g_yaw = gui.add_dropdown("Yaw source", options=("aircraft", "gimbal"), initial_value=st.yaw_source,
-                                          hint="Camera heading from the aircraft yaw (NEO2: the gimbal cannot "
-                                               "yaw). gimbal only for drones whose gimbal yaws and reports a true "
-                                               "heading.")
+            self.g_yaw = gui.add_dropdown("Yaw source", options=("auto", "aircraft", "gimbal"),
+                                          initial_value=st.yaw_source,
+                                          hint="Camera heading. auto (default): per clip, the gimbal yaw when it "
+                                               "is a true heading (Mavic 4: its gimbal can yaw, so that is the "
+                                               "camera's own heading), else the aircraft yaw (NEO2: the gimbal "
+                                               "cannot yaw and reports yaw in an offset frame). The source "
+                                               "summary shows which one each clip uses.")
             for h in (self.g_sampling, self.g_num, self.g_spacing, self.g_rotw, self.g_window, self.g_yaw):
                 h.on_update(lambda _: self._settings_changed())
         self.g_plan_md = gui.add_markdown("")
@@ -499,7 +502,9 @@ class IngestPanel:
                 break
             c = self._load_clip(s)
             sp = by_source.get(id(s))
-            extra = {"dji": f" · lead {c.lead:g} frames ({c.align['method']})",
+            extra = {"dji": f" · lead {c.lead:g} frames ({c.align['method']})"
+                            + (f" · heading from {c.yaw_source(self.settings.yaw_source)} yaw"
+                               if self.kind == "dji" else ""),
                      "rosbag": f" · poses from {c.align['method']}: {int(c.valid_pose.sum())}/{c.n} images"
                      if self.kind == "rosbag" else ""}.get(self.kind, "")
             lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + extra]

@@ -44,6 +44,39 @@ firmware header `dvtm_NEO2.proto` 02.01.15). The decoder is
 All position, altitude, ISO, color-temperature and f-number values match the
 SRT on 15785/15785 frames.
 
+## Other models: DJI Mavic 4 Pro
+
+Checked on three Mavic 4 Pro clips (`dvtm_Mavic4.proto` 02.01.07, model "DJI Mavic4 Pro L3A",
+Hasselblad L3D-100c, 3840×2160 @ 29.97; the longest 33 min, 59,025 packets).
+
+- **Records are found by type, not position.** Every record of `3` starts with a header `.1`
+  whose field `.1.3` is the record type: 1 camera, 2 aircraft, 3 gimbal (`.1.5` = rate in Hz,
+  `.1.4` = camera name). That holds on both models; the positions differ:
+
+  | record | NEO2 | Mavic 4 |
+  |---|---|---|
+  | camera | `3.2` | `3.2` |
+  | aircraft | `3.4` | `3.3` |
+  | gimbal | `3.5` | `3.4` |
+
+- **Aircraft record:** the same layout as the NEO2 (velocity `.2`, attitude `.3`, lat/lon/abs_alt `.4`,
+  rel_alt `.5`). `abs_alt` is about 417 m here, plausibly MSL.
+- **Camera record:** ISO `.9.1` (float), exposure `.10.1` (packed num, den: 1/167…1/172),
+  f-number `.11.1` (packed: 28/10 or 20/10), colour temperature probably `.24.1` (`.32.1` is a
+  second, similar value; unverified). `.23.1` = 1.0 (zoom?), `.37.1` = 23–24 (focal length,
+  35 mm equivalent?).
+- **Gimbal record:** attitude in `.3` (pitch / roll / yaw in 0.1°; roll omitted when 0), not `.2`; plus
+  a quaternion in `.4` (4 floats, unit norm). The Mavic 4 gimbal turns 360°, and its yaw is a
+  **true heading**: 1.4–5.1° (median per clip) from the aircraft yaw, up to 10.6°. So the camera heading
+  is the gimbal yaw (`Clip.yaw_source("auto")` decides by model: NEO → aircraft, Mavic 4 → gimbal;
+  unknown models → gimbal unless it is over 20° off the aircraft yaw). The difference alone cannot
+  tell: its spread (~1°) is the same as for the NEO2's constant offset.
+- **Timing:** the Mavic 4 telemetry is **almost in sync**: lead 0.5 frames (17 ms; windows −0.5, 0.5,
+  1.0, corr 0.87–0.98), not the NEO2's 0.7 s. There is no SRT, so it comes from optical flow.
+
+The decoder's output on the NEO2 sample is identical before and after the type-based lookup
+(15785/15785 frames).
+
 ## Relation to the SRT sidecar
 
 - The SRT `pp_current` (and `pp_target`) quaternions are (w, x, y, z), ZYX. They

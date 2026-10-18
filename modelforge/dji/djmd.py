@@ -3,7 +3,10 @@
 The track holds one protobuf packet per video frame. DJI does not publish the
 schema (the header names it `dvtm_<MODEL>.proto`), so packets are parsed
 schema-less and fields are mapped by their protobuf path. Field meanings were
-reverse engineered on a DJI NEO2 clip; see docs/djmd_format.md.
+reverse engineered on a DJI NEO2 clip and checked on a Mavic 4 Pro clip; see
+docs/djmd_format.md. The camera / aircraft / gimbal records are found by the type
+in their header (`.1.3` = 1 / 2 / 3), since their positions differ between models
+(NEO2: 3.2 / 3.4 / 3.5, Mavic 4: 3.2 / 3.3 / 3.4).
 
 Usage:
     python -m modelforge.dji.djmd data/clip.MP4 -o data/clip_djmd.csv
@@ -102,29 +105,53 @@ class FrameMeta:
     gimbal_timestamp_ms: int  # separate clock, not aligned with timestamp_us
 
 
+CAMERA, AIRCRAFT, GIMBAL = 1, 2, 3  # record types (header field .1.3)
+# camera record field numbers per layout: (iso, shutter, f-number, colour temperature)
+CAMERA_FIELDS = {"neo2": (3, 4, 14, 6), "mavic4": (9, 10, 11, 24)}
+
+
+def records(rec):
+    """{record type: message} of one packet's field 3 (the first record of each type)."""
+    out = {}
+    for v in rec.values():
+        if not isinstance(v, (bytes, bytearray)):
+            continue
+        try:
+            sub = _msg(v)
+        except (ValueError, IndexError, struct.error):
+            continue
+        hdr = sub.get(1)
+        if isinstance(hdr, (bytes, bytearray)):
+            t = _msg(hdr).get(3)
+            if t in (CAMERA, AIRCRAFT, GIMBAL):
+                out.setdefault(t, sub)
+    return out
+
+
 def decode_packet(frame, pts, pkt):
     top = _msg(pkt)
     rec = _msg(top[3])
-    cam = _msg(rec.get(2, b""))
-    ac = _msg(rec.get(4, b""))
-    gim = _msg(rec.get(5, b""))
+    r = records(rec)
+    cam, ac, gim = r.get(CAMERA, {}), r.get(AIRCRAFT, {}), r.get(GIMBAL, {})
+    # NEO2 has ISO in camera field 3; the Mavic 4 moved ISO / shutter / f-number / colour temperature
+    f_iso, f_shutter, f_fnum, f_ct = CAMERA_FIELDS["neo2" if 3 in cam or 4 in cam else "mavic4"]
 
-    shutter = _packed(_sub(cam, 4).get(1, b""))
-    fnum = _packed(_sub(cam, 14).get(1, b""))
+    shutter = _packed(_sub(cam, f_shutter).get(1, b""))
+    fnum = _packed(_sub(cam, f_fnum).get(1, b""))
     att = _sub(ac, 3)
     vel = _sub(ac, 2)
     pos = _sub(ac, 4)
     latlon = _sub(pos, 1)
-    gatt = _sub(gim, 2)
+    gatt = _sub(gim, 3) if 3 in gim else _sub(gim, 2)  # gimbal attitude: Mavic 4 field 3, NEO2 field 2
 
     return FrameMeta(
         frame=frame,
         pts=pts,
         timestamp_us=_sub(rec, 1).get(2, 0),
-        iso=_sub(cam, 3).get(1, 0.0),
+        iso=_sub(cam, f_iso).get(1, 0.0),
         shutter_s=shutter[0] / shutter[1] if len(shutter) == 2 and shutter[1] else float("nan"),
         fnum=fnum[0] / fnum[1] if len(fnum) == 2 and fnum[1] else float("nan"),
-        color_temp=_sub(cam, 6).get(1, 0),
+        color_temp=_sub(cam, f_ct).get(1, 0),
         lat=latlon.get(2, float("nan")),
         lon=latlon.get(3, float("nan")),
         abs_alt_m=pos.get(2, 0) / 1000.0,
@@ -169,6 +196,26 @@ def read_packets(mp4, stream):
         off += n
     if off != len(data):
         raise RuntimeError(f"packet sizes ({off} B) do not cover stream ({len(data)} B)")
+
+
+def model_name(mp4):
+    """The drone model from the first packet's header (`1.1.10`, e.g. "DJI NEO2", "DJI Mavic4 Pro L3A"),
+    else the schema name (`1.1.1`, "dvtm_<model>.proto"), else ""."""
+    try:
+        stream = find_djmd_stream(mp4)
+        sizes = subprocess.run(["ffprobe", "-v", "error", "-select_streams", str(stream), "-read_intervals", "%+#1",
+                                "-show_entries", "packet=size", "-of", "csv=p=0", mp4],
+                               capture_output=True, text=True, check=True).stdout.split()
+        data = subprocess.run(["ffmpeg", "-v", "error", "-i", mp4, "-map", f"0:{stream}", "-frames:d", "1",
+                               "-c", "copy", "-f", "data", "-"], capture_output=True, check=True).stdout
+        hdr = _msg(_msg(_msg(data[:int(sizes[0])]).get(1, b"")).get(1, b""))
+        for f in (10, 1):
+            v = hdr.get(f)
+            if isinstance(v, (bytes, bytearray)) and v:
+                return v.decode("utf-8", "replace")
+    except (subprocess.SubprocessError, RuntimeError, ValueError, IndexError, struct.error, KeyError):
+        pass
+    return ""
 
 
 def decode(mp4):

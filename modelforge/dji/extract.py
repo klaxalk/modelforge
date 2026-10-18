@@ -125,10 +125,13 @@ def estimate_lead_srt(srt, gimbal, n_frames):
             "median_yaw_err_deg": round(best[1], 3)}
 
 
-def global_flow(mp4, w=320, h=180):
-    """Horizontal global image shift between consecutive frames (phase correlation)."""
-    p = subprocess.Popen(["ffmpeg", "-v", "error", "-i", mp4, "-map", "0:v:0", "-fps_mode", "passthrough",
-                          "-vf", f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"], stdout=subprocess.PIPE)
+def global_flow(mp4, w=320, h=180, start=None, duration=None):
+    """Horizontal global image shift between consecutive frames (phase correlation), optionally of the
+    piece [start, start + duration) s only (accurate input seek, so the first value is that frame's)."""
+    cmd = ["ffmpeg", "-v", "error"] + (["-ss", f"{start:.4f}"] if start else []) + ["-i", mp4] + \
+        (["-t", f"{duration:.4f}"] if duration else []) + \
+        ["-map", "0:v:0", "-fps_mode", "passthrough", "-vf", f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     win = cv2.createHanningWindow((w, h), cv2.CV_32F)
     prev, dx = None, [0.0]
     while True:
@@ -143,23 +146,59 @@ def global_flow(mp4, w=320, h=180):
     return np.array(dx)
 
 
-def estimate_lead_flow(mp4, gimbal, n_frames, min_corr=0.5):
-    dx = global_flow(mp4)
-    n = min(len(dx), n_frames)
-    sm = lambda x: np.convolve(x, np.ones(15) / 15, mode="same")
-    img = sm(dx[:n])
-    k = np.arange(n, dtype=float)
-    best = None
-    for lead in np.arange(0.0, 45.0, 0.5):
+def flow_windows(n, fps, window_s=45.0, count=4):
+    """Frame ranges [(k0, k1)] to estimate the lead from: the whole clip when it is short, else `count`
+    windows of window_s spread evenly over it (decoding a long 4K clip in full takes over 10 minutes)."""
+    m = int(round(window_s * fps))
+    if n <= 1.5 * count * m:
+        return [(0, n)]
+    starts = np.linspace(0, n - m, count).astype(int)
+    return [(int(k0), int(k0) + m) for k0 in starts]
+
+
+LEAD_RANGE = (-15.0, 45.0)  # searched lead [frames]; negative = telemetry trails the images
+
+
+def _best_lead(k, img, gimbal, sm, n_frames):
+    """(lead, |corr|) maximizing the correlation of image shift and gimbal yaw rate over frames k."""
+    best = (0.0, 0.0)
+    for lead in np.arange(LEAD_RANGE[0], LEAD_RANGE[1] + 0.25, 0.5):
         yaw = np.degrees(np.unwrap(np.radians(gimbal(k - lead)[:, 2])))
         rate = sm(np.r_[0.0, np.diff(yaw)])
-        sel = k - lead >= 0
+        sel = (k - lead >= 0) & (k - lead <= n_frames - 1)
+        if sel.sum() < 30 or np.std(rate[sel]) == 0 or np.std(img[sel]) == 0:
+            continue
         c = abs(np.corrcoef(img[sel], rate[sel])[0, 1])
-        if best is None or c > best[1]:
+        if c > best[1]:
             best = (float(lead), float(c))
-    if best[1] < min_corr:
+    return best
+
+
+def estimate_lead_flow(mp4, gimbal, n_frames, min_corr=0.5, pts=None):
+    """Lead [frames] maximizing |corr| of the global image shift with the gimbal yaw rate.
+
+    With pts, a long clip is sampled in flow_windows, each estimated on its own, and the lead is the
+    median over the windows with |corr| >= min_corr: on the NEO2 sample the correlation is -0.9..-0.99
+    in some minutes and breaks down in others (fast turns, where phase correlation fails), so one
+    estimate over everything is weak (0.55 over the whole clip)."""
+    sm = lambda x: np.convolve(x, np.ones(15) / 15, mode="same")  # noqa: E731
+    fps = (len(pts) - 1) / (pts[-1] - pts[0]) if pts is not None and len(pts) > 1 else 29.97
+    windows = flow_windows(n_frames, fps) if pts is not None else [(0, n_frames)]
+    found = []
+    for k0, k1 in windows:
+        if (k0, k1) == (0, n_frames):
+            dx = global_flow(mp4)
+        else:  # seek a quarter frame early so that frame k0 comes first
+            dx = global_flow(mp4, start=max(0.0, pts[k0] - 0.25 / fps), duration=(k1 - k0) / fps)
+        n = min(len(dx), n_frames - k0, k1 - k0)
+        lead, c = _best_lead(np.arange(k0, k0 + n, dtype=float), sm(dx[:n]), gimbal, sm, n_frames)
+        found.append({"start_s": round(float(k0 / fps), 1), "lead_frames": lead, "corr": round(c, 3)})
+    # a best lead at the edge of the search range is a failed fit, not an estimate
+    good = [w for w in found if w["corr"] >= min_corr and LEAD_RANGE[0] < w["lead_frames"] < LEAD_RANGE[1]]
+    if not good:
         return None
-    return {"method": "optical_flow", "lead_frames": best[0], "corr": round(best[1], 3)}
+    return {"method": "optical_flow", "lead_frames": float(np.median([w["lead_frames"] for w in good])),
+            "corr": float(np.median([w["corr"] for w in good])), "windows": found}
 
 
 # --- geometry -----------------------------------------------------------------
@@ -263,7 +302,7 @@ def sampling_curve(mode, pts, aircraft, gimbal, lead, yaw_source, valid, rot_wei
     n = len(pts)
     if mode == "time":
         return np.asarray(pts, float), {"mode": "time", "unit": "s"}
-    x = np.clip(np.arange(n) - lead, 0, None)
+    x = np.clip(np.arange(n) - lead, 0, n - 1)  # both ends: a negative lead reads ahead
     a, g = aircraft(x), gimbal(x)
     dt = np.r_[0.0, np.diff(pts)]
     ds_trans = np.linalg.norm(a[:, 4:7], axis=1) * dt
@@ -365,10 +404,10 @@ def main():
     ap.add_argument("--end", type=float, help="end time [s], applied to every video")
     ap.add_argument("--srt", help="SRT sidecar (single video only; default: next to the video)")
     ap.add_argument("--lead", type=float, help="telemetry lead [frames]; skips estimation")
-    ap.add_argument("--yaw-source", choices=("aircraft", "gimbal"), default="aircraft",
-                    help="camera heading source (default aircraft). The NEO2 gimbal has no yaw axis; its "
-                         "reported yaw is aircraft yaw in an offset (~-36.5 deg) frame. Use gimbal only for "
-                         "models with a yawing gimbal whose yaw is verified to be a true heading")
+    ap.add_argument("--yaw-source", choices=("auto", "aircraft", "gimbal"), default="auto",
+                    help="camera heading source (default auto: per clip, the gimbal yaw when it is a true "
+                         "heading, as on the Mavic 4 whose gimbal can yaw; else the aircraft yaw, as on the "
+                         "NEO2, whose gimbal has no yaw axis and reports yaw in an offset (~-36.5 deg) frame)")
     ap.add_argument("--quality", type=int, default=95, help="JPEG quality")
     args = ap.parse_args()
 

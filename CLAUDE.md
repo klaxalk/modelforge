@@ -269,6 +269,29 @@ SRT only helps two things:
   - Without an SRT, the MP4 tag is used. This fixed a 2 h skew when videos
     with and without SRT were mixed.
 
+**Other models (2026-10-18): DJI Mavic 4 Pro.** The user's `dira.MP4` failed with "object of type
+'float' has no len()": the decoder took the gimbal record for the aircraft record.
+- Records are now found by the type in their header (1 camera, 2 aircraft, 3 gimbal; NEO2 3.2/3.4/3.5,
+  Mavic 4 3.2/3.3/3.4). The camera and gimbal fields are chosen per layout. NEO2 output is
+  unchanged.
+- `djmd.model_name` reads the model ("DJI NEO2", "DJI Mavic4 Pro L3A"); `Clip.model`.
+- **Yaw source `auto`** (new default in Settings, CLI and GUI; existing ingest.json keep their value),
+  `Clip.yaw_source`: by model whether the gimbal can yaw. NEO → aircraft yaw; Mavic 4 (360° gimbal,
+  true-heading gimbal yaw) → gimbal yaw; unknown models → gimbal unless its yaw is over 20° from
+  the aircraft's. poses.json records `yaw_source_used` per source.
+- **Lead** (no SRT, optical flow), `extract.estimate_lead_flow`:
+  - Long clips are sampled in 4 windows of 45 s (`flow_windows`), each estimated on its own. The
+    lead is the median over windows with |corr| ≥ 0.5 and a best lead inside the search range
+    (−15…45 frames; a negative lead means the telemetry trails the images).
+  - Why: decoding a 33 min 4K clip in full took over 10 min, and one correlation over a whole
+    clip is weak. On the NEO2 sample it was 0.55, while single minutes reach −0.99 and others break
+    down in fast turns.
+  - NEO2 sample: 22.0 frames (SRT: 21.6) from 20 s of decoding. Mavic 4 `dira.MP4`: 0.5 frames in
+    125 s, cached per clip.
+  - `Clip.telemetry` and `sampling_curve` clamp at both ends now (negative leads read ahead).
+- Tests: `tests/test_djmd_models.py` (both layouts from hand-built packets, the auto yaw rules,
+  the windows).
+
 Key facts (details in `docs/djmd_format.md`):
 - Attitude is in 0.1° units. Velocity is NED in m/s. Aircraft yaw is a true
   heading.
