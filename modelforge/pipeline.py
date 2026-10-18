@@ -29,7 +29,7 @@ import time
 
 import pycolmap
 
-from modelforge import dense
+from modelforge import dense, jobs
 from modelforge.export import nerfstudio
 from modelforge.sfm import features, pairs, priors as priors_mod, refine, robust
 
@@ -99,9 +99,10 @@ def stage_match(project, report):
     report.set("match", stats)
 
 
-def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None):
+def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done";
     "ba" events carry the live Reconstruction (poses are updated every iteration).
+    token (jobs.Token): stop between steps; BA aborts within an iteration.
 
     model (robust.PriorModel) holds prior sigmas, systematic corrections and rejected
     priors; it is self-calibrated after every round's BA.
@@ -116,13 +117,17 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     for i, rnd in enumerate(rounds):
         t0 = time.time()
         emit({"phase": "triangulate", "round": i, "rounds": len(rounds), "rec": rec})
+        jobs.check(token)
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", f"round_{i}_tri"), rnd)
+        jobs.check(token)
         tri = refine.evaluate(rec, pri)
         live = rec
         corrected = robust.corrected_priors(pri, model)
         ba = refine.prior_ba(rec, corrected, model, loss_scale_px=rnd.loss_scale_px, relative=i >= model.start_round,
                              on_iteration=lambda s, i=i: emit({"phase": "ba", "round": i, "rounds": len(rounds),
-                                                               "iteration": s.iteration, "cost": s.cost, "rec": live}))
+                                                               "iteration": s.iteration, "cost": s.cost, "rec": live}),
+                             token=token)
+        jobs.check(token)  # an aborted BA leaves no round_N
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
         rec.write(out)
@@ -143,7 +148,9 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
                 f"rel {calib['rel_rejected']} | d2 median abs {calib['abs_d2_median']} rel {calib['rel_d2_median']}")
         emit({"phase": "round_done", "round": i, "rounds": len(rounds), "rec": rec, "eval": ev})
     # final triangulation at the tightest threshold so the exported cloud matches the refined poses
+    jobs.check(token)
     rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), rounds[-1])
+    jobs.check(token)  # stopped: sparse/refined is not (over)written
     rec.extract_colors_for_all_images(image_path)
     rec.write(os.path.join(project, "sparse", "refined"))
     results["final"] = refine.evaluate(rec, pri)
@@ -164,7 +171,7 @@ def stage_export(project, report, rec=None):
 
 
 def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dense.DEFAULT_QUALITY,
-                max_image_size=None):
+                max_image_size=None, token=None, on_progress=None):
     """One dense stage. `quality` is a dense.QUALITY preset; `max_image_size` overrides its image size."""
     q = dict(dense.QUALITY[quality])
     size = q.pop("max_image_size") if max_image_size is None else max_image_size
@@ -172,13 +179,15 @@ def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dens
     if stage == "undistort":
         rep = {"undistort": {**dense.undistort(project, max_image_size=size), "quality": quality}}  # new workspace
     elif stage == "stereo":
-        rep["stereo"] = {**dense.stereo(project, max_image_size=size, **q), "quality": quality}
+        rep["stereo"] = {**dense.stereo(project, max_image_size=size, token=token, on_progress=on_progress, **q),
+                         "quality": quality}
     elif stage == "fusion":
         rep["fusion"] = dense.fusion(project)
     elif stage == "mesh":
-        rep["mesh"] = {m: {**dense.mesh(project, m), "preview": dense.preview(project, m)} for m in mesh_methods}
+        rep["mesh"] = {m: {**dense.mesh(project, m, token=token), "preview": dense.preview(project, m, token=token)}
+                       for m in mesh_methods}
     elif stage == "texture":
-        rep["texture"] = {m: dense.texture(project, m) for m in mesh_methods}
+        rep["texture"] = {m: dense.texture(project, m, token=token) for m in mesh_methods}
     report.set("dense", rep)
     log(f"{stage}: {rep.get(stage)}")
 

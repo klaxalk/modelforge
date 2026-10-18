@@ -36,9 +36,10 @@ Done:
 - Multi-video ingest: sources = video + time range, per-source offsets.
 - Web GUI with two docked panels:
   - left (`gui.add_panel()`): Projects / Videos / Ingest / View / Inspect /
-    Plots / Export;
-  - right (main): run state, **Run full pipeline**, Sparse / Dense / Splat,
-    history and log.
+    Plots / Export / Settings (dark mode);
+  - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
+    Dense / Splat, history;
+  - a third window with the log, floating at the bottom of the 3D view.
   - Projects: list, open, create; final vs. intermediate results; clean.
   - Videos: the shared video library (upload from the browser, info, used-by,
     add to project, download, rename, delete).
@@ -198,6 +199,7 @@ modelforge/
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── projects.py     # project folders: list / create / status / clean
+│   ├── jobs.py         # stopping jobs: Token (check / cancel / run killable subprocesses)
 │   ├── videos.py       # shared video library: list / probe / usage / upload / rename / delete (Videos tab)
 │   └── pipeline.py     # CLI driving all stages
 ├── resources/
@@ -525,7 +527,7 @@ Why PatchMatch was slow:
 | Stage | Output in `PROJECT/dense/` | Device |
 |---|---|---|
 | `undistort` | `images/`, `sparse/` (PINHOLE) | CPU (8 s for 300 images, 464 MB) |
-| `stereo` | `stereo/{depth,normal}_maps` (PatchMatch, 20 sources/view from the refined tracks) | **CUDA only**, clear error otherwise |
+| `stereo` | `stereo/{depth,normal}_maps` (PatchMatch, 20 sources/view from the refined tracks). Runs the `colmap patch_match_stereo` CLI (killable by Stop; "Processing view i / n" drives the progress) | **CUDA only**, clear error otherwise |
 | `fusion` | `fused.ply` + `fused.ply.vis` | CPU |
 | `mesh` | `meshed-<m>.ply`, `preview-<m>.ply` (≤300k faces, COLMAP `mesh_simplifier`, for the GUI) | CPU |
 | `texture` | `textured-<m>/mesh.ply` + `texture.png` (COLMAP `mesh_texturer`) | CPU |
@@ -712,11 +714,38 @@ Code layout:
     holds Projects / Videos / Ingest / View / Inspect / Plots / Export.
   - The **right (main) panel** (`main_panel.dock_right()`) only runs the
     methods: header, run state + progress, **Run full pipeline**, tabs
-    Sparse / Dense / Splat, then History / Log.
+    Sparse / Dense / Splat, then History.
+  - **Settings** tab (left panel): **Dark mode**.
+    - `App.set_dark` calls `configure_theme(dark_mode=...)` for every client
+      (the default `control_layout` sends no dock command, so the panel
+      placement survives).
+    - The Plotly charts switch to the `plotly_dark` / `plotly_white`
+      template.
+    - The choice is remembered in `ROOT/.modelforge_gui.json`.
+  - The **log** is a third panel (`self.log_panel`), floated at the bottom of
+    the 3D view (`float(x=8, y=-8, width=900, height=260)`; negative y is
+    measured from the bottom). viser docks panels only to the left / right
+    edges or above / below another panel, so "bottom", as the user asked, is
+    a float. It shows the last 200 lines, newest first, because markdown
+    cannot auto-scroll.
   - **Run full pipeline** (stage `all`) runs SfM → splat → dense (the user's
     order) with the tabs' settings. A project without images is extracted
     first from its Ingest plan (`IngestPanel.extract_now`). Splat / dense
     are skipped, with a History note, without nerfstudio / CUDA.
+  - **Stop** (`App.stop`, `modelforge/jobs.py`) stops whatever runs: a
+    stage, the full pipeline, splat training or an extraction. Every job
+    gets a `jobs.Token`:
+    - Subprocesses started through `Token.run` are terminated at once:
+      stereo, Delaunay, texturing, mesh simplification, ns-train, ns-export.
+    - Bundle adjustment aborts within an iteration (its Ceres callback
+      returns `SOLVER_ABORT`). An aborted round writes no `round_N`, and a
+      stopped refine leaves `sparse/refined` as it was.
+    - Extraction checks the token at every frame.
+    - In-process pycolmap calls (features, matching, triangulation, fusion)
+      cannot be interrupted; the token is checked when they return, and the
+      state line reads "⏹ stopping …" meanwhile.
+    - A stopped run ends as "⏹ stopped during <stage>", not as a failure.
+    - The splat-only Stop button was folded into this one.
   - Tabs:
   - **View**: snapshot picker and stats, including the calibrated prior model.
     A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview

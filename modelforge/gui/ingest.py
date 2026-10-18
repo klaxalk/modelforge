@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import videos
+from modelforge import jobs, videos
 from modelforge.dji import extract as ex
 from modelforge.dji import ingest
 
@@ -39,6 +39,7 @@ class IngestPanel:
             self.sources, self.settings = self._plan_from_poses()
         self.plan, self.prev = None, None
         self.running = False
+        self.token = None  # jobs.Token of a running extraction (the Stop button cancels it)
         self.edited = False  # ingest.json is written only once the user changes the plan
         self._loading = False  # widget updates from set_project are not user edits
         self._lock = threading.RLock()  # source widgets: GUI callbacks vs. the planner thread
@@ -444,7 +445,7 @@ class IngestPanel:
                                          marker=dict(size=4, color=col), showlegend=False), 1, 1)
         fig.update_xaxes(title_text="time [s] (project timeline)", row=3, col=1)
         fig.update_layout(margin=dict(l=40, r=10, t=30, b=30), height=560,
-                          legend=dict(orientation="h", y=-0.12))
+                          legend=dict(orientation="h", y=-0.12), template=self.app.plot_template())
         self.g_plot.figure = fig
 
     # ------------------------------------------------------------------ frame preview
@@ -530,6 +531,8 @@ class IngestPanel:
                                     "(old outputs move to `previous/`)"
             return
         self.running = True
+        self.token = jobs.Token()
+        self.app.g_stop.disabled = False
         self.g_extract.disabled = True
         self.g_progress.visible, self.g_progress.value = True, 0.0
         threading.Thread(target=self._extract, daemon=True).start()
@@ -539,9 +542,11 @@ class IngestPanel:
         if not self.plan or not self.plan.num_images:
             raise RuntimeError("the Ingest plan selects no images: add a video and its range in the Ingest tab")
         self.running = True
+        self.token = self.app._token  # the full pipeline's Stop applies
         self.g_extract.disabled = True
         self.g_progress.visible, self.g_progress.value = True, 0.0
         self._extract()  # resets running / buttons itself
+        self.token.check()
         if self.app.project is None:
             raise RuntimeError("extraction failed (details in the Ingest tab)")
 
@@ -549,6 +554,7 @@ class IngestPanel:
         t0 = time.time()
         try:
             def progress(done, total, msg):
+                self.token.check()  # Stop: abort between frames
                 self.g_progress.value = 100.0 * done / max(total, 1)
                 self.g_status.content = f"⏳ **extracting** {done}/{total} images · {msg} · {time.time() - t0:.0f} s"
             self.g_status.content = "⏳ **extracting** … decoding up to the first selected frame"
@@ -559,11 +565,15 @@ class IngestPanel:
             n = len(self.app.project.names)
             self.g_status.content = (f"✅ **extracted {n} images** in {time.time() - t0:.0f} s "
                                      f"· {time.strftime('%H:%M:%S')}  \nnext: Sparse tab → **Run SfM (all)**")
+        except jobs.Cancelled:
+            self.g_status.content = ("⏹ **extraction stopped**: the images are incomplete; tick **Overwrite** and "
+                                     "extract again (the partial ones move to `previous/`)")
         except Exception as e:
             traceback.print_exc()
             self.g_status.content = f"❌ **extraction failed**: `{e}`"
         finally:
             self.running = False
+            self.app.g_stop.disabled = not self.app.running
             self.g_extract.disabled = False
             self.g_progress.visible = False
             self._update_status()

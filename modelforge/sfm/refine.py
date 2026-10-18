@@ -87,9 +87,9 @@ def triangulate(rec, db_path, image_path, out_dir, rnd):
 class _Progress(pyceres.IterationCallback):
     """Forwards iterations to `fn` and ends the solve once the cameras have settled."""
 
-    def __init__(self, fn, poses=(), cameras=(), settle=None):
+    def __init__(self, fn, poses=(), cameras=(), settle=None, token=None):
         pyceres.IterationCallback.__init__(self)
-        self.fn, self.costs = fn, []
+        self.fn, self.costs, self.token = fn, [], token
         self.poses, self.cameras, self.settle = list(poses), list(cameras), settle
         self.history, self.settled = [], False
 
@@ -103,6 +103,8 @@ class _Progress(pyceres.IterationCallback):
         self.costs.append(summary.cost)
         if self.fn:
             self.fn(summary)
+        if self.token is not None and self.token.cancelled:  # Stop: abort the solve now
+            return pyceres.CallbackReturnType.SOLVER_ABORT
         s = self.settle
         if s and self.poses:
             self.history = (self.history + [self._state()])[-(s.window + 1):]
@@ -118,7 +120,8 @@ class _Progress(pyceres.IterationCallback):
 
 
 def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
-             refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle()):
+             refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle(),
+             token=None):
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
@@ -176,7 +179,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
 
     solver_options = pyceres.SolverOptions(ba_options.ceres.create_solver_options(ba_config, problem))
     cameras = [rec.cameras[c] for c in sorted(rec.cameras)] if refine_intrinsics else []
-    progress = _Progress(on_iteration, poses.values(), cameras, settle)
+    progress = _Progress(on_iteration, poses.values(), cameras, settle, token)
     solver_options.callbacks = [progress]
     solver_options.update_state_every_iteration = True
     summary = pyceres.SolverSummary()

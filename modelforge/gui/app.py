@@ -7,6 +7,7 @@ may be new or empty: the Ingest tab builds it from one or more videos.
 """
 
 import argparse
+import json
 import os
 import threading
 import time
@@ -17,7 +18,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import dense, pipeline, projects, splat
+from modelforge import dense, jobs, pipeline, projects, splat
 from modelforge.export import products
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
@@ -58,7 +59,7 @@ NEXT_STEP = {
     "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written; Export tab",
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
 }
-LOG_LINES = 40
+LOG_LINES = 200
 
 COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "source", "uniform")
 SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
@@ -114,7 +115,8 @@ class App:
         self.project = Project(project_path) if os.path.exists(os.path.join(project_path, "poses.json")) else None
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
         self.server.scene.set_up_direction("+z")
-        self.server.gui.configure_theme(control_width="large")
+        self.dark = self._load_settings().get("dark_mode", False)
+        self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
         self.lock = threading.RLock()
         self.cam_handles, self.prior_handles = {}, {}
         self.selected = None
@@ -124,7 +126,7 @@ class App:
         self._last_live = 0.0
         self._run_id = 0
         self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
-        self._splat_job = None
+        self._token = None  # jobs.Token of the running job (the Stop button cancels it)
         self._build_gui()
         if self.project:
             names = self.project.snapshot_names()
@@ -147,6 +149,12 @@ class App:
                                 "need a GPU are skipped without one.")
         b.on_click(lambda _: self.run_stage("all"))
         self.g_buttons["all"] = b
+        self.g_stop = gui.add_button("Stop", icon=viser.Icon.PLAYER_STOP, color="red", disabled=True,
+                                     hint="Stop the running job (a stage, the full pipeline, splat training or an "
+                                          "extraction). Subprocess stages (stereo, meshing, texturing, splat) and "
+                                          "bundle adjustment stop at once; feature extraction, matching, "
+                                          "triangulation and fusion stop when their current call returns.")
+        self.g_stop.on_click(lambda _: self.stop())
         # Two panels: the right (main) one runs the methods, the left one holds everything else.
         self.left = gui.add_panel()
         tabs = gui.add_tab_group()
@@ -288,10 +296,6 @@ class App:
                                     "cameras and the mesh).")
             b.on_click(lambda _: self.run_stage("splat"))
             self.g_buttons["splat"] = b
-            self.g_splat_stop = gui.add_button("Stop splat training", icon=viser.Icon.PLAYER_STOP, disabled=True,
-                                               hint="Terminate ns-train / ns-export. Nothing is converted; "
-                                                    "checkpoints written so far stay in nerfstudio/.")
-            self.g_splat_stop.on_click(lambda _: self._splat_job.stop() if self._splat_job else None)
             gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
                            "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                 lambda _: self._refresh_dense())
@@ -332,9 +336,18 @@ class App:
                 b.on_click(lambda e: self._export("splat", e.client, download=True))
                 self.g_export_buttons["splat_dl"] = b
 
+        with self.left.add_tab("Settings", viser.Icon.SETTINGS):
+            self.g_dark = gui.add_checkbox("Dark mode", initial_value=self.dark,
+                                           hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
+                                                "for every open browser. Remembered across restarts.")
+            self.g_dark.on_update(lambda _: self.set_dark(self.g_dark.value))
         with gui.add_folder("History"):
             self.g_history = gui.add_markdown("_nothing run in this session_")
-        with gui.add_folder("Log", expand_by_default=False):
+        # third window: the log, floating at the bottom of the 3D view (viser docks panels only to
+        # the left / right edges or above / below another panel, so "bottom" is a float)
+        self.log_panel = gui.add_panel()
+        with self.log_panel.add_tab("Log", viser.Icon.TERMINAL_2):
+            gui.add_markdown(f"_last {LOG_LINES} lines of the running job, newest first_")
             self.g_log = gui.add_markdown("")
         self._place_panels()
 
@@ -342,6 +355,34 @@ class App:
         self.left.dock_left()
         self.left.set_width(420)
         self.server.gui.main_panel.dock_right()
+        self.log_panel.float(x=8, y=-8, width=900, height=260)  # negative y: measured from the bottom
+
+    # ------------------------------------------------------------- settings
+    def _settings_path(self):
+        return os.path.join(self.root, ".modelforge_gui.json")
+
+    def _load_settings(self):
+        try:
+            with open(self._settings_path()) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def set_dark(self, dark):
+        """Switch the theme (all clients), restyle the plots and remember the choice."""
+        self.dark = bool(dark)
+        self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
+        try:
+            with open(self._settings_path(), "w") as f:
+                json.dump({**self._load_settings(), "dark_mode": self.dark}, f)
+        except OSError:
+            pass
+        if self.snap is not None:
+            self._update_plots()
+        self.ingest._update_plot()
+
+    def plot_template(self):
+        return "plotly_dark" if self.dark else "plotly_white"
 
     def _header(self):
         if self.project is None:
@@ -575,7 +616,8 @@ class App:
         if len(s.point_error):
             fig.add_trace(go.Histogram(x=np.clip(s.point_error, 0, 5), nbinsx=50, name="err"), 3, 1)
         fig.update_xaxes(title_text="time [s] (colour = source)", row=2, col=1)
-        fig.update_layout(showlegend=False, margin=dict(l=40, r=10, t=30, b=30), height=640)
+        fig.update_layout(showlegend=False, margin=dict(l=40, r=10, t=30, b=30), height=640,
+                          template=self.plot_template())
         self.g_plot.figure = fig
 
     # ------------------------------------------------------------- inspect
@@ -632,6 +674,8 @@ class App:
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         self.running = True
+        self._token = jobs.Token()
+        self.g_stop.disabled = False
         self._run_id = getattr(self, "_run_id", 0) + 1
         for b in self.g_buttons.values():
             b.disabled = True
@@ -673,6 +717,7 @@ class App:
             m = self.g_mesh_method.value
             methods = dense.MESH_METHODS if m == "both" else (m,)
             for k, st in enumerate(seq):
+                self._token.check()
                 self._begin_stage(st, k, len(seq))
                 ts = time.time()
                 if st == "features":
@@ -682,20 +727,26 @@ class App:
                 elif st == "match":
                     pipeline.stage_match(project, report)
                 elif st == "refine":
-                    pipeline.stage_refine(project, report, pri, progress=self._on_refine_event)
+                    pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token)
                 elif st == "export":
                     pipeline.stage_export(project, report)
                 elif st == "splat":
                     self._run_splat(project)
                     report = pipeline.Report(project)  # splat.run wrote its stats
                 else:
-                    pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value])
+                    pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value],
+                                         token=self._token, on_progress=self._on_stereo_progress)
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm", "all") else None)
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
+        except jobs.Cancelled:
+            label = self._job["label"]
+            self._history(f"⏹ **{label}** stopped")
+            final = (f"⏹ **stopped** during {label} after {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}"
+                     "  \nthat stage's outputs may be incomplete: run it again")
         except Exception as e:  # surface failures in the GUI instead of killing the thread silently
             traceback.print_exc()
             label = self._job["label"]
@@ -712,10 +763,26 @@ class App:
             for name, b in self.g_buttons.items():
                 b.disabled = unavailable.get(name, False)
             self.g_progress.visible = False
+            self.g_stop.disabled = not self.ingest.running
+
+    def stop(self):
+        """Stop button: cancel the running job and / or an extraction (in a thread: killing a
+        subprocess may wait a few seconds)."""
+        tokens = [t for t in (self._token if self.running else None,
+                              self.ingest.token if self.ingest.running else None) if t is not None]
+        if not tokens:
+            return
+        self.g_stop.disabled = True
+        self._on_log("--- stop requested")
+        for t in tokens:
+            threading.Thread(target=t.cancel, daemon=True).start()
+
+    def _on_stereo_progress(self, view, views, pass_index):
+        passes = ("photometric", "geometric")
+        self._job["detail"] = f"PatchMatch {passes[min(pass_index, 1)]} pass: view {view} / {views}"
+        self.g_progress.value = 100.0 * (pass_index * views + view) / (2 * views)
 
     def _run_splat(self, project):
-        self._splat_job = splat.Job()
-        self.g_splat_stop.disabled = False
         iters = int(self.g_splat_iters.value)
 
         self._live_msg = ""
@@ -738,13 +805,11 @@ class App:
                 self.g_splat_status.content = (f"live preview: first snapshot at step "
                                                f"{int(self.g_splat_every.value):,}, then in the View tab")
             splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
-                      job=self._splat_job, cache="disk" if self.g_splat_disk.value else "gpu",
+                      job=self._token, cache="disk" if self.g_splat_disk.value else "gpu",
                       downscale=int(self.g_splat_down.value), preview_every=int(self.g_splat_every.value),
                       on_snapshot=self._on_splat_snapshot if live else None)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         finally:
-            self.g_splat_stop.disabled = True
-            self._splat_job = None
             self._splat_live_on = False
             self.server.scene.remove_by_name("/dense/splat_live")
 
@@ -786,8 +851,9 @@ class App:
                     return
                 j = self._job
                 now = time.time()
+                verb = "⏹ **stopping**" if self._token is not None and self._token.cancelled else "⏳ **running**"
                 self.g_state.content = (
-                    f"⏳ **running {j['label']}** · stage {_fmt_s(now - j['stage_t0'])} · "
+                    f"{verb} **{j['label']}** · stage {_fmt_s(now - j['stage_t0'])} · "
                     f"total {_fmt_s(now - j['t0'])}" + (f"  \n{j['detail']}" if j["detail"] else ""))
             time.sleep(1.0)
 
@@ -796,7 +862,7 @@ class App:
         for line in str(msg).splitlines():
             lines.append(f"{time.strftime('%H:%M:%S')} {line[:240]}" + ("…" if len(line) > 240 else ""))
         self._log_lines = lines[-LOG_LINES:]
-        self.g_log.content = "```\n" + "\n".join(self._log_lines) + "\n```"
+        self.g_log.content = "```\n" + "\n".join(reversed(self._log_lines)) + "\n```"  # newest on top
 
     def _history(self, line):
         h = getattr(self, "_history_lines", [])

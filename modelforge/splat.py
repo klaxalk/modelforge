@@ -30,6 +30,8 @@ import sys
 import threading
 import time
 
+from modelforge import jobs
+
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
@@ -40,25 +42,8 @@ _PROGRESS = re.compile(r"^\s*(\d+)\s+\((\d+(?:\.\d+)?)%\)")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # the table is redrawn with cursor-up escapes
 
 
-class Stopped(Exception):
-    pass
-
-
-class Job:
-    """Handle to stop a running `run` from another thread."""
-
-    def __init__(self):
-        self.proc, self.stopped = None, False
-
-    def stop(self):
-        self.stopped = True
-        p = self.proc
-        if p and p.poll() is None:
-            p.terminate()
-            try:
-                p.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                p.kill()
+Stopped = jobs.Cancelled  # stopping is shared with the other stages (modelforge.jobs)
+Job = jobs.Token
 
 
 def available():
@@ -83,17 +68,11 @@ def _env():
 
 
 def _stream(cmd, on_line, job):
-    job.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                env=_env())
-    for line in job.proc.stdout:
-        line = _ANSI.sub("", line).rstrip()
-        if line:
-            on_line(line)
-    rc = job.proc.wait()
-    if job.stopped:
-        raise Stopped(f"{os.path.basename(cmd[0])} stopped")
-    if rc:
-        raise RuntimeError(f"{os.path.basename(cmd[0])} exited with code {rc} (see the log)")
+    def line(text):
+        text = _ANSI.sub("", text).rstrip()
+        if text:
+            on_line(text)
+    job.run(cmd, line, env=_env())  # Cancelled when stopped, RuntimeError on failure
 
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
