@@ -283,6 +283,9 @@ class IngestPanel:
         if self.kind == "rosbag" and not rbag.is_bag(v):
             self.g_status.content = f"❌ not a ROS 2 bag (a folder with metadata.yaml, or an .mcap file): `{v}`"
             return
+        if self.kind != "rosbag" and rbag.is_bag(v):
+            self.g_status.content = f"❌ `{v}` is a ROS 2 bag: it needs a project of kind ROS 2 bag"
+            return
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
         self._rebuild_sources()

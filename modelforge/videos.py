@@ -1,4 +1,7 @@
-"""The video library: DJI clips (+ .SRT sidecars) under the data root, shared by all projects.
+"""The video library: DJI clips (+ .SRT sidecars) and ROS 2 bags under the data root, shared by all
+projects. A bag is an .mcap file or a folder with metadata.yaml (rosbag.bag.is_bag); bag folders are
+listed as one entry, not opened. Bags arrive as an .mcap, as an archive of a bag folder (.zip / .tar /
+.tar.gz, unpacked here) or as the loose files of one (metadata.yaml + .db3 / .mcap into a folder).
 
 The library is ROOT/videos/ (projects live next to it in ROOT, so names never clash); the Ingest tab
 still finds clips anywhere under ROOT outside project folders (ingest.find_videos). A clip is "used"
@@ -10,18 +13,57 @@ rename, delete, download) and stray .SRT files. Project folders and hidden files
 the library and are never listed, entered or deleted here (the Projects tab handles projects).
 """
 
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
+import threading
+import zipfile
 
 from modelforge import projects
 from modelforge.dji import ingest
 
 LIBRARY_DIR = projects.LIBRARY_DIR  # ROOT/videos: the library; projects live next to it in ROOT
-UPLOAD_EXTS = tuple(ingest.VIDEO_EXTS) + (".srt",)
+ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz")
+BAG_EXTS = (".mcap",)  # a single-file bag
+BAG_PART_EXTS = (".db3", ".mcap")  # files inside a bag folder, with metadata.yaml
+UPLOAD_EXTS = tuple(ingest.VIDEO_EXTS) + (".srt",) + BAG_EXTS + ARCHIVE_EXTS + (".db3", ".yaml")
 _probe_cache = {}
+_bag_cache = {}
+
+
+def is_bag(path):
+    from modelforge.rosbag import bag
+    return bag.is_bag(path)
+
+
+def _tree_size(path):
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    return sum(os.path.getsize(os.path.join(d, n)) for d, _, ns in os.walk(path) for n in ns)
+
+
+def bag_info(path):
+    """{duration_s, created, topics, images, clouds, tf, odometry, error} of a bag, cached by mtime."""
+    key = (os.path.abspath(path), os.path.getmtime(path), _tree_size(path))
+    if key not in _bag_cache:
+        from modelforge.rosbag import bag
+        info = {"duration_s": None, "created": None, "topics": 0, "images": [], "clouds": [], "tf": False,
+                "odometry": [], "error": None}
+        try:
+            inv = bag.inventory(path)
+            import datetime
+            info.update(duration_s=inv["end"] - inv["start"], topics=len(inv["topics"]),
+                        created=datetime.datetime.fromtimestamp(inv["start"], datetime.timezone.utc).isoformat(),
+                        images=bag.topics_of(inv, bag.IMAGE_TYPES), clouds=bag.topics_of(inv, bag.CLOUD_TYPE),
+                        odometry=bag.topics_of(inv, bag.ODOM_TYPE), tf=bool(bag.topics_of(inv, bag.TF_TYPE)))
+        except Exception as e:  # unreadable / still being copied: list it anyway
+            info["error"] = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+        _bag_cache[key] = info
+    return _bag_cache[key]
 
 
 def library_dir(root):
@@ -34,10 +76,12 @@ def _inside(root, path):
 
 
 def check_video(root, path):
-    """Absolute path of a library video; ValueError unless it is a video under root, outside projects."""
+    """Absolute path of a library video or ROS 2 bag; ValueError unless it is one under root, outside
+    projects."""
     p = os.path.abspath(path)
-    if not p.lower().endswith(ingest.VIDEO_EXTS) or not os.path.isfile(p) or not _inside(root, p):
-        raise ValueError(f"not a video in the library: {path}")
+    video = p.lower().endswith(ingest.VIDEO_EXTS) and os.path.isfile(p)
+    if not (video or is_bag(p)) or not _inside(root, p):
+        raise ValueError(f"not a video or ROS 2 bag in the library: {path}")
     d = os.path.dirname(p)
     while _inside(root, d):
         if projects.is_project(d):
@@ -113,11 +157,18 @@ def safe_name(filename):
 
 
 def save_upload(root, filename, data, overwrite=False, rel_dir=""):
-    """A browser-uploaded video or .SRT -> ROOT/videos/rel_dir/<name> (via a temp file)."""
+    """A browser-uploaded video, .SRT or ROS 2 bag -> ROOT/videos/rel_dir/<name> (via a temp file).
+    Archives (.zip / .tar / .tar.gz) of a bag folder are unpacked (extract_bags); metadata.yaml and .db3
+    are parts of a bag folder (upload them into one). Returns the saved path (an unpacked archive: its
+    first bag)."""
     name = safe_name(filename)
-    if not name.lower().endswith(UPLOAD_EXTS):
-        raise ValueError(f"not a video or .SRT file: {name} (allowed: {', '.join(UPLOAD_EXTS)})")
+    low = name.lower()
+    if not low.endswith(UPLOAD_EXTS) or (low.endswith(".yaml") and low != "metadata.yaml"):
+        raise ValueError(f"not a video, .SRT or ROS 2 bag file: {name} (allowed: {', '.join(UPLOAD_EXTS)}; "
+                         ".yaml only as a bag's metadata.yaml)")
     d = resolve_dir(root, rel_dir, create=True)
+    if low.endswith(ARCHIVE_EXTS):
+        return extract_bags(root, name, data, d)
     path = os.path.join(d, name)
     if os.path.lexists(path) and not overwrite:
         raise FileExistsError(f"{os.path.relpath(path, root)} already exists in the library")
@@ -128,14 +179,100 @@ def save_upload(root, filename, data, overwrite=False, rel_dir=""):
     return path
 
 
+def _archive_stem(name):
+    low = name.lower()
+    ext = next(e for e in sorted(ARCHIVE_EXTS, key=len, reverse=True) if low.endswith(e))
+    return name[:-len(ext)]
+
+
+def extract_bags(root, name, data, dest):
+    """Unpack an uploaded archive holding ROS 2 bag(s) into the library folder dest. Loose bag files
+    (metadata.yaml at the archive's top) go into a folder named after the archive; otherwise its
+    top-level entries are kept. Members leaving the folder, links and devices are refused. Returns the
+    first bag's path; ValueError (nothing kept) without a bag inside."""
+    tmp = os.path.join(dest, f".upload{os.getpid()}-{threading.get_ident()}")
+    os.makedirs(tmp)
+    try:
+        low = name.lower()
+        if low.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for m in z.infolist():
+                    target = os.path.realpath(os.path.join(tmp, m.filename))
+                    if not target.startswith(os.path.realpath(tmp) + os.sep):
+                        raise ValueError(f"archive member leaves the folder: {m.filename}")
+                z.extractall(tmp)
+        else:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as t:
+                t.extractall(tmp, filter="data")  # refuses absolute / .. paths, links out, devices
+        tops = [n for n in os.listdir(tmp) if not n.startswith(".") and n != "__MACOSX"]
+        if "metadata.yaml" in tops:  # the bag folder's files themselves
+            moves = [(tmp, os.path.join(dest, _archive_stem(name)))]
+        else:
+            moves = [(os.path.join(tmp, n), os.path.join(dest, n)) for n in tops]
+        from modelforge.rosbag import bag
+        bags = [b for src, _ in moves for b in ([src] if is_bag(src) else bag.find_bags(src)
+                                                  if os.path.isdir(src) else [])]
+        if not bags:
+            raise ValueError(f"no ROS 2 bag in {name} (a folder with metadata.yaml, or an .mcap file)")
+        for _, dst in moves:
+            if os.path.lexists(dst):
+                raise FileExistsError(f"{os.path.relpath(dst, root)} already exists in the library")
+        first = None
+        for src, dst in moves:
+            os.rename(src, dst)
+            for b in bags:  # where the first bag ended up
+                if first is None and (b == src or b.startswith(src + os.sep)):
+                    first = dst + b[len(src):]
+        return first
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def bag_zip(path):
+    """A bag folder as .zip bytes (stored: bag data rarely compresses well), for the browser download."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for d, _, names in os.walk(path):
+            for n in sorted(names):
+                f = os.path.join(d, n)
+                z.write(f, os.path.join(os.path.basename(path), os.path.relpath(f, path)))
+    return buf.getvalue()
+
+
+def _tree_moves(src, dst):
+    """{old realpath: new path} for a file or a folder with everything in it (folders too: a bag
+    folder is a project source itself)."""
+    if not os.path.isdir(src):
+        return {os.path.realpath(src): dst}
+    moves = {}
+    for d, _, names in os.walk(src):
+        moves[os.path.realpath(d)] = os.path.join(dst, os.path.relpath(d, src)) if d != src else dst
+        for n in names:
+            old = os.path.join(d, n)
+            moves[os.path.realpath(old)] = os.path.join(dst, os.path.relpath(old, src))
+    return moves
+
+
 def rename(root, path, new_name):
     """Rename a video and its .SRT (same folder; the extension is kept); projects using it are updated
     (update_references). Returns the new path."""
     p = check_video(root, path)
+    if os.path.isdir(p):  # a bag folder: the whole name, the folder rules
+        new_name = new_name.strip()
+        if not FOLDER_RE.match(new_name):
+            raise ValueError("bag folder names use letters, digits, spaces and '_ . ( ) -' (max 64), starting "
+                             "with a letter or digit")
+        dst = os.path.join(os.path.dirname(p), new_name)
+        if os.path.lexists(dst):
+            raise FileExistsError(f"{new_name} already exists")
+        moves = _tree_moves(p, dst)
+        os.rename(p, dst)
+        update_references(root, moves)
+        return dst
     stem = os.path.splitext(safe_name(new_name))[0]
     ext = os.path.splitext(p)[1]
     dst = os.path.join(os.path.dirname(p), stem + ext)
-    srt = ingest.find_srt(p)
+    srt = _srt(p)
     srt_dst = os.path.join(os.path.dirname(p), stem + os.path.splitext(srt)[1]) if srt else None
     for t in (dst, srt_dst):
         if t and os.path.lexists(t) and os.path.abspath(t) != p:
@@ -148,11 +285,19 @@ def rename(root, path, new_name):
     return dst
 
 
+def _srt(p):
+    """The .SRT sidecar of a video (bags have none)."""
+    return ingest.find_srt(p) if p.lower().endswith(ingest.VIDEO_EXTS) else None
+
+
 def delete(root, path):
-    """Delete a video and its .SRT. Returns the deleted paths."""
+    """Delete a video and its .SRT, or a bag (file or folder). Returns the deleted paths."""
     p = check_video(root, path)
     _refuse_if_used(root, p, "delete")
-    gone = [p] + ([ingest.find_srt(p)] if ingest.find_srt(p) else [])
+    if os.path.isdir(p):
+        shutil.rmtree(p)
+        return [p]
+    gone = [p] + ([_srt(p)] if _srt(p) else [])
     for f in gone:
         os.unlink(f)
     return gone
@@ -192,23 +337,34 @@ def resolve_dir(root, rel="", create=False):
 
 
 def listdir(root, rel="", with_probe=True):
-    """{"folders": [...], "videos": [...], "files": [stray .SRT]} of one library folder, by name.
-    Folders carry their video count and size (recursive, projects excluded)."""
+    """{"folders": [...], "videos": [...], "bags": [...], "files": [stray .SRT]} of one library folder,
+    by name. Folders carry their video + bag count and size (recursive, projects excluded)."""
+    from modelforge.rosbag import bag
     d = resolve_dir(root, rel)
     used = usage(root)
-    out = {"folders": [], "videos": [], "files": []}
+    out = {"folders": [], "videos": [], "bags": [], "files": [], "inside_bag": is_bag(d)}
     names = sorted(os.listdir(d), key=str.lower)
     videos = {os.path.splitext(n)[0].lower() for n in names if n.lower().endswith(ingest.VIDEO_EXTS)}
     for n in names:
         p = os.path.join(d, n)
         if n.startswith("."):
             continue
-        if os.path.isdir(p):
+        if out["inside_bag"] and n.lower().endswith(BAG_PART_EXTS):  # the bag's own storage files
+            continue
+        if is_bag(p):
+            e = {"path": p, "name": n, "rel": os.path.relpath(p, _lib(root)), "bytes": _tree_size(p),
+                 "mtime": os.path.getmtime(p), "folder": os.path.isdir(p),
+                 "used_by": sorted(set(used.get(os.path.realpath(p), [])))}
+            if with_probe:
+                e.update(bag_info(p))
+            out["bags"].append(e)
+        elif os.path.isdir(p):
             if projects.is_project(p):
                 continue
-            vids = ingest.find_videos(p)
+            vids, bags = ingest.find_videos(p), bag.find_bags(p)
             out["folders"].append({"name": n, "path": p, "rel": os.path.relpath(p, _lib(root)),
-                                   "videos": len(vids), "bytes": sum(os.path.getsize(v) for v in vids)})
+                                   "videos": len(vids) + len(bags),
+                                   "bytes": sum(os.path.getsize(v) for v in vids) + sum(_tree_size(b) for b in bags)})
         elif n.lower().endswith(ingest.VIDEO_EXTS):
             e = {"path": p, "name": n, "rel": os.path.relpath(p, _lib(root)),
                  "bytes": os.path.getsize(p), "mtime": os.path.getmtime(p), "srt": ingest.find_srt(p),
@@ -245,6 +401,10 @@ def delete_folder(root, rel):
     for d, dirs, names in os.walk(path):
         if projects.is_project(d):
             raise ValueError(f"cannot delete {rel}: it contains the project folder {os.path.relpath(d, path)}")
+        users = used.get(os.path.realpath(d))  # a bag folder used as a source
+        if users:
+            raise ValueError(f"cannot delete {rel}: {os.path.basename(d)} is used by project(s) "
+                             f"{', '.join(sorted(set(users)))}")
         for n in names:
             p = os.path.join(d, n)
             users = used.get(os.path.realpath(p))
@@ -298,10 +458,10 @@ def update_references(root, moves):
     """Point every project at moved files. moves: {old realpath: new absolute path}. Rewrites the
     sources in ingest.json and every matching path string in poses.json. Returns the projects changed."""
     changed = []
-    exts = tuple(ingest.VIDEO_EXTS) + (".srt",)
+    exts = tuple(ingest.VIDEO_EXTS) + (".srt",) + BAG_EXTS
 
-    def fix(v):
-        if isinstance(v, str) and v.lower().endswith(exts) and os.path.realpath(v) in moves:
+    def fix(v):  # paths only: a clip / bag file, or anything with a separator (a bag folder)
+        if isinstance(v, str) and v and (v.lower().endswith(exts) or "/" in v) and os.path.realpath(v) in moves:
             return _stored_like(v, moves[os.path.realpath(v)]), True
         if isinstance(v, list):
             out = [fix(x) for x in v]
@@ -352,19 +512,15 @@ def _move_folder(root, path, dst, rel):
             raise ValueError(f"cannot move {rel}: it contains the project folder {os.path.relpath(d, path)}")
     if os.path.lexists(dst):
         raise FileExistsError(f"{os.path.basename(dst)} already exists there")
-    moves = {}
-    for d, _, names in os.walk(path):
-        for n in names:
-            old = os.path.join(d, n)
-            moves[os.path.realpath(old)] = os.path.join(dst, os.path.relpath(old, path))
+    moves = _tree_moves(path, dst)
     os.rename(path, dst)
     update_references(root, moves)
     return dst
 
 
 def move(root, path, dest_rel):
-    """Move a clip (with its .SRT) or a library folder into the library folder dest_rel; projects
-    using the moved clips are updated. Returns the new path."""
+    """Move a clip (with its .SRT), a bag or a library folder into the library folder dest_rel; projects
+    using the moved clips / bags are updated. Returns the new path."""
     dest = resolve_dir(root, dest_rel)
     p = os.path.abspath(path)
     if os.path.isdir(p):
@@ -380,14 +536,15 @@ def move(root, path, dest_rel):
     v = check_video(root, p)
     if os.path.dirname(v) == dest:
         raise ValueError(f"{os.path.basename(v)} is already there")
-    srt = ingest.find_srt(v)
+    srt = _srt(v)
     pairs = [(v, os.path.join(dest, os.path.basename(v)))] + ([(srt, os.path.join(dest, os.path.basename(srt)))]
                                                              if srt else [])
     for _, t in pairs:
         if os.path.lexists(t):
             raise FileExistsError(f"{os.path.basename(t)} already exists there")
     moves = {os.path.realpath(a): b for a, b in pairs}  # resolved before the files move
-    _move_lead_cache(os.path.dirname(v), dest, v)
+    if srt is not None or v.lower().endswith(ingest.VIDEO_EXTS):
+        _move_lead_cache(os.path.dirname(v), dest, v)
     for a, b in pairs:
         os.rename(a, b)
     update_references(root, moves)

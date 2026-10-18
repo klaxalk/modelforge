@@ -999,7 +999,30 @@ Code layout:
   - Rename and delete are refused while a project uses the clip, including
     the open project's unsaved Ingest sources.
   - Delete needs a confirmation box.
-- **Uploads.** viser buffers an upload in server memory and delivers it only
+- **ROS 2 bags in the library** (the user asked, 2026-10-18):
+    - A bag is an `.mcap` file or a folder with `metadata.yaml`
+      (`rosbag.bag.is_bag`). It is listed as one 🤖 row (size, duration, topic
+      count, used-by), never opened as a folder. Details show the image /
+      point-cloud / odometry topics and TF.
+    - **Upload** (the same ＋ button) takes:
+      - an `.mcap`;
+      - a bag folder packed as `.zip` / `.tar` / `.tar.gz`, unpacked by
+        `videos.extract_bags`. Loose bag files at the archive's top go into a
+        folder named after the archive. Members leaving the folder are
+        refused (zip checked by hand, tar with `filter="data"`). An archive
+        without a bag keeps nothing;
+      - the files of a bag folder (`metadata.yaml`, `.db3`) one by one into a
+        folder. The browser picks one file at a time, so a zip is easier.
+    - Rename / move / delete work as for clips. Projects follow because
+      `_tree_moves` maps folders too (a bag folder is a source path) and
+      `update_references` rewrites any path-like string that moved.
+      Deleting a used bag, or a folder holding one, is refused.
+    - Download sends a bag folder as a `.zip` (stored, built in memory).
+    - Add to open project only pairs bags with ROS 2 bag projects and clips
+      with the others (also checked in `IngestPanel.add_source`).
+    - Tests: `tests/test_videos.py` (`test_bag_uploads`,
+      `test_bag_rename_move_delete_follow_projects`).
+  - **Uploads.** viser buffers an upload in server memory and delivers it only
   when complete, so a 1.2 GB clip needs ~2.4 GB of RAM at peak.
   `App._watch_uploads` shows progress from viser's in-flight transfer table
   (`_current_file_upload_states`, private, read defensively). Files are

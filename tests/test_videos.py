@@ -242,3 +242,99 @@ def test_videos_is_not_a_project_name(root):
     with pytest.raises(ValueError, match="video library"):
         projects.rename(root, p, "videos")
     videos.make_folder(root, "", "karlak")  # a library folder of the same name: no clash any more
+
+
+# --- ROS 2 bags in the library --------------------------------------------------------------------
+def _bag_dir(tmp, name="run1", mcap=False):
+    from tests.test_rosbag_kind import write_small_bag
+    path = os.path.join(str(tmp), "src", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_small_bag(path, n=6, mcap=mcap)
+    return path
+
+
+def _zip(folder, loose=False):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n in os.listdir(folder):
+            z.write(os.path.join(folder, n), n if loose else os.path.join(os.path.basename(folder), n))
+    return buf.getvalue()
+
+
+def test_bag_uploads(root, tmp_path):
+    import io
+    import tarfile
+    import zipfile
+    src = _bag_dir(tmp_path)
+    lib = os.path.join(root, "videos")
+    p = videos.save_upload(root, "run1.zip", _zip(src))  # a zipped bag folder
+    assert p == os.path.join(lib, "run1") and videos.is_bag(p)
+    with pytest.raises(FileExistsError):
+        videos.save_upload(root, "run1.zip", _zip(src))
+    p = videos.save_upload(root, "loose.zip", _zip(src, loose=True))  # the folder's files at the top
+    assert p == os.path.join(lib, "loose") and videos.is_bag(p)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        t.add(src, arcname="tarred")
+    assert videos.save_upload(root, "x.tar.gz", buf.getvalue(), rel_dir="robots") == os.path.join(lib, "robots",
+                                                                                                    "tarred")
+    m = _bag_dir(tmp_path, "m", mcap=True)
+    with open(os.path.join(m, "m.mcap"), "rb") as f:
+        assert videos.is_bag(videos.save_upload(root, "m.mcap", f.read()))  # a single-file bag
+    for parts in ("metadata.yaml", "run1.db3"):  # the loose files of a bag folder, one by one
+        with open(os.path.join(src, parts), "rb") as f:
+            videos.save_upload(root, parts, f.read(), rel_dir="byhand")
+    assert videos.is_bag(os.path.join(lib, "byhand"))
+    bad = io.BytesIO()
+    with zipfile.ZipFile(bad, "w") as z:
+        z.writestr("../evil/metadata.yaml", "x")
+    with pytest.raises(ValueError):
+        videos.save_upload(root, "evil.zip", bad.getvalue())
+    nobag = io.BytesIO()
+    with zipfile.ZipFile(nobag, "w") as z:
+        z.writestr("notes/readme.txt", "x")
+    with pytest.raises(ValueError, match="no ROS 2 bag"):
+        videos.save_upload(root, "nobag.zip", nobag.getvalue())
+    with pytest.raises(ValueError):
+        videos.save_upload(root, "other.yaml", b"x")
+    assert not os.path.exists(os.path.join(root, "evil")) and not os.path.exists(os.path.join(lib, "notes"))
+    assert not [n for n in os.listdir(lib) if n.startswith(".upload")]
+    listing = videos.listdir(root)
+    bags = {b["name"]: b for b in listing["bags"]}
+    assert set(bags) == {"run1", "loose", "m.mcap", "byhand"} and bags["run1"]["folder"] and not bags["m.mcap"]["folder"]
+    b = bags["run1"]
+    assert b["images"] == ["/cam/image/compressed"] and b["clouds"] == ["/scan"] and b["tf"] and not b["error"]
+    assert abs(b["duration_s"] - 1.0) < 1e-6 and b["odometry"] == ["/odom"]
+    folders = {f["name"]: f for f in listing["folders"]}
+    assert folders["robots"]["videos"] == 1 and "byhand" not in folders
+    assert videos.listdir(root, "byhand")["inside_bag"]
+    assert videos.listdir(root, "byhand")["bags"] == []  # its own .db3 is not listed as another bag
+
+
+def test_bag_rename_move_delete_follow_projects(root, tmp_path):
+    from modelforge import projects
+    lib = os.path.join(root, "videos")
+    bag_path = videos.save_upload(root, "run1.zip", _zip(_bag_dir(tmp_path)))
+    proj = projects.create(root, "robot", kind="rosbag")
+    ingest.save_plan(proj, [ingest.Source(os.path.relpath(bag_path))], ingest.Settings())
+    used = lambda: ingest.load_plan(proj)[0][0].video
+    with pytest.raises(ValueError, match="used by"):
+        videos.delete(root, bag_path)
+    new = videos.rename(root, bag_path, "warehouse")
+    assert new == os.path.join(lib, "warehouse") and os.path.realpath(used()) == os.path.realpath(new)
+    assert not os.path.isabs(used())  # stored the way it was (relative)
+    videos.make_folder(root, "", "robots")
+    moved = videos.move(root, new, "robots")
+    assert moved == os.path.join(lib, "robots", "warehouse") and os.path.realpath(used()) == os.path.realpath(moved)
+    with pytest.raises(ValueError, match="used by"):
+        videos.delete_folder(root, "robots")
+    videos.rename_folder(root, "robots", "fleet")  # the folder holding the bag
+    assert os.path.realpath(used()) == os.path.realpath(os.path.join(lib, "fleet", "warehouse"))
+    ingest.save_plan(proj, [], ingest.Settings())
+    assert videos.delete(root, os.path.join(lib, "fleet", "warehouse")) == [os.path.join(lib, "fleet", "warehouse")]
+    data = videos.bag_zip(videos.save_upload(root, "again.zip", _zip(_bag_dir(tmp_path, "again"))))
+    import io
+    import zipfile
+    assert sorted(zipfile.ZipFile(io.BytesIO(data)).namelist()) == ["again/again.db3", "again/metadata.yaml"]

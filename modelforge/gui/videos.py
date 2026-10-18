@@ -1,7 +1,7 @@
 """GUI Videos tab: a file manager over the shared video library (back end: modelforge.videos).
 
 A toolbar (Up, New folder, Refresh) and an upload button on top; below, one row per folder / clip /
-stray .SRT with its context buttons (✏ rename, 🗑 delete) next to it. Clicking a folder opens it,
+ROS 2 bag / stray .SRT with its context buttons (✏ rename, 🗑 delete) next to it. Clicking a folder opens it,
 clicking a clip shows its details with Add to open project / Download. Rename, delete and new folder
 ask in a dialog (viser modal); ➜ moves a clip or folder to another folder. Project folders and hidden
 files are left out. Renames and moves keep projects pointed at their clips (videos.update_references);
@@ -51,20 +51,24 @@ class VideosPanel:
         bar.on_click(lambda e: {"⬆ Up": self.up, "📁＋ New folder": lambda: self.ask_new_folder(e.client),
                                 "⟳ Refresh": lambda: self.refresh()}[e.target.value]())
         self.g_upload = gui.add_upload_button(
-            "＋ Upload video / SRT", icon=viser.Icon.PLUS,
-            mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
-            hint="Upload a DJI clip (.MP4 / .MOV), and optionally its .SRT sidecar (same name), into the current "
-                 "folder. The video carries all the metadata; the .SRT only gives a quicker, firmer telemetry "
-                 "alignment. Large clips take a while; progress shows below. An existing file is not overwritten.")
+            "＋ Upload video / SRT / ROS 2 bag", icon=viser.Icon.PLUS,
+            mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.mcap,.zip,.tar,.tgz,.gz,.db3,.yaml",
+            hint="Into the current folder: a clip (.MP4 / .MOV), optionally with its .SRT sidecar (same name; the "
+                 "video carries all the metadata, the .SRT only gives a quicker, firmer telemetry alignment), or a "
+                 "ROS 2 bag: an .mcap file, or a bag folder packed as .zip / .tar / .tar.gz (unpacked here). The "
+                 "files of a bag folder (metadata.yaml + .db3 / .mcap) can also be uploaded one by one into a new "
+                 "folder. The browser sends one file at a time and the server holds it in memory until it is "
+                 "complete (about twice its size); progress shows below. Existing files are not overwritten.")
         self.g_upload.on_upload(lambda e: self._upload(e.target.value))
         self.g_msg = gui.add_markdown("")
         self.g_files = gui.add_folder("Files")
-        with gui.add_folder("Selected clip"):
-            self.g_info = gui.add_markdown("_click a clip above_")
+        with gui.add_folder("Selected clip / bag"):
+            self.g_info = gui.add_markdown("_click a clip or bag above_")
             row = gui.add_button_group("", options=("Add to open project", "Download"),
-                                       hint="Add to open project: the whole clip becomes a new source (Ingest tab: "
-                                            "narrow its range, then extract). Download: send the clip to this "
-                                            "browser (read into memory first).")
+                                       hint="Add to open project: the whole clip or bag becomes a new source "
+                                            "(Ingest tab: narrow its range, then extract; bags go to ROS 2 bag "
+                                            "projects, clips to the others). Download: send it to this browser "
+                                            "(read into memory first; a bag folder as a .zip).")
             row.on_click(lambda e: self.add_to_project() if e.target.value == "Add to open project"
                          else self.download(e.client))
         self.refresh()
@@ -86,27 +90,32 @@ class VideosPanel:
             return
         entries = ([{"kind": "folder", **f} for f in listing["folders"]] +
                    [{"kind": "video", **v} for v in listing["videos"]] +
+                   [{"kind": "bag", **b} for b in listing["bags"]] +
                    [{"kind": "srt", **f} for f in listing["files"]])
         self.entries = entries
         if select:
-            self.current = next((e for e in entries if e["kind"] == "video" and
+            self.current = next((e for e in entries if e["kind"] in ("video", "bag") and
                                  os.path.realpath(e["path"]) == os.path.realpath(select)), self.current)
         if self.current is not None:  # keep the details in step (renamed, deleted, new usage)
-            self.current = next((e for e in entries if e["kind"] == "video" and
+            self.current = next((e for e in entries if e["kind"] in ("video", "bag") and
                                  os.path.realpath(e["path"]) == os.path.realpath(self.current["path"])), None)
-        n_vid = len(listing["videos"]) + sum(f["videos"] for f in listing["folders"])
+        n_vid = len(listing["videos"]) + len(listing["bags"]) + sum(f["videos"] for f in listing["folders"])
         self.g_head.content = (f"Video library `{videos.library_dir(root)}` (projects are in the Projects tab). "
-                               "Click a folder to open it, a clip for its details; ✏ rename, 🗑 delete.")
+                               "Click a folder to open it, a clip or 🤖 ROS 2 bag for its details; ✏ rename, 🗑 delete.")
         self.g_path.content = (f"📂 `{videos.LIBRARY_DIR}/{self.cwd + '/' if self.cwd else ''}`"
-                               f" · {n_vid} clips here and below")
+                               f" · {n_vid} clips / bags here and below")
         with self._lock:
             for r in self._rows:
                 r.remove()
             self._rows = []
             with self.g_files:
-                if not entries:
-                    self._rows.append(self.gui.add_markdown("_empty folder: ＋ upload a clip or 📁＋ create a "
-                                                            "folder_"))
+                if listing.get("inside_bag"):
+                    self._rows.append(self.gui.add_markdown("_this folder is a ROS 2 bag (metadata.yaml found): "
+                                                            "upload any remaining .db3 / .mcap files here, then "
+                                                            "⬆ Up to see the bag_"))
+                elif not entries:
+                    self._rows.append(self.gui.add_markdown("_empty folder: ＋ upload a clip or a bag, or 📁＋ "
+                                                            "create a folder_"))
                 for k, e in enumerate(entries[:MAX_ROWS]):
                     self._rows.append(self._row(k, e))
                 if len(entries) > MAX_ROWS:
@@ -115,11 +124,15 @@ class VideosPanel:
 
     def _label(self, e):
         if e["kind"] == "folder":
-            return f"📁 {e['name']}/ · {e['videos']} clips · {projects.human(e['bytes'])}"
+            return f"📁 {e['name']}/ · {e['videos']} clips / bags · {projects.human(e['bytes'])}"
         if e["kind"] == "video":
             used = f" · used by {', '.join(e['used_by'])}" if e["used_by"] else ""
             return (f"🎞 {e['name']} · {projects.human(e['bytes'])} · {_dur(e['duration_s'])}"
                     f"{' · SRT' if e['srt'] else ''}{used}")
+        if e["kind"] == "bag":
+            used = f" · used by {', '.join(e['used_by'])}" if e["used_by"] else ""
+            what = "unreadable" if e.get("error") else f"{_dur(e['duration_s'])} · {e['topics']} topics"
+            return f"🤖 {e['name']}{'/' if e['folder'] else ''} · {projects.human(e['bytes'])} · {what}{used}"
         return f"📄 {e['name']} (no video)"
 
     def _row(self, k, e):
@@ -130,6 +143,8 @@ class VideosPanel:
                           "everything in it). Projects using clips inside follow a rename or move.",
                 "video": "Click the name for details (add to project, download). ✏ rename, ➜ move to another folder "
                          "(the .SRT follows, and so do the projects using it), 🗑 delete (the .SRT too).",
+                "bag": "A ROS 2 bag. Click the name for details (topics, add to project, download). ✏ rename, ➜ move "
+                       "to another folder (projects using it follow), 🗑 delete.",
                 "srt": "An .SRT without a video of the same name. 🗑 delete."}[e["kind"]]
         g = self.gui.add_button_group("", options=opts, hint=hint, order=float(k))
         g.on_click(lambda ev, e=e, name=name: self._row_click(e, ev.target.value, name, ev.client))
@@ -140,7 +155,7 @@ class VideosPanel:
             if e["kind"] == "folder":
                 self.cwd, self.g_msg.content = e["rel"], ""
                 self._refresh()
-            elif e["kind"] == "video":
+            elif e["kind"] in ("video", "bag"):
                 self.current = e
                 self.show_current()
         elif value == "✏":
@@ -153,7 +168,10 @@ class VideosPanel:
     def show_current(self):
         e = self.current
         if e is None:
-            self.g_info.content = "_click a clip above_"
+            self.g_info.content = "_click a clip or bag above_"
+            return
+        if e["kind"] == "bag":
+            self.g_info.content = "  \n".join(self._bag_lines(e))
             return
         res = f"{e['width']}×{e['height']}" if e["width"] else "?"
         fps = f" @ {e['fps']:g} fps" if e["fps"] else ""
@@ -165,6 +183,24 @@ class VideosPanel:
                             "minute once per clip)"),
                  "used by: " + (", ".join(f"**{p}**" for p in e["used_by"]) if e["used_by"] else "no project")]
         self.g_info.content = "  \n".join(lines)
+
+    def _bag_lines(self, e):
+        lines = [f"**🤖 {e['name']}** · `{os.path.relpath(e['path'])}` · ROS 2 bag "
+                 f"({'folder' if e['folder'] else 'MCAP file'})"]
+        if e.get("error"):
+            return lines + [f"{projects.human(e['bytes'])} · ❌ cannot read it: `{e['error']}`"]
+        def topics(t):
+            return ", ".join(f"`{x}`" for x in t) if t else "none"
+        lines += [f"{projects.human(e['bytes'])} · {_dur(e['duration_s'])} · {e['topics']} topics" +
+                  (f" · recorded {e['created'][:19].replace('T', ' ')} UTC" if e["created"] else ""),
+                  f"images: {topics(e['images'])}",
+                  f"point clouds: {topics(e['clouds'])}",
+                  f"poses: {'TF' if e['tf'] else 'no TF'}" + (f", odometry {topics(e['odometry'])}"
+                                                               if e["odometry"] else ""),
+                  "used by: " + (", ".join(f"**{p}**" for p in e["used_by"]) if e["used_by"] else "no project")]
+        if not e["images"]:
+            lines.append("⚠️ no image topic: a ROS 2 bag project needs one")
+        return lines
 
     def up(self):
         self.cwd, self.g_msg.content = os.path.dirname(self.cwd), ""
@@ -182,11 +218,13 @@ class VideosPanel:
     def ask_rename(self, e, client):
         if client is None:
             return
-        stem = os.path.splitext(e["name"])[0] if e["kind"] == "video" else e["name"]
+        file_like = e["kind"] == "video" or (e["kind"] == "bag" and not e["folder"])
+        stem = os.path.splitext(e["name"])[0] if file_like else e["name"]
+        note = {"video": "The extension is kept and the .SRT is renamed too; projects using the clip are updated.",
+                "bag": "Projects using the bag are updated." + (" The extension is kept." if file_like else ""),
+                "folder": "Clips inside keep their names; projects using them are updated."}[e["kind"]]
         with client.gui.add_modal(f"Rename {e['name']}") as m:
-            client.gui.add_markdown("The extension is kept and the .SRT is renamed too; projects using the clip "
-                                    "are updated." if e["kind"] == "video" else
-                                    "Clips inside keep their names; projects using them are updated.")
+            client.gui.add_markdown(note)
             name = client.gui.add_text("New name", initial_value=stem)
             row = client.gui.add_button_group("", options=("Rename", "Cancel"))
         row.on_click(lambda ev: (m.close(), self.rename_entry(e, name.value) if ev.target.value == "Rename" else None))
@@ -194,10 +232,10 @@ class VideosPanel:
     def ask_move(self, e, client):
         if client is None:
             return
-        here = os.path.dirname(e["rel"]) if e["kind"] == "folder" else os.path.relpath(
+        here = os.path.dirname(e["rel"]) if e["kind"] == "folder" or e.get("folder") else os.path.relpath(
             os.path.dirname(os.path.realpath(e["path"])), os.path.realpath(videos.library_dir(self.app.root)))
         here = "" if here == "." else here
-        own = e["rel"] if e["kind"] == "folder" else None
+        own = e["rel"] if e["kind"] == "folder" or e.get("folder") else None
         root = videos.LIBRARY_DIR
         targets = {f"{root}/{d + '/' if d else ''}": d for d in videos.all_folders(self.app.root)
                    if d != here and not (own and (d == own or d.startswith(own + os.sep)))}
@@ -215,7 +253,9 @@ class VideosPanel:
         if client is None:
             return
         if e["kind"] == "folder":  # built per kind: only folders carry a clip count
-            what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips)"
+            what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips / bags)"
+        elif e["kind"] == "bag":
+            what = f"the ROS 2 bag **{e['name']}** ({projects.human(e['bytes'])})"
         else:
             what = f"**{e['name']}**" + (" and its .SRT" if e.get("srt") else "")
         with client.gui.add_modal("Delete?") as m:
@@ -272,7 +312,7 @@ class VideosPanel:
     def _users(self, e):
         """Projects using the entry (a clip, or any clip inside a folder)."""
         used, base = videos.usage(self.app.root), os.path.realpath(e["path"])
-        if e["kind"] == "video":
+        if e["kind"] in ("video", "bag"):
             return used.get(base, [])
         return [p for k, ps in used.items() if k.startswith(base + os.sep) for p in ps]
 
@@ -288,7 +328,7 @@ class VideosPanel:
             self._retarget_open_project(e["path"], new)
             self.g_msg.content = f"✅ renamed `{e['name']}` to `{os.path.basename(new)}`" + (
                 " (and its .SRT)" if e.get("srt") else "") + self._changed_note(users)
-            self._refresh(select=new if e["kind"] == "video" else None)
+            self._refresh(select=new if e["kind"] in ("video", "bag") else None)
         except (OSError, ValueError) as ex:
             self.g_msg.content = f"❌ {ex}"
 
@@ -315,7 +355,7 @@ class VideosPanel:
             if e["kind"] == "folder":
                 n, nbytes = videos.delete_folder(self.app.root, e["rel"])
                 self.g_msg.content = f"✅ deleted `{e['name']}/` ({n} files, {projects.human(nbytes)})"
-            elif e["kind"] == "video":
+            elif e["kind"] in ("video", "bag"):
                 gone = videos.delete(self.app.root, e["path"])
                 self.g_msg.content = "✅ deleted " + ", ".join(f"`{os.path.basename(g)}`" for g in gone)
             else:
@@ -329,7 +369,12 @@ class VideosPanel:
     def add_to_project(self):
         e = self.current
         if e is None:
-            self.g_msg.content = "⚪ click a clip first"
+            self.g_msg.content = "⚪ click a clip or bag first"
+            return
+        bag, kind = e["kind"] == "bag", self.app.ingest.kind
+        if bag != (kind == "rosbag"):
+            self.g_msg.content = ("❌ the open project is a ROS 2 bag project: add a bag" if kind == "rosbag" else
+                                  "❌ a ROS 2 bag needs a ROS 2 bag project (Projects tab → Create, kind ROS 2 bag)")
             return
         self.app.ingest.add_source(os.path.relpath(e["path"]))
         self.g_msg.content = f"✅ added `{e['name']}` as a source: Ingest tab to set its range and extract"
@@ -338,16 +383,20 @@ class VideosPanel:
     def download(self, client):
         e = self.current
         if e is None or client is None:
-            self.g_msg.content = "⚪ click a clip first"
+            self.g_msg.content = "⚪ click a clip or bag first"
             return
         self.g_msg.content = f"⏳ reading `{e['name']}` …"
 
         def work():
             try:
-                with open(e["path"], "rb") as f:
-                    data = f.read()
-                client.send_file_download(e["name"], data)
-                self.g_msg.content = f"✅ sending `{e['name']}` ({projects.human(len(data))}) to the browser"
+                if os.path.isdir(e["path"]):  # a bag folder
+                    data, name = videos.bag_zip(e["path"]), e["name"] + ".zip"
+                else:
+                    with open(e["path"], "rb") as f:
+                        data = f.read()
+                    name = e["name"]
+                client.send_file_download(name, data)
+                self.g_msg.content = f"✅ sending `{name}` ({projects.human(len(data))}) to the browser"
             except Exception as ex:
                 traceback.print_exc()
                 self.g_msg.content = f"❌ download failed: `{ex}`"
@@ -359,7 +408,16 @@ class VideosPanel:
         def work():  # off viser's message thread: large files take seconds to write
             try:
                 path = videos.save_upload(self.app.root, up.name, up.content, rel_dir=cwd)
-                self.g_msg.content = f"✅ uploaded `{os.path.relpath(path)}` ({projects.human(len(up.content))})"
+                note = ""
+                if up.name.lower().endswith(videos.ARCHIVE_EXTS):
+                    note = " · unpacked: ROS 2 bag"
+                elif up.name.lower() == "metadata.yaml" or up.name.lower().endswith(".db3"):
+                    folder = os.path.dirname(path)
+                    note = (" · this folder is now a ROS 2 bag: ⬆ Up to see it" if videos.is_bag(folder) else
+                            " · part of a bag folder: also upload metadata.yaml and every .db3 / .mcap file here")
+                    path = folder
+                self.g_msg.content = (f"✅ uploaded `{os.path.relpath(path)}` "
+                                      f"({projects.human(len(up.content))}){note}")
                 self._refresh(select=path if not path.lower().endswith(".srt") else None)
                 self.app.ingest.rescan()
             except (OSError, ValueError) as ex:

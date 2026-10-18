@@ -35,10 +35,10 @@ def test_tf_buffer():
     assert b.frames == ["base", "cam", "world"]
 
 
-def write_small_bag(path, n=30, w=160, h=120):
+def write_small_bag(path, n=30, w=160, h=120, mcap=False):
     """A camera moving 0.1 m per image along x over a frozen test pattern, + TF, odometry, camera_info
-    and one LiDAR; returns the true T_world_cam per image."""
-    from rosbags.rosbag2 import Writer
+    and one LiDAR (sqlite3, or MCAP storage); returns the true T_world_cam per image."""
+    from rosbags.rosbag2 import StoragePlugin, Writer
     from rosbags.typesys import Stores, get_typestore
     ts = get_typestore(Stores.ROS2_HUMBLE)
     T_ = ts.types
@@ -59,7 +59,8 @@ def write_small_bag(path, n=30, w=160, h=120):
     T_world_odom = make(np.eye(3), (5.0, 0, 0))
     tex = np.random.default_rng(0).integers(0, 255, (h, w * 4, 3), np.uint8)  # a texture to pan across
     truth = []
-    with Writer(path, version=9) as wr:
+    storage = StoragePlugin.MCAP if mcap else StoragePlugin.SQLITE3
+    with Writer(path, version=9, storage_plugin=storage) as wr:
         conns = {t: wr.add_connection(t, ty, typestore=ts) for t, ty in (
             ("/cam/image/compressed", "sensor_msgs/msg/CompressedImage"), ("/cam/info", "sensor_msgs/msg/CameraInfo"),
             ("/tf", "tf2_msgs/msg/TFMessage"), ("/tf_static", "tf2_msgs/msg/TFMessage"),
