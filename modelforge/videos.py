@@ -247,6 +247,31 @@ def delete_folder(root, rel):
     return files, nbytes
 
 
+def rename_folder(root, rel, new_name):
+    """Rename a library folder in place; refused like delete_folder (clips inside would change path).
+    Returns the new path."""
+    path = resolve_dir(root, rel)
+    if path == os.path.realpath(root):
+        raise ValueError("refusing to rename the library root")
+    new_name = new_name.strip()
+    if not FOLDER_RE.match(new_name):
+        raise ValueError("folder names use letters, digits, spaces and '_ . ( ) -' (max 64), starting with a "
+                         "letter or digit")
+    used = usage(root)
+    for d, _, names in os.walk(path):
+        if projects.is_project(d):
+            raise ValueError(f"cannot rename {rel}: it contains the project folder {os.path.relpath(d, path)}")
+        for n in names:
+            users = used.get(os.path.realpath(os.path.join(d, n)))
+            if users:
+                raise ValueError(f"cannot rename {rel}: {n} is used by project(s) {', '.join(sorted(set(users)))}")
+    dst = os.path.join(os.path.dirname(path), new_name)
+    if os.path.lexists(dst):
+        raise FileExistsError(f"{new_name} already exists")
+    os.rename(path, dst)
+    return dst
+
+
 def delete_file(root, path):
     """Delete a stray .SRT (no video next to it) from the library."""
     p = os.path.abspath(path)

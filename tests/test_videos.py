@@ -127,52 +127,62 @@ def test_folders(root):
     ingest.save_plan(os.path.join(root, "site"), [ingest.Source(os.path.join(q, "b.mp4"))], ingest.Settings())
     with pytest.raises(ValueError, match="used by project"):
         videos.delete_folder(root, "keep")
+    with pytest.raises(ValueError, match="used by project"):
+        videos.rename_folder(root, "keep", "moved")
+    r = videos.make_folder(root, "", "old name")
+    assert videos.rename_folder(root, "old name", "new name") == os.path.join(os.path.realpath(root), "new name")
+    with pytest.raises(FileExistsError):
+        videos.rename_folder(root, "new name", "keep")
+    assert not os.path.exists(r)
 
 
 def test_videos_tab(app, root):
+    """The file manager rows: open / select by name, rename and delete through the context actions."""
     from viser import UploadedFile
     v = app.videos
-    assert wait_for(lambda: len(v._entries) == 2)  # the videos/ folder and b.mp4 (the project is hidden)
-    assert "used by" in v.g_list.content and "site" in v.g_list.content
-    # new folder, enter it, upload there
-    v.g_folder_name.value = "flights"
-    v.make_folder()
-    assert v.selected()["kind"] == "folder" and v.selected()["name"] == "flights"
-    v.open_selected()
-    assert v.cwd == "flights" and "empty folder" in v.g_list.content
+
+    def entry(name):
+        return next(e for e in v.entries if e["name"] == name)
+
+    assert wait_for(lambda: len(getattr(v, "entries", [])) == 2)  # videos/ and b.mp4 (the project is hidden)
+    assert len(v._rows) == 2 and entry("b.mp4")["used_by"] == ["site"]
+    v.make_folder("flights")
+    assert any(e["name"] == "flights" and e["kind"] == "folder" for e in v.entries) and len(v._rows) == 3
+    e = entry("flights")
+    v._row_click(e, v._label(e), v._label(e), None)  # click the folder name: open it
+    assert v.cwd == "flights" and v.entries == [] and len(v._rows) == 1  # the "empty folder" note
     v._upload(UploadedFile("new.MP4", open(os.path.join(root, "b.mp4"), "rb").read()))
-    assert wait_for(lambda: v.selected() and v.selected()["name"] == "new.MP4"), v.g_msg.content
-    assert os.path.exists(os.path.join(root, "flights", "new.MP4"))
-    assert "SRT: none (optional" in v.g_info.content
-    assert any(o.endswith("new.MP4") for o in app.ingest.g_video.options)
-    # add to the open project: then rename / delete are refused
+    assert wait_for(lambda: v.current is not None and v.current["name"] == "new.MP4"), v.g_msg.content
+    assert "SRT: none (optional" in v.g_info.content and len(v._rows) == 1
     n = len(app.ingest.sources)
     v.add_to_project()
-    assert len(app.ingest.sources) == n + 1 and app.ingest.sources[-1].video.endswith("new.MP4")
-    v.g_new_name.value = "renamed"
-    v.rename()
+    assert len(app.ingest.sources) == n + 1
+    v.rename_entry(entry("new.MP4"), "renamed")  # a source of the open project: refused
     assert "source of the open project" in v.g_msg.content
     app.ingest.sources.pop()
     ingest.save_plan(app.path, app.ingest.sources, app.ingest.settings)
-    v.rename()
-    assert "renamed to `renamed.MP4`" in v.g_msg.content and v.selected()["name"] == "renamed.MP4"
+    v.rename_entry(entry("new.MP4"), "renamed")
+    assert "renamed `new.MP4` to `renamed.MP4`" in v.g_msg.content and v.current["name"] == "renamed.MP4"
     sent = []
 
     class Client:
         def send_file_download(self, name, data):
-            sent.append((name, len(data)))
+            sent.append(name)
 
     v.download(Client())
-    assert wait_for(lambda: sent) and sent[0][0] == "renamed.MP4"
-    v.delete()  # no confirmation
-    assert os.path.exists(os.path.join(root, "flights", "renamed.MP4"))
-    v.g_confirm.value = True
-    v.delete()
-    assert not os.path.exists(os.path.join(root, "flights", "renamed.MP4")) and "deleted" in v.g_msg.content
-    # back up, delete the (now empty) folder
+    assert wait_for(lambda: sent) and sent == ["renamed.MP4"]
+    v.delete_entry(entry("renamed.MP4"))
+    assert not os.path.exists(os.path.join(root, "flights", "renamed.MP4")) and v.current is None
     v.up()
-    assert v.cwd == ""
-    v.g_entry.value = next(k for k, e in v._entries.items() if e["kind"] == "folder" and e["name"] == "flights")
-    v.g_confirm.value = True
-    v.delete()
-    assert not os.path.exists(os.path.join(root, "flights"))
+    v.rename_entry(entry("flights"), "flights 2026")
+    assert os.path.isdir(os.path.join(root, "flights 2026"))
+    v.delete_entry(entry("flights 2026"))
+    assert not os.path.exists(os.path.join(root, "flights 2026")) and len(v._rows) == 2
+
+
+    class Browser:  # the dialogs are viser modals; the server-wide GUI builds the same widgets headless
+        gui = app.server.gui
+
+    v.ask_new_folder(Browser())
+    v.ask_rename(entry("b.mp4"), Browser())
+    v.ask_delete(entry("videos"), Browser())

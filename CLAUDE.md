@@ -730,10 +730,20 @@ Code layout:
     `ingest.json`).
   - Actions: add to the open project (`IngestPanel.add_source(video)`),
     download, rename and delete. Rename and delete move the .SRT along.
-  - **File manager** (the user asked for "a more mature file manager"):
-    - It browses the library folders under the root (`videos.listdir` /
-      `resolve_dir`): current folder, Open / Up / Refresh, an entry picker
-      and a table.
+  - **File manager** (the user asked for "a more traditional file manager"
+    with context buttons, a + for upload and a new-folder button):
+    - Toolbar button group (⬆ Up, 📁＋ New folder, ⟳ Refresh) plus the
+      **＋ Upload** button (viser's upload widget cannot sit in a group).
+    - One row per entry under a "Files" folder: a button group
+      `[name][✏][🗑]` (stray .SRT: `[name][🗑]`). viser button groups share
+      the width but never shrink below a label, so the name keeps its width.
+    - Clicking a folder name opens it; clicking a clip shows it under
+      "Selected clip" with Add to open project / Download.
+    - ✏ / 🗑 / New folder open a viser modal (name input or "Delete …? There
+      is no undo").
+    - Folders can be renamed too (`rename_folder`, refused like
+      `delete_folder`).
+    - Rows are rebuilt on each refresh (`_refresh`, ≤300 rows).
     - **New folder** (`make_folder`); **Delete** a folder (`delete_folder`,
       refused for the root, for folders holding a project folder and for
       folders holding a clip a project uses).
