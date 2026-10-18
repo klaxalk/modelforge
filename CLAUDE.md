@@ -36,7 +36,7 @@ Done:
 - Multi-video ingest: sources = video + time range, per-source offsets.
 - Web GUI with two docked panels:
   - left (`gui.add_panel()`): Projects / Videos / Ingest / View / Inspect /
-    Plots / Export / Settings (dark mode);
+    Plots / Export / Hardware / Settings (dark mode);
   - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
     Dense / Splat, history;
   - a third window with the log, floating at the bottom of the 3D view.
@@ -1191,6 +1191,10 @@ Code layout:
   - Browser tab title "ModelForge": viser hardcodes `<title>Viser</title>` in
     its built `index.html`, so the Dockerfile patches it (a late layer, so the
     rebuild takes seconds). The panel label is `ViserServer(label=...)`.
+  - **Hardware** tab (left panel, `modelforge/gui/hardware.py`, the user asked): live CPU, RAM, GPU
+    utilization and GPU memory (bars + numbers + GPU temperature / power), and a 2-minute history plot.
+    Sampled at 1 Hz from `/proc/stat`, `/proc/meminfo` (host-wide, also in the container) and
+    `nvidia-smi` (no psutil / pynvml in the image). Tests: `tests/test_gui_hardware.py`.
   - **Settings** tab (left panel): **Dark mode**.
     - `App.set_dark` calls `configure_theme(dark_mode=...)` for every client
       (the default `control_layout` sends no dock command, so the panel

@@ -24,6 +24,7 @@ from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
+from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
@@ -519,6 +520,8 @@ class App:
                 b.on_click(lambda e: self._export("splat", e.client, download=True))
                 self.g_export_buttons["splat_dl"] = b
 
+        with self.left.add_tab("Hardware", viser.Icon.CPU):
+            self.hardware = HardwarePanel(self, gui)
         with self.left.add_tab("Settings", viser.Icon.SETTINGS):
             self.g_dark = gui.add_checkbox("Dark mode", initial_value=self.dark,
                                            hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
