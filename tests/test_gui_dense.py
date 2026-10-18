@@ -37,6 +37,7 @@ def project(tmp_path_factory):
     dense.fusion(p)
     dense.mesh(p, "delaunay")
     dense.preview(p, "delaunay", max_faces=2000)
+    dense.texture(p, "delaunay")
     v, _ = make_splat(np.random.default_rng(0), n=500)
     os.makedirs(os.path.join(p, "splat"))
     plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex")]).write(os.path.join(p, "splat", "splat_enu.ply"))
@@ -63,7 +64,11 @@ def test_toggle_layers(app):
     assert "dense points:" in app.g_dense_md.content
     app.g_mesh.value = "delaunay"
     app._draw_mesh()
-    assert "faces" in app.g_dense_md.content
+    assert "faces, textured" in app.g_dense_md.content  # the coloured mesh from the texture stage
+    app.g_mesh_tex.value = False
+    app._draw_mesh()
+    assert "untextured preview" in app.g_dense_md.content
+    app.g_mesh_tex.value = True
     app.g_splat.value = True
     app._draw_splat()
     assert "500 gaussians" in app.g_dense_md.content
@@ -114,7 +119,7 @@ def test_export_tab(app, project):
     app.g_export_mesh_fmt.value = "obj"
     app._export("mesh", Client(), download=True)
     wait()
-    assert Client.sent[-1][0].endswith("_mesh-delaunay.obj")  # untextured: one file, sent as is
+    assert Client.sent[-1][0].endswith("_mesh-delaunay.zip")  # textured: obj + mtl + png in one download
     app.g_export_splat_fmt.value = "splat"
     app._export("splat", None, download=False)
     wait()
@@ -132,3 +137,25 @@ def test_download_payload_zips_several_files(tmp_path):
     assert gapp._download_payload(paths[:1]) == ("m.obj", b"m.obj")
     name, data = gapp._download_payload(paths)
     assert name == "m.zip" and sorted(zipfile.ZipFile(io.BytesIO(data)).namelist()) == ["m.mtl", "m.obj", "m.png"]
+
+
+def test_refresh_does_not_resend_unchanged_layers(app, project, monkeypatch):
+    """Refreshes after each dense stage redraw only what changed (the splat can be tens of MB)."""
+    calls = []
+    real = __import__("modelforge.gui.data", fromlist=["load_splat"]).load_splat
+    monkeypatch.setattr("modelforge.gui.data.load_splat", lambda *a, **k: calls.append(1) or real(*a, **k))
+    app.g_splat.value = True  # may draw at once through its update callback
+    app._drawn = {}
+    calls.clear()
+    app._refresh_dense()
+    app._refresh_dense()
+    assert app.g_splat.value and len(calls) == 1  # ticked by default; drawn once
+    app.g_splat.value = False
+    app._draw_splat()
+    app.g_splat.value = True
+    app._draw_splat()
+    assert len(calls) == 2  # hidden then shown again: redrawn
+    p = os.path.join(project, "splat", "splat_enu.ply")
+    os.utime(p, (time.time() + 5, time.time() + 5))  # a new splat file
+    app._refresh_dense()
+    assert len(calls) == 3

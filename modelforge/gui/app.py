@@ -192,13 +192,21 @@ class App:
                                                     hint="dense/fused.ply (subsampled to 1.5M points). Enabled once "
                                                          "fusion has run.")
                 self.g_mesh = gui.add_dropdown("Mesh", options=("off",), initial_value="off", disabled=True,
-                                               hint="Simplified preview of the dense mesh (≤300k faces).")
-                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=False, disabled=True,
-                                                hint="splat/splat_enu.ply from scripts/splat, in the same frame "
-                                                     "as the cameras and mesh.")
+                                               hint="The dense mesh: textured once the texture stage has run, else "
+                                                    "the grey simplified preview (≤300k faces).")
+                self.g_mesh_tex = gui.add_checkbox("Mesh texture", initial_value=True,
+                                                   hint="Show the textured mesh (colour from the images). Off: the "
+                                                        "grey simplified preview, lighter on the browser. COLMAP's "
+                                                        "meshers write geometry only, so the colour comes from the "
+                                                        "texture stage.")
+                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=True, disabled=True,
+                                                hint="splat/splat_enu.ply, in the same frame as the cameras and "
+                                                     "mesh; shown as soon as training finishes (and live while it "
+                                                     "trains).")
                 self.g_dense_md = gui.add_markdown("")
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
+                self.g_mesh_tex.on_update(lambda _: self._draw_mesh())
                 self.g_splat.on_update(lambda _: self._draw_splat())
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
                                            hint="Deviation from the prior, mean reprojection error, capture "
@@ -442,6 +450,8 @@ class App:
         self.cam_handles, self.prior_handles, self.selected, self.snap = {}, {}, None, None
         for name in ("/points", "/corrections", "/traj", "/dense"):
             self.server.scene.remove_by_name(name)
+        self._drawn = {}
+        self._dense_lines = {}
 
     def _show_project(self):
         self.g_header.content = self._header()
@@ -750,9 +760,12 @@ class App:
                 elif st == "splat":
                     self._run_splat(project)
                     report = pipeline.Report(project)  # splat.run wrote its stats
+                    self._refresh_dense()  # show the finished splat now, not only when the whole run ends
                 else:
                     pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value],
                                          token=self._token, on_progress=self._on_stereo_progress)
+                    if st in ("fusion", "mesh", "texture"):
+                        self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
@@ -826,6 +839,7 @@ class App:
             live = self.g_splat_live.value
             if live:  # the live layer stands in for the previous result while training
                 self.server.scene.remove_by_name("/dense/splat")
+                self._unchanged("splat", None)
                 self._splat_live_on = True
                 self.g_splat.disabled, self.g_splat.value = False, True  # View tab toggle drives the live layer
                 self.g_splat_status.content = (f"live preview: first snapshot at step "
@@ -846,7 +860,7 @@ class App:
         self._draw_live_splat()
         msg = f"live splat: step {step:,}, {n:,} gaussians" + (f" ({len(arrays[0]):,} shown)" if len(arrays[0]) < n
                                                                  else "")
-        self.g_dense_md.content = msg
+        self._dense_status("splat", msg)
         self.g_splat_status.content = msg + " · View tab → Dense / splat → Splat"
         self._live_msg = msg + " (View tab)"
         self._on_log(f"splat: live preview at step {step:,} ({n:,} gaussians)")
@@ -967,7 +981,8 @@ class App:
         self.g_mesh.disabled = not meshes
         have = [k for k, v in (("dense points", self.dense["fused"]), ("splat", self.dense["splat"])) if v] + \
             [f"mesh ({m})" for m in meshes]
-        self.g_dense_md.content = "available: " + (", ".join(have) if have else "nothing yet (Dense / Splat tabs)")
+        self._dense_status("available", "available: " + (", ".join(have) if have else
+                                                         "nothing yet (Dense / Splat tabs)"))
         self._draw_dense_points()
         self._draw_mesh()
         self._draw_splat()
@@ -1024,34 +1039,82 @@ class App:
                 self._refresh_export(msg)
         threading.Thread(target=work, daemon=True).start()
 
+    def _dense_status(self, layer, text):
+        """One status line per layer under View → Dense / splat (layers no longer overwrite each other)."""
+        lines = getattr(self, "_dense_lines", {})
+        self._dense_lines = lines
+        if text:
+            lines[layer] = text
+        else:
+            lines.pop(layer, None)
+        order = ("available", "points", "mesh", "splat")
+        self.g_dense_md.content = "  \n".join(lines[k] for k in order if k in lines)
+
+    def _unchanged(self, layer, key):
+        """True if `layer` is already drawn from the same inputs (refreshes during a run don't re-send
+        tens of MB to the browser); records `key` otherwise. key None: the layer is hidden."""
+        drawn = getattr(self, "_drawn", {})
+        self._drawn = drawn
+        if key is not None and drawn.get(layer) == key:
+            return True
+        drawn[layer] = key
+        return False
+
+    @staticmethod
+    def _file_key(path):
+        return (path, os.path.getmtime(path)) if path and os.path.exists(path) else None
+
     def _draw_dense_points(self):
-        if self.g_dense_pts.value and self.dense["fused"]:
+        key = (self._file_key(self.dense["fused"]), self.g_point_size.value) \
+            if self.g_dense_pts.value and self.dense["fused"] else None
+        if self._unchanged("points", key):
+            return
+        if key is not None:
             pts, cols, n = gdata.load_fused(self.dense["fused"])
             self.server.scene.add_point_cloud("/dense/points", points=pts, colors=cols,
                                               point_size=self.g_point_size.value * 0.5, precision="float32")
-            self.g_dense_md.content = f"dense points: {len(pts):,} of {n:,} shown"
+            self._dense_status("points", f"dense points: {len(pts):,} of {n:,} shown")
         else:
             self.server.scene.remove_by_name("/dense/points")
+            self._dense_status("points", None)
 
     def _draw_mesh(self):
         method = self.g_mesh.value
+        key = None
         if method != "off" and method in self.dense["meshes"]:
-            mesh = gdata.load_mesh(self.dense["meshes"][method])
+            key = (method, self._file_key(self.dense["meshes"][method]),
+                   self._file_key(self.dense["textured"].get(method)), self.g_mesh_tex.value)
+        if self._unchanged("mesh", key):
+            return
+        if key is not None:
+            tex = self.dense["textured"].get(method) if self.g_mesh_tex.value else None
+            mesh = gdata.load_textured_mesh(tex) if tex else None
+            note = "textured"
+            if mesh is None:
+                mesh = gdata.load_mesh(self.dense["meshes"][method])
+                note = ("no texture yet: run the texture stage" if method not in self.dense["textured"] else
+                        "untextured preview" if not self.g_mesh_tex.value else
+                        f"textured mesh over {gdata.MAX_TEXTURED_FACES:,} faces: grey preview")
             self.server.scene.add_mesh_trimesh("/dense/mesh", mesh)
-            self.g_dense_md.content = f"mesh ({method}): {len(mesh.faces):,} faces"
+            self._dense_status("mesh", f"mesh ({method}): {len(mesh.faces):,} faces, {note}")
         else:
             self.server.scene.remove_by_name("/dense/mesh")
+            self._dense_status("mesh", None)
 
     def _draw_splat(self):
         if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer
             self._draw_live_splat()
             return
-        if self.g_splat.value and self.dense["splat"]:
+        key = self._file_key(self.dense["splat"]) if self.g_splat.value and self.dense["splat"] else None
+        if self._unchanged("splat", key):
+            return
+        if key is not None:
             c, cov, rgb, op = gdata.load_splat(self.dense["splat"])
             self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
-            self.g_dense_md.content = f"splat: {len(c):,} gaussians"
+            self._dense_status("splat", f"splat: {len(c):,} gaussians")
         else:
             self.server.scene.remove_by_name("/dense/splat")
+            self._dense_status("splat", None)
 
     def serve_forever(self):
         while True:

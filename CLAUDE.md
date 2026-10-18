@@ -793,9 +793,26 @@ Code layout:
     - The splat-only Stop button was folded into this one.
   - Tabs:
   - **View**: snapshot picker and stats, including the calibrated prior model.
-    A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the preview
-    mesh and `splat_enu.ply` (viser gaussian splats), each enabled once its
-    file exists. Layers: points, cameras with
+    A "Dense / splat" folder shows `fused.ply` (≤1.5M points), the mesh and
+    `splat_enu.ply` (viser gaussian splats), each enabled once its file
+    exists.
+    - The mesh is the **textured** one (`textured-<m>/mesh.ply` +
+      `texture.png`, loaded with `products.load_textured`) when the texture
+      stage has run, it is ≤1.5M faces, and **Mesh texture** is on.
+    - Otherwise it is the grey simplified preview: COLMAP's meshers write
+      geometry only, so `meshed-*.ply` / `preview-*.ply` have no colour.
+      The user asked why the mesh was grey.
+    - Textured meshes in the user's projects: 94k–156k faces, an 11 MB GLB,
+      ~2.6 s to load and convert.
+    - The Splat checkbox is ticked by default.
+    - The layers refresh right after the splat stage and after fusion /
+      mesh / texture, not only when the run ends. Before, the splat vanished
+      during the full pipeline's dense stages: the live layer was gone and
+      the final splat was not drawn yet.
+    - `App._unchanged` remembers each layer's inputs (file + mtime +
+      options), so these refreshes don't re-send unchanged layers (the
+      splat is tens of MB).
+    - Each layer has its own status line (`_dense_status`). Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
     time, or source. Stats list the per-source offsets.

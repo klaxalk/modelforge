@@ -217,7 +217,7 @@ SH_C0 = 0.28209479177387814
 def dense_artifacts(path):
     """Which dense / splat outputs exist in the project (paths, or None)."""
     ws = os.path.join(path, "dense")
-    found = {"fused": None, "splat": None, "meshes": {}}
+    found = {"fused": None, "splat": None, "meshes": {}, "textured": {}}
     if os.path.exists(os.path.join(ws, "fused.ply")):
         found["fused"] = os.path.join(ws, "fused.ply")
     for method in ("delaunay", "poisson"):
@@ -226,6 +226,9 @@ def dense_artifacts(path):
             if os.path.exists(p):
                 found["meshes"][method] = p
                 break
+        t = os.path.join(ws, f"textured-{method}", "mesh.ply")
+        if os.path.exists(t):
+            found["textured"][method] = t
     p = os.path.join(path, "splat", "splat_enu.ply")
     if os.path.exists(p):
         found["splat"] = p
@@ -250,6 +253,20 @@ def load_fused(ply_path, max_points=1_500_000, seed=0):
 def load_mesh(ply_path):
     import trimesh
     return trimesh.load(ply_path, process=False)
+
+
+MAX_TEXTURED_FACES = 1_500_000  # larger textured meshes fall back to the (grey) simplified preview
+
+
+def load_textured_mesh(ply_path):
+    """COLMAP's textured mesh (texture stage) as a trimesh with UVs, or None if it is too big to stream.
+    COLMAP's meshers write geometry only, so this is the only coloured mesh."""
+    import plyfile
+
+    from modelforge.export import products
+    with open(ply_path, "rb") as f:
+        n = plyfile.PlyData.read(f)["face"].count
+    return products.load_textured(ply_path) if n <= MAX_TEXTURED_FACES else None
 
 
 def load_splat(ply_path, max_gaussians=1_000_000, seed=0):
