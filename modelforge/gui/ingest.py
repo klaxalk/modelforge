@@ -542,6 +542,9 @@ class IngestPanel:
     # ------------------------------------------------------------------ display
     def _draw_scene(self):
         scene = self.server.scene
+        sync = getattr(self.app, "_sync_quickbar", None)
+        if sync is not None and getattr(self.app, "_quick_labels", None) is not None:
+            sync()  # the quick bar's Plan becomes available once there is a plan to show
         if not (self.g_show.value and self.prev):
             scene.remove_by_name("/ingest")
             return

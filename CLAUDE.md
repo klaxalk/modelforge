@@ -96,8 +96,6 @@ Tested only partially:
   flights.**
 
 Open items, in priority order:
-0. **User TODO (2026-10-18):** an option to hide the blue spheres connected
-   by the white trajectory in the 3D view, also as a quick-bar toggle.
 1. Run the full clip (all 300 images) through dense and splat (quality
    `low`, then higher if wanted).
 2. Test multi-video ingest on real separate flights of one site.
@@ -1048,7 +1046,12 @@ Code layout:
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
     - It is one button-group row: ● / ○ / · Splat, Mesh, Points (sparse),
-      Dense (fused points), Orbit. These mirror the View tab controls
+      Dense (fused points), Plan, Orbit.
+    - **Plan** is the Ingest flight plan (each source's track plus dots at the
+      planned image positions). The user asked to hide it from the 3D view:
+      its checkbox existed only in the Ingest tab. The quick bar, View
+      "Flight plan" and Ingest "Show flight plan in 3D" stay in step
+      (`App._set_plan_visible`). These mirror the View tab controls
       (`_quick_click` flips them; `_sync_quickbar` keeps the labels in
       step).
     - viser button groups cannot relabel in place, so the row is rebuilt

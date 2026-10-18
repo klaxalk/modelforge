@@ -178,7 +178,8 @@ def test_quick_bar(app):
     state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
-    assert state() == {"Splat": "●", "Mesh": "○", "Points": state()["Points"], "Dense": "○", "Orbit": "○"}
+    assert state() == {"Splat": "●", "Mesh": "○", "Points": state()["Points"], "Dense": "○", "Plan": state()["Plan"],
+                       "Orbit": "○"}
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Mesh", None)
@@ -197,3 +198,8 @@ def test_quick_bar(app):
     assert state()["Orbit"] == "●"
     app._quick_click("Orbit", c)
     assert state()["Orbit"] == "○"
+    app._set_plan_visible(True)  # the Ingest flight plan: quick bar, View and Ingest checkboxes in step
+    app._quick_click("Plan", None)
+    assert not app.ingest.g_show.value and not app.g_plan.value
+    app.g_plan.value = True
+    assert app.ingest.g_show.value

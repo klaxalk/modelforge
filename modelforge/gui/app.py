@@ -196,6 +196,11 @@ class App:
                                                hint="Red segments from each prior position to the estimated one.")
                 self.g_traj = gui.add_checkbox("Trajectories", initial_value=True,
                                                hint="Grey: prior path; blue: estimated path.")
+                self.g_plan = gui.add_checkbox(
+                    "Flight plan", initial_value=self.ingest.g_show.value,
+                    hint="The Ingest plan: each source's camera track (in its colour inside the range, grey "
+                         "outside) and dots at the planned image positions. Same as the Ingest tab's "
+                         "\"Show flight plan in 3D\" and the quick bar's Plan.")
                 self.g_scale = gui.add_slider("Camera size", min=0.2, max=5.0, step=0.1, initial_value=1.0)
             with gui.add_folder("Dense / splat"):
                 self.g_dense_pts = gui.add_checkbox("Dense points", initial_value=False, disabled=True,
@@ -242,6 +247,8 @@ class App:
             self.g_color.on_update(lambda _: self._apply_colors())
             for h in (self.g_corr, self.g_traj):
                 h.on_update(lambda _: self._draw_lines())
+            self.g_plan.on_update(lambda _: self._set_plan_visible(self.g_plan.value))
+            self.ingest.g_show.on_update(lambda _: self._set_plan_visible(self.ingest.g_show.value))
 
         with self.left.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
@@ -944,6 +951,7 @@ class App:
                 ("Mesh", bool(d["meshes"]), self.g_mesh.value != "off"),
                 ("Points", self.project is not None, self.g_points.value),
                 ("Dense", d["fused"] is not None, self.g_dense_pts.value),
+                ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
                 ("Orbit", True, bool(self._orbits)))
 
     def _sync_quickbar(self):
@@ -959,8 +967,9 @@ class App:
         with self._quick_tab:
             g = self.server.gui.add_button_group(
                 "", options=labels, order=1.0,
-                hint="Show / hide the splat, the mesh, the sparse points and the dense points, and start / stop "
-                     "the orbit (● on, ○ off, · nothing yet). Same as the View tab.")
+                hint="Show / hide the splat, the mesh, the sparse points, the dense points and the Ingest flight "
+                     "plan (tracks + planned image dots), and start / stop the orbit (● on, ○ off, · nothing "
+                     "yet). Same as the View tab.")
         g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
         self._quick_group = g
 
@@ -981,8 +990,18 @@ class App:
             self.g_points.value = not self.g_points.value
         elif name == "Dense":
             self.g_dense_pts.value = not self.g_dense_pts.value
+        elif name == "Plan":
+            self._set_plan_visible(not self.ingest.g_show.value)
         elif name == "Orbit":
             self.toggle_orbit(client)
+        self._sync_quickbar()
+
+    def _set_plan_visible(self, on):
+        """The flight plan layer (drawn by the Ingest tab): keep its two checkboxes in step and redraw."""
+        for box in (self.ingest.g_show, self.g_plan):
+            if box.value != on:
+                box.value = on  # its on_update calls back here with the same value: no-op
+        self.ingest._draw_scene()
         self._sync_quickbar()
 
     def toggle_orbit(self, client):
