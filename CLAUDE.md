@@ -42,8 +42,9 @@ Done:
   - a third window with the log, floating at the bottom of the 3D view.
   - Projects: list, open, create, rename, delete; final vs. intermediate
     results; clean.
-  - Videos: the shared video library (upload from the browser, info, used-by,
-    add to project, download, rename, delete).
+  - Videos: a file manager over the shared video library: folders (create,
+    delete), upload into any folder, clip info and used-by, add to project,
+    download, rename, delete.
   - Sparse / Dense / Splat: run each part; live state above the tabs,
     history and log below, hover hints.
   - Export: mesh (glb / obj / ply) and splat (ply / .splat), saved under
@@ -729,6 +730,19 @@ Code layout:
     `ingest.json`).
   - Actions: add to the open project (`IngestPanel.add_source(video)`),
     download, rename and delete. Rename and delete move the .SRT along.
+  - **File manager** (the user asked for "a more mature file manager"):
+    - It browses the library folders under the root (`videos.listdir` /
+      `resolve_dir`): current folder, Open / Up / Refresh, an entry picker
+      and a table.
+    - **New folder** (`make_folder`); **Delete** a folder (`delete_folder`,
+      refused for the root, for folders holding a project folder and for
+      folders holding a clip a project uses).
+    - Upload goes into the current folder (`save_upload(rel_dir=)`); the
+      Ingest tab's upload still targets `videos/`.
+    - Stray .SRT files (no video of that name) are listed and can be deleted
+      (`delete_file`).
+    - Project folders and hidden files are never listed, entered or deleted
+      (`resolve_dir` refuses them).
   - Rename and delete are refused while a project uses the clip, including
     the open project's unsaved Ingest sources.
   - Delete needs a confirmation box.
@@ -773,6 +787,16 @@ Code layout:
     - The Plotly charts switch to the `plotly_dark` / `plotly_white`
       template.
     - The choice is remembered in `ROOT/.modelforge_gui.json`.
+  - **Quick bar** (the user asked): a small panel floated at the top of the
+    3D view (`self.quick`).
+    - It is one button-group row: ● / ○ / · Splat, Mesh, Points (sparse),
+      Dense (fused points), Orbit. These mirror the View tab controls
+      (`_quick_click` flips them; `_sync_quickbar` keeps the labels in
+      step).
+    - viser button groups cannot relabel in place, so the row is rebuilt
+      (same order) when a state changes.
+    - The log window starts minimized and History collapsed, as the user
+      asked.
   - The **log** is a third panel (`self.log_panel`), floated at the bottom of
     the 3D view (`float(x=8, y=-8, width=900, height=260)`; negative y is
     measured from the bottom). viser docks panels only to the left / right

@@ -4,10 +4,16 @@ Videos are found anywhere under the root except inside project folders (ingest.f
 browser uploads go to ROOT/videos/. A clip is "used" by every project whose ingest.json lists
 it as a source; renaming or deleting a used clip is refused, so no plan points at a missing file.
 Renames and deletes move the .SRT sidecar along with the video.
+
+The GUI Videos tab is a file manager over the root: folders (create / delete), videos (upload,
+rename, delete, download) and stray .SRT files. Project folders and hidden files are not part of
+the library and are never listed, entered or deleted here (the Projects tab handles projects).
 """
 
 import json
 import os
+import re
+import shutil
 import subprocess
 
 from modelforge import projects
@@ -106,13 +112,12 @@ def safe_name(filename):
     return name
 
 
-def save_upload(root, filename, data, overwrite=False):
-    """A browser-uploaded video or .SRT -> ROOT/videos/<name> (via a temp file)."""
+def save_upload(root, filename, data, overwrite=False, rel_dir=LIBRARY_DIR):
+    """A browser-uploaded video or .SRT -> ROOT/rel_dir/<name> (via a temp file)."""
     name = safe_name(filename)
     if not name.lower().endswith(UPLOAD_EXTS):
         raise ValueError(f"not a video or .SRT file: {name} (allowed: {', '.join(UPLOAD_EXTS)})")
-    d = library_dir(root)
-    os.makedirs(d, exist_ok=True)
+    d = resolve_dir(root, rel_dir, create=True)
     path = os.path.join(d, name)
     if os.path.lexists(path) and not overwrite:
         raise FileExistsError(f"{os.path.relpath(path, root)} already exists in the library")
@@ -149,3 +154,103 @@ def delete(root, path):
     for f in gone:
         os.unlink(f)
     return gone
+
+
+# --- file manager: folders of the library ------------------------------------------------------
+FOLDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.()-]{0,63}$")
+
+
+def resolve_dir(root, rel="", create=False):
+    """Absolute library folder ROOT/rel; ValueError if it leaves the root, is hidden or is (inside) a
+    project folder. create: make it if missing (uploads into ROOT/videos)."""
+    base = os.path.realpath(root)
+    path = os.path.realpath(os.path.join(base, rel))
+    if path != base and not path.startswith(base + os.sep):
+        raise ValueError(f"outside the library: {rel}")
+    parts = os.path.relpath(path, base).split(os.sep) if path != base else []
+    d = base
+    for part in parts:
+        if part.startswith("."):
+            raise ValueError(f"hidden folder: {rel}")
+        d = os.path.join(d, part)
+        if projects.is_project(d):
+            raise ValueError(f"{os.path.relpath(d, base)} is a project folder (Projects tab)")
+    if create:
+        os.makedirs(path, exist_ok=True)
+    elif not os.path.isdir(path):
+        raise ValueError(f"no such folder: {rel}")
+    return path
+
+
+def listdir(root, rel="", with_probe=True):
+    """{"folders": [...], "videos": [...], "files": [stray .SRT]} of one library folder, by name.
+    Folders carry their video count and size (recursive, projects excluded)."""
+    d = resolve_dir(root, rel)
+    used = usage(root)
+    out = {"folders": [], "videos": [], "files": []}
+    names = sorted(os.listdir(d), key=str.lower)
+    videos = {os.path.splitext(n)[0].lower() for n in names if n.lower().endswith(ingest.VIDEO_EXTS)}
+    for n in names:
+        p = os.path.join(d, n)
+        if n.startswith("."):
+            continue
+        if os.path.isdir(p):
+            if projects.is_project(p):
+                continue
+            vids = ingest.find_videos(p)
+            out["folders"].append({"name": n, "path": p, "rel": os.path.relpath(p, os.path.realpath(root)),
+                                   "videos": len(vids), "bytes": sum(os.path.getsize(v) for v in vids)})
+        elif n.lower().endswith(ingest.VIDEO_EXTS):
+            e = {"path": p, "name": n, "rel": os.path.relpath(p, os.path.realpath(root)),
+                 "bytes": os.path.getsize(p), "mtime": os.path.getmtime(p), "srt": ingest.find_srt(p),
+                 "used_by": sorted(set(used.get(os.path.realpath(p), [])))}
+            if with_probe:
+                e.update(probe(p))
+            out["videos"].append(e)
+        elif n.lower().endswith(".srt") and os.path.splitext(n)[0].lower() not in videos:
+            out["files"].append({"path": p, "name": n, "bytes": os.path.getsize(p)})
+    return out
+
+
+def make_folder(root, rel, name):
+    """New folder ROOT/rel/name; returns its path."""
+    name = name.strip()
+    if not FOLDER_RE.match(name):
+        raise ValueError("folder names use letters, digits, spaces and '_ . ( ) -' (max 64), starting with a "
+                         "letter or digit")
+    path = os.path.join(resolve_dir(root, rel), name)
+    if os.path.lexists(path):
+        raise FileExistsError(f"{name} already exists")
+    os.makedirs(path)
+    return path
+
+
+def delete_folder(root, rel):
+    """Delete a library folder with its contents; refused for the root, for folders holding a project
+    and for folders holding a video a project uses. Returns (files, bytes)."""
+    path = resolve_dir(root, rel)
+    if path == os.path.realpath(root):
+        raise ValueError("refusing to delete the library root")
+    used = usage(root)
+    files = nbytes = 0
+    for d, dirs, names in os.walk(path):
+        if projects.is_project(d):
+            raise ValueError(f"cannot delete {rel}: it contains the project folder {os.path.relpath(d, path)}")
+        for n in names:
+            p = os.path.join(d, n)
+            users = used.get(os.path.realpath(p))
+            if users:
+                raise ValueError(f"cannot delete {rel}: {n} is used by project(s) {', '.join(sorted(set(users)))}")
+            files += 1
+            nbytes += os.path.getsize(p)
+    shutil.rmtree(path)
+    return files, nbytes
+
+
+def delete_file(root, path):
+    """Delete a stray .SRT (no video next to it) from the library."""
+    p = os.path.abspath(path)
+    resolve_dir(root, os.path.relpath(os.path.dirname(p), os.path.realpath(root)))
+    if not p.lower().endswith(".srt") or not os.path.isfile(p):
+        raise ValueError(f"not an .SRT file in the library: {path}")
+    os.unlink(p)
