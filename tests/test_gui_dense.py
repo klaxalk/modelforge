@@ -179,7 +179,7 @@ def test_quick_bar(app):
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
     assert state() == {"Splat": "●", "Mesh": "○", "Points": state()["Points"], "Dense": "○", "Plan": state()["Plan"],
-                       "Orbit": "○"}
+                       "Orbit": "○", "Fly": "○"}
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Mesh", None)
@@ -207,3 +207,45 @@ def test_quick_bar(app):
     assert not app.ingest.g_show.value and not app.g_plan.value
     app.g_plan.value = True
     assert app.ingest.g_show.value
+
+
+def test_fly_the_camera_path(app):
+    """Fly: the view runs along the cameras to the end, looking through them; field of view and up come
+    back afterwards; the position slider moves the view."""
+    import contextlib
+    import time
+
+    class Camera:
+        position, look_at, up_direction, fov = (50.0, 0.0, 30.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0
+
+    class Client:
+        client_id, camera = 21, Camera()
+
+        def atomic(self):
+            return contextlib.nullcontext()
+
+    c = Client()
+    path = app._flight_path()
+    app.g_fly_speed.value, app.g_fly_loop.value, app.g_fly_fov.value = 20.0, False, True
+    app.g_fly_pos.value = 0.0
+    app.toggle_fly(c)
+    assert app.g_fly.label == "Stop flying" and "● Fly" in app._quick_labels
+    time.sleep(0.3)
+    assert np.isclose(c.camera.fov, app.fov)  # the real camera's field of view while flying
+    t0 = time.time()
+    while app._flights and time.time() - t0 < path.duration / 20 + 10:
+        time.sleep(0.1)
+    assert not app._flights and app.g_fly.label == "Fly the camera path" and "finished" in app.g_fly_md.content
+    end, R, _ = path.pose(path.duration)
+    assert np.allclose(c.camera.position, end)  # at the last camera, looking along it
+    look = np.asarray(c.camera.look_at) - end
+    assert np.allclose(look / np.linalg.norm(look), R[:, 2], atol=1e-6)
+    assert c.camera.fov == 1.0 and np.allclose(c.camera.up_direction, (0, 0, 1))  # restored
+    app.g_fly_pos.value = 0.0
+    app._fly_scrub(c)  # the slider, while not flying: the view jumps there
+    assert np.allclose(c.camera.position, path.centers[0])
+    app.toggle_fly(c)  # and Stop works mid-flight
+    time.sleep(0.2)
+    app.toggle_fly(c)
+    time.sleep(0.2)
+    assert not app._flights

@@ -1196,7 +1196,21 @@ Code layout:
       echoed older pose made it jump back in time, as the user saw. A camera
       it adopts (at start, after a drag) joins the sent list, so its late
       echoes don't count as a drag (a 0.6 s stutter).
-    - Tested with a stand-in browser that lags 3 updates. Layers: points, cameras with
+    - Tested with a stand-in browser that lags 3 updates.
+  - **Fly** (View tab folder + quick bar, the user asked): replays the camera path.
+    - `gdata.FlightPath`: the shown snapshot's registered cameras in capture order, on the project
+      timeline. Without usable times it uses one image per second. Pauses over 3 s (between videos)
+      are shortened to 1 s.
+    - Positions follow a cubic Hermite curve (finite-difference tangents); orientations are slerped.
+      The curve passes exactly through every camera.
+    - `App._fly` sets position, look-at (ahead by the median depth of the sparse points, so the
+      mouse pivot afterwards lies in the scene) and up = −y of the OpenCV camera (roll reproduced)
+      at 30 Hz.
+    - Controls: speed × real time (default 4), Loop, and "Camera's field of view" (on: the real
+      camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
+    - The **Position** slider shows progress; dragging it jumps there, also when not flying.
+    - Mouse drags pause the flight for 1 s (detected as in Orbit), then it resumes on the path.
+    - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
     time, or source. Stats list the per-source offsets.

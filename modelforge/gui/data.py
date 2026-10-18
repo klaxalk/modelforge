@@ -59,6 +59,68 @@ class Cameras:
         return np.isfinite(self.centers[:, 0])
 
 
+def _slerp(q0, q1, u):
+    """Spherical interpolation of unit quaternions (any convention), u in [0, 1]."""
+    d = float(np.dot(q0, q1))
+    if d < 0:
+        q1, d = -q1, -d
+    if d > 0.9995:
+        q = q0 + u * (q1 - q0)
+        return q / np.linalg.norm(q)
+    th = np.arccos(d)
+    return (np.sin((1 - u) * th) * q0 + np.sin(u * th) * q1) / np.sin(th)
+
+
+class FlightPath:
+    """The cameras' flight in capture order, for replaying it in the 3D view (View tab → Fly).
+
+    Times are the project timeline (Project.time); without usable times (not increasing) one image per
+    second. Pauses longer than max_gap_s (e.g. between sources) are shortened to gap_s. Positions follow a
+    cubic Hermite curve through the camera centres (finite-difference tangents), so speed changes
+    smoothly; orientations are slerped between neighbouring cameras."""
+
+    def __init__(self, cams, times, max_gap_s=3.0, gap_s=1.0):
+        ok = cams.valid
+        if ok.sum() < 2:
+            raise ValueError("fewer than 2 registered cameras: nothing to fly")
+        idx = np.flatnonzero(ok)
+        t = np.asarray(times, float)[idx]
+        if not np.all(np.isfinite(t)) or np.any(np.diff(t) <= 0):
+            t = np.arange(len(idx), dtype=float)
+        dt = np.diff(t)
+        dt = np.where(dt > max_gap_s, gap_s, dt)
+        self.index = idx  # Project.names indices of the path's cameras
+        self.t = np.concatenate([[0.0], np.cumsum(dt)])
+        self.centers = cams.centers[idx]
+        q = np.array([rot_to_wxyz(cams.R_wc[i]) for i in idx])
+        for k in range(1, len(q)):  # one hemisphere, so neighbours interpolate the short way
+            if np.dot(q[k], q[k - 1]) < 0:
+                q[k] = -q[k]
+        self.quats = q
+        p, tt = self.centers, self.t
+        m = np.zeros_like(p)
+        m[1:-1] = (p[2:] - p[:-2]) / (tt[2:] - tt[:-2])[:, None]
+        m[0], m[-1] = (p[1] - p[0]) / (tt[1] - tt[0]), (p[-1] - p[-2]) / (tt[-1] - tt[-2])
+        self.tangents = m
+
+    @property
+    def duration(self):
+        return float(self.t[-1])
+
+    def pose(self, t):
+        """(position, R_wc, index of the camera just passed) at path time t (clamped)."""
+        t = float(np.clip(t, 0.0, self.duration))
+        k = int(np.clip(np.searchsorted(self.t, t, side="right") - 1, 0, len(self.t) - 2))
+        h = self.t[k + 1] - self.t[k]
+        u = (t - self.t[k]) / h
+        h00, h10, h01, h11 = 2 * u**3 - 3 * u**2 + 1, u**3 - 2 * u**2 + u, -2 * u**3 + 3 * u**2, u**3 - u**2
+        pos = (h00 * self.centers[k] + h10 * h * self.tangents[k] + h01 * self.centers[k + 1]
+               + h11 * h * self.tangents[k + 1])
+        w, x, y, z = _slerp(self.quats[k], self.quats[k + 1], u)
+        R = xyzw_to_rot((x, y, z, w))
+        return pos, R, int(self.index[k + 1] if u > 0.5 else self.index[k])
+
+
 @dataclass
 class Snapshot:
     name: str

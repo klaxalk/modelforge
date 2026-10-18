@@ -138,6 +138,8 @@ class App:
         self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
         self._token = None  # jobs.Token of the running job (the Stop button cancels it)
         self._orbits = {}  # client id -> threading.Event that stops its orbit
+        self._flights = {}  # client id -> {"stop": Event, "jump": None or path time to jump to}
+        self._fly_guard = False  # set while the flight moves the position slider (not a user scrub)
         self._build_gui()
         self._apply_kind()
         self._set_aspect()
@@ -242,6 +244,31 @@ class App:
                 self.g_orbit.on_click(lambda e: self.toggle_orbit(e.client))
                 self.g_orbit_speed = gui.add_slider("Speed (°/s)", min=1, max=90, step=1, initial_value=12,
                                                     hint="Orbit speed; can be changed while orbiting.")
+            with gui.add_folder("Fly"):
+                self.g_fly = gui.add_button(
+                    "Fly the camera path", icon=viser.Icon.PLANE,
+                    hint="Replay the flight: the view follows the cameras of the shown snapshot in capture order "
+                         "(position and orientation interpolated smoothly between them), looking through the "
+                         "camera. Press again to stop. Dragging with the mouse pauses it; it resumes on the path "
+                         "a second later. Only moves the view of the browser that pressed it.")
+                self.g_fly.on_click(lambda e: self.toggle_fly(e.client))
+                self.g_fly_speed = gui.add_slider(
+                    "Speed (× real time)", min=0.25, max=20.0, step=0.25, initial_value=4.0,
+                    hint="Playback speed relative to the capture (project timeline; one image per second when "
+                         "there are no times). Pauses over 3 s, e.g. between videos, are shortened to 1 s. Can be "
+                         "changed while flying.")
+                self.g_fly_pos = gui.add_slider(
+                    "Position (%)", min=0.0, max=100.0, step=0.1, initial_value=0.0,
+                    hint="Where on the path the flight is. Drag it to jump there (also while not flying: the view "
+                         "moves to that point); Fly starts from here.")
+                self.g_fly_pos.on_update(lambda e: self._fly_scrub(e.client))
+                self.g_fly_fov = gui.add_checkbox(
+                    "Camera's field of view", initial_value=True,
+                    hint="Use the real camera's field of view while flying, so the view matches the images; your "
+                         "own field of view comes back when the flight stops.")
+                self.g_fly_loop = gui.add_checkbox("Loop", initial_value=False,
+                                                   hint="Start over at the end instead of stopping.")
+                self.g_fly_md = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
             self.g_points.on_update(lambda _: self._sync_quickbar())
@@ -994,7 +1021,8 @@ class App:
                 ("Points", self.project is not None, self.g_points.value),
                 ("Dense", d["fused"] is not None, self.g_dense_pts.value),
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
-                ("Orbit", True, bool(self._orbits)))
+                ("Orbit", True, bool(self._orbits)),
+                ("Fly", self.project is not None, bool(self._flights)))
 
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
@@ -1010,8 +1038,8 @@ class App:
             g = self.server.gui.add_button_group(
                 "", options=labels, order=1.0,
                 hint="Show / hide the splat, the mesh, the sparse points, the dense points and the Ingest flight "
-                     "plan (tracks + planned image dots), and start / stop the orbit (● on, ○ off, · nothing "
-                     "yet). Same as the View tab.")
+                     "plan (tracks + planned image dots); start / stop the orbit, or fly the camera path (● on, "
+                     "○ off, · nothing yet). Same as the View tab.")
         g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
         self._quick_group = g
 
@@ -1036,6 +1064,8 @@ class App:
             self._set_plan_visible(not self.ingest.g_show.value)
         elif name == "Orbit":
             self.toggle_orbit(client)
+        elif name == "Fly":
+            self.toggle_fly(client)
         self._sync_quickbar()
 
     def _set_plan_visible(self, on):
@@ -1054,6 +1084,7 @@ class App:
         if stop is not None:
             stop.set()
         else:
+            self._stop_fly(client)  # one camera driver per browser
             stop = threading.Event()
             self._orbits[client.client_id] = stop
             threading.Thread(target=self._orbit, args=(client, stop), daemon=True).start()
@@ -1098,6 +1129,144 @@ class App:
                 self._orbits.pop(client.client_id, None)
                 self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
                 self._sync_quickbar()
+
+    # ------------------------------------------------------------ fly the camera path
+    def _flight_path(self):
+        cams = self.snap.cams if self.snap is not None else self.project.prior_cams
+        return gdata.FlightPath(cams, self.project.time)
+
+    def _look_distance(self, path):
+        """How far ahead the look-at point sits (the pivot for the mouse after a flight): the median depth
+        of the sparse points in front of the cameras, else a tenth of the path's extent."""
+        pts = self.snap.points if self.snap is not None else np.zeros((0, 3))
+        if len(pts):
+            pts = pts[np.random.default_rng(0).choice(len(pts), min(len(pts), 2000), replace=False)]
+            ks = np.linspace(0, len(path.index) - 1, min(len(path.index), 30)).astype(int)
+            depths = []
+            for k in ks:
+                _, R, _ = path.pose(path.t[k])
+                z = (pts - path.centers[k]) @ R[:, 2]
+                if (z > 0).any():
+                    depths.append(np.median(z[z > 0]))
+            if depths:
+                return float(np.median(depths))
+        return max(1.0, 0.1 * float(np.ptp(path.centers, axis=0).max()))
+
+    def _fly_set(self, client, path, t, dist):
+        """Put the browser's camera on the path at time t: the camera's position, its view direction (look-at
+        dist ahead) and its up (-y of the OpenCV camera, so roll is reproduced). Returns (position, image)."""
+        pos, R, i = path.pose(t)
+        with client.atomic():
+            client.camera.position = pos
+            client.camera.look_at = pos + R[:, 2] * dist
+            client.camera.up_direction = -R[:, 1]
+        return pos, i
+
+    def toggle_fly(self, client):
+        if client is None:
+            return
+        if self._stop_fly(client):
+            return
+        stop = self._orbits.pop(client.client_id, None)  # one camera driver per browser
+        if stop is not None:
+            stop.set()
+            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        try:
+            path = self._flight_path()
+        except (ValueError, AttributeError) as e:
+            self.g_fly_md.content = f"⚪ {e}"
+            return
+        state = {"stop": threading.Event(), "jump": None}
+        self._flights[client.client_id] = state
+        threading.Thread(target=self._fly, args=(client, state, path), daemon=True).start()
+        self.g_fly.label = "Stop flying"
+        self._sync_quickbar()
+
+    def _stop_fly(self, client):
+        state = self._flights.pop(client.client_id, None) if client is not None else None
+        if state is None:
+            return False
+        state["stop"].set()
+        return True
+
+    def _fly_scrub(self, client):
+        """The position slider moved: jump there (a flying browser at its next tick, else at once)."""
+        if self._fly_guard or client is None or self.project is None:
+            return
+        state = self._flights.get(client.client_id)
+        try:
+            path = self._flight_path()
+        except (ValueError, AttributeError):
+            return
+        t = path.duration * float(self.g_fly_pos.value) / 100.0
+        if state is not None:
+            state["jump"] = t
+            return
+        try:
+            _, i = self._fly_set(client, path, t, self._look_distance(path))
+            self.g_fly_md.content = f"at {t:.1f} / {path.duration:.1f} s · `{self.project.names[i]}`"
+        except Exception:  # the browser went away
+            pass
+
+    def _fly(self, client, state, path, rate_hz=30.0, hold_s=1.0):
+        """Advance along the path at speed × real time. A camera that is none of the last poses sent (the
+        browser echoes them late) means the user is dragging: the flight pauses until hold_s after that."""
+        cam, stop = client.camera, state["stop"]
+        saved_fov, saved_up, set_fov = None, None, False
+        try:
+            saved_fov, saved_up = float(cam.fov), np.array(cam.up_direction, float)
+            dist = self._look_distance(path)
+            t = path.duration * float(self.g_fly_pos.value) / 100.0
+            if t >= path.duration - 1e-6:
+                t = 0.0
+            if self.g_fly_fov.value:
+                cam.fov, set_fov = float(self.fov), True
+            sent, hold_until = [], 0.0
+            t_prev = last_ui = time.time()
+            while not stop.is_set():
+                now = time.time()
+                dt, t_prev = now - t_prev, now
+                if state["jump"] is not None:
+                    t, state["jump"], sent = state["jump"], None, []
+                pos_now = np.array(cam.position, float)
+                if sent and not any(np.linalg.norm(pos_now - p) < 1e-3 * max(dist, 1.0) for p in sent):
+                    hold_until, sent = now + hold_s, []  # dragged by the mouse
+                if now >= hold_until:
+                    t += dt * float(self.g_fly_speed.value)
+                    if t > path.duration:
+                        if not self.g_fly_loop.value:
+                            self._fly_set(client, path, path.duration, dist)
+                            break
+                        t = 0.0
+                    pos, i = self._fly_set(client, path, t, dist)
+                    sent = (sent + [pos])[-15:]
+                    if now - last_ui > 0.25:  # the slider and status, a few times a second
+                        last_ui = now
+                        self._fly_guard = True
+                        try:
+                            self.g_fly_pos.value = round(100.0 * t / path.duration, 1)
+                        finally:
+                            self._fly_guard = False
+                        self.g_fly_md.content = (f"flying · {t:.1f} / {path.duration:.1f} s path time · "
+                                                 f"`{self.project.names[i]}`")
+                stop.wait(1.0 / rate_hz)
+        except Exception:  # the browser went away
+            pass
+        finally:
+            try:
+                if set_fov:
+                    cam.fov = saved_fov
+                if saved_up is not None:
+                    cam.up_direction = saved_up
+            except Exception:
+                pass
+            if self._flights.get(client.client_id) is state:
+                self._flights.pop(client.client_id, None)
+            if not self._flights:
+                self.g_fly.label = "Fly the camera path"
+                if not stop.is_set():
+                    self.g_fly_md.content = "flight finished" + (" (loop is off)" if not self.g_fly_loop.value else "")
+            self._sync_quickbar()
 
     def skip_refine(self):
         """Skip button: end the running BA where it is and continue after refine."""
