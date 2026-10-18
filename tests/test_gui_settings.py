@@ -34,6 +34,33 @@ def test_dark_mode_persists(tmp_path):
         b.server.stop()
 
 
+def test_last_opened_project_is_reopened(tmp_path):
+    """Startup opens the project opened last, not the newest one; a deleted one falls back to the newest."""
+    import shutil
+    import time
+    from modelforge.gui.app import App, last_project
+    root = tmp_path / "data"
+    for name in ("old", "new"):
+        (root / name).mkdir(parents=True)
+        ingest.save_plan(str(root / name), [], ingest.Settings())
+        time.sleep(0.05)
+    assert last_project(str(root)) == str(root / "new")  # nothing remembered: the newest
+    a = App(str(root / "new"), port=free_port(), root=str(root))
+    try:
+        a.open_project(str(root / "old"))
+    finally:
+        a.server.stop()
+    assert last_project(str(root)) == str(root / "old")  # opened last, though not modified since
+    a = App(str(root / "old"), port=free_port(), root=str(root))
+    try:
+        a.set_dark(True)  # one setting does not wipe another
+    finally:
+        a.server.stop()
+    assert json.load(open(os.path.join(root, ".modelforge_gui.json"))) == {"last_project": "old", "dark_mode": True}
+    shutil.rmtree(root / "old")
+    assert last_project(str(root)) == str(root / "new")
+
+
 def test_orbit_keeps_center_distance_and_height(tmp_path):
     import contextlib
     import time

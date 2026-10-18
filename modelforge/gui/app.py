@@ -559,15 +559,25 @@ class App:
         except (OSError, ValueError):
             return {}
 
+    def _save_setting(self, key, value):
+        settings = {**self._load_settings(), key: value}  # read before "w" empties the file
+        try:
+            with open(self._settings_path(), "w") as f:
+                json.dump(settings, f)
+        except OSError:
+            pass
+
+    def _remember_project(self):
+        """The project to open at the next start (main: last_project), relative to the root."""
+        rel = os.path.relpath(os.path.abspath(self.path), self.root)
+        if not rel.startswith(".."):
+            self._save_setting("last_project", rel)
+
     def set_dark(self, dark):
         """Switch the theme (all clients), restyle the plots and remember the choice."""
         self.dark = bool(dark)
         self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
-        try:
-            with open(self._settings_path(), "w") as f:
-                json.dump({**self._load_settings(), "dark_mode": self.dark}, f)
-        except OSError:
-            pass
+        self._save_setting("dark_mode", self.dark)
         if self.snap is not None:
             self._update_plots()
         self.ingest._update_plot()
@@ -630,6 +640,7 @@ class App:
             self.g_inspect_md.content = "Click a camera to inspect it."
         self.ingest.set_project(path)
         self.projects.refresh()
+        self._remember_project()
         for client in self.server.get_clients().values():
             self._on_connect(client)
 
@@ -1669,10 +1680,27 @@ class App:
             time.sleep(3600)
 
 
+def last_project(root):
+    """The project opened last (ROOT/.modelforge_gui.json "last_project") if it still exists, else the
+    newest project under root, else ROOT/project_1."""
+    try:
+        with open(os.path.join(root, ".modelforge_gui.json")) as f:
+            last = json.load(f).get("last_project")
+    except (OSError, ValueError):
+        last = None
+    found = projects.list_projects(root)
+    if last:
+        path = os.path.abspath(os.path.join(root, last))
+        if path in {os.path.abspath(p) for p in found}:
+            return path
+    return found[0] if found else os.path.join(root, "project_1")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project", nargs="?",
-                    help="project folder to open (new or existing); default: the newest project under --root")
+                    help="project folder to open (new or existing); default: the one opened last, else the newest "
+                         "project under --root")
     ap.add_argument("--root", default="data", help="folder holding the projects (default data/)")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
@@ -1680,9 +1708,9 @@ def main():
     if args.project:
         path = os.path.abspath(args.project)
     else:
-        found = projects.list_projects(root)
-        path = found[0] if found else os.path.join(root, "project_1")
+        path = last_project(root)
     app = App(path, args.port, root=root)
+    app._remember_project()  # here, not in App(): tests open projects too
     print(f"modelforge GUI on http://localhost:{args.port}", flush=True)
     app.serve_forever()
 

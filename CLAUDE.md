@@ -1028,8 +1028,10 @@ Tests:
 ## GUI (M2, viser)
 
 `scripts/dev python -m modelforge.gui.app [PROJECT] [--root data] [--port 8080]`,
-then open http://localhost:8080. Without PROJECT it opens the newest project
-under `--root`. compose publishes 8080. viser 1.1.1 and plotly 7.1.0 are
+then open http://localhost:8080. Without PROJECT it opens the project opened
+last (`last_project` in `ROOT/.modelforge_gui.json`, saved by `main` and on every
+Projects → Open), else the newest project under `--root`. Before, it was always the
+newest by file times, so a project only opened (not changed) was not reopened. compose publishes 8080. viser 1.1.1 and plotly 7.1.0 are
 pinned in the image.
 
 Code layout:
