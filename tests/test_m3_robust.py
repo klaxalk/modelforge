@@ -16,10 +16,10 @@ def quat_to_rot(q):
                      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
-def make_scene(seed=0, n=40):
+def make_scene(seed=0, n=40, points=500):
     pycolmap.set_random_seed(seed)
     o = pycolmap.SyntheticDatasetOptions()
-    o.num_rigs, o.num_cameras_per_rig, o.num_frames_per_rig, o.num_points3D = 1, 1, n, 500
+    o.num_rigs, o.num_cameras_per_rig, o.num_frames_per_rig, o.num_points3D = 1, 1, n, points
     rec = pycolmap.synthesize_dataset(o)
     noise = pycolmap.SyntheticNoiseOptions()
     noise.point2D_stddev = 0.5

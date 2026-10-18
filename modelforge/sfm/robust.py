@@ -119,9 +119,15 @@ def corrected_priors(priors, model):
     return out
 
 
+MAX_ORDER_GAP = 10
+
+
 def consecutive_pairs(priors, names):
-    """Relative-prior pairs: time-consecutive images of the same source."""
-    return same_source_consecutive(priors, names)
+    """Relative-prior pairs: time-consecutive images of the same source, at most MAX_ORDER_GAP apart in
+    capture order (a missing image or two is bridged; the gaps between the blocks of a calibration
+    subset are not)."""
+    return [(a, b) for a, b in same_source_consecutive(priors, names)
+            if priors[b].order - priors[a].order <= MAX_ORDER_GAP]
 
 
 def relative_prior(pi, pj):

@@ -21,7 +21,7 @@ from plotly.subplots import make_subplots
 from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh
 from modelforge.dji import ingest
 from modelforge.export import products
-from modelforge.sfm import features, reconstruct
+from modelforge.sfm import chunked, features, reconstruct
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.videos import VideosPanel, upload_progress
@@ -42,7 +42,8 @@ STAGE_HINTS = {
     "match": "Match the selected pairs and verify them geometrically into database.db. The slowest SfM stage "
              "on CPU (~12 min for 2400 pairs).",
     "refine": "Start every camera at its prior, then 3 rounds of triangulate + bundle adjustment with "
-              "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min.",
+              "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min for 300 images. "
+              "From 1000 images (BA mode auto): calibration on a subset, chunks, a pose graph, a polish sweep.",
     "reconstruct": "Videos without metadata: incremental SfM (COLMAP mapper) from the images alone, then the model "
                    "is oriented up and scaled (no metric scale). Live count of registered images; Stop works.",
     "export": "Write transforms.json + sparse_pc.ply (nerfstudio dataset, ENU world) from sparse/refined. Seconds.",
@@ -184,7 +185,9 @@ class App:
             names = tuple(self.project.snapshot_names()) if self.project else ("priors",)
             self.g_snapshot = gui.add_dropdown(
                 "Snapshot", options=names, hint="priors = telemetry poses; round_N_tri = after triangulation of "
-                "round N; round_N = after its bundle adjustment; refined = final model.")
+                "round N; round_N = after its bundle adjustment; calib_N = the calibration subset of a chunked refine; "
+                "posegraph = a chunked refine after the pose graph and polish; "
+                "refined = final model.")
             self.g_snapshot.on_update(lambda _: self.load_snapshot(self.g_snapshot.value))
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
@@ -303,6 +306,24 @@ class App:
                      "the cameras settle (seconds on 80 images), so the cap rarely matters. 0 = no BA: poses stay at "
                      "the priors and the focal length at its start value (2x off), which leaves ~15 px reprojection "
                      "error instead of ~0.4 px and hurts dense and splat.")
+            self.g_ba_mode = gui.add_dropdown(
+                "BA mode", options=pipeline.BA_MODES, initial_value="auto",
+                hint="global: one bundle adjustment over all images per round. chunked (for thousands of images): "
+                     "the intrinsics and the prior model are calibrated on 300 images spread over the flight; then "
+                     "each chunk of consecutive images is refined on its own (its matches only, so memory does not "
+                     "grow with the project), a pose graph (cameras only, no points) joins the chunks under the "
+                     "priors, and one sweep of windows polishes all images. auto: chunked from 1000 images on.")
+            self.g_chunk_size = gui.add_number(
+                "Chunk size (images)", initial_value=chunked.Chunked.size, min=100, step=100,
+                hint="Images per chunk in a chunked refine; consecutive chunks share the overlap.")
+            self.g_chunk_overlap = gui.add_number(
+                "Chunk overlap (images)", initial_value=chunked.Chunked.overlap, min=10, step=10,
+                hint="Images shared by consecutive chunks: they tie the chunks together in the pose graph.")
+            self.g_polish = gui.add_number(
+                "Polish sweeps", initial_value=chunked.Chunked.polish_sweeps, min=0, max=3, step=1,
+                hint="Chunked refine: sweeps of 300-image windows over all images after the pose graph (each window "
+                     "adjusted with all its points, the rest held fixed). They also bring in the matches between "
+                     "chunks (revisits). 0 = none.")
             self.g_skip = gui.add_button(
                 "Skip refinement", icon=viser.Icon.PLAYER_SKIP_FORWARD, disabled=True,
                 hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
@@ -561,6 +582,8 @@ class App:
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = not video
+        for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish):
+            g.visible = not video
         self.g_mapper.visible = video
         self.g_dense_lidar.visible = self.g_splat_lidar.visible = self.g_splat_depth.visible = \
             self._kind() == "rosbag"
@@ -807,7 +830,7 @@ class App:
         refine_rep = self.project.report().get("refine", {})
         if snapshot == "refined":
             return refine_rep.get("prior_model")
-        rnd = refine_rep.get(snapshot, {}) if snapshot.startswith("round_") and not snapshot.endswith("_tri") else {}
+        rnd = refine_rep.get(snapshot, {}) if snapshot.startswith(("round_", "calib_")) and not snapshot.endswith("_tri") else {}
         pm = rnd.get("prior_model", {})
         return None if pm.get("skipped") else pm.get("model")
 
@@ -951,7 +974,11 @@ class App:
                     self.g_skip.disabled = False
                     try:
                         pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token,
-                                              max_iterations=int(self.g_ba_iters.value), skip=self._skip)
+                                              max_iterations=int(self.g_ba_iters.value), skip=self._skip,
+                                              ba_mode=self.g_ba_mode.value,
+                                              chunks=chunked.Chunked(size=int(self.g_chunk_size.value),
+                                                                     overlap=int(self.g_chunk_overlap.value),
+                                                                     polish_sweeps=int(self.g_polish.value)))
                     finally:
                         self.g_skip.disabled = True
                 elif st == "export":
@@ -1401,8 +1428,9 @@ class App:
             if st == "refine":
                 f = r["final"]
                 e, d = f["point_error_px"], f["prior_deviation"]["position_m"]
+                mode = " (chunked)" if r.get("ba", {}).get("mode") == "chunked" else ""
                 return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "
-                        f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']})")
+                        f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']}){mode}")
             if st == "reconstruct":
                 e = r["point_error_px"]
                 return (f"{r.get('mapper', 'incremental')}: "
@@ -1441,27 +1469,43 @@ class App:
 
     def _on_refine_event(self, ev):
         phase, rnd, rounds = ev["phase"], ev.get("round", 0), ev.get("rounds", 1)
-        if phase == "triangulate":
-            self._job["detail"] = f"round {rnd + 1}/{rounds}: triangulating …"
-            self.g_progress.value = 100.0 * rnd / rounds
+        stage = ev.get("stage")
+        what = {"calib": "calibration round", "chunk": f"chunk {ev.get('chunk', 0) + 1}/{ev.get('chunks', 1)}, round",
+                "polish": "polish"}.get(stage, "round")
+        step = f"{what} {rnd + 1}/{rounds}" if stage != "polish" else what
+        if "chunks" in ev:  # chunked: the chunks fill the bar up to 85 %
+            frac = (ev["chunk"] + (rnd + (phase == "ba") * 0.5) / max(1, rounds)) / ev["chunks"]
+            self.g_progress.value = 85.0 * min(1.0, frac if phase != "chunk_done" else (ev["chunk"] + 1) / ev["chunks"])
+        if phase == "chunk_done":
+            return
+        if phase == "posegraph":
+            self._job["detail"] = f"pose graph: {ev['cameras']} cameras, {ev['edges']:,} edges …"
+            self.g_progress.value = 86.0
+        elif phase == "triangulate":
+            self._job["detail"] = f"{step}: triangulating …"
+            if "chunks" not in ev:
+                self.g_progress.value = 88.0 if stage == "polish" else 100.0 * rnd / rounds
         elif phase == "ba":
             now = time.time()
             if now - self._last_live < 0.25:  # throttle scene updates
                 return
             self._last_live = now
-            self._job["detail"] = (f"round {rnd + 1}/{rounds}: bundle adjustment iteration {ev['iteration']} "
-                                   f"(max 500), cost {ev['cost']:.4g}")
+            win = f"window {ev['window'] + 1}/{ev['windows']}, " if ev.get("windows") else ""
+            self._job["detail"] = f"{step}: bundle adjustment {win}iteration {ev['iteration']}, cost {ev['cost']:.4g}"
+            if stage == "polish" and ev.get("windows"):
+                self.g_progress.value = 88.0 + 10.0 * (ev["window"] + 1) / ev["windows"]
             self._update_cameras_live(ev["rec"])
         elif phase in ("round_done", "done"):
             with self.lock:
-                name = f"round_{rnd}" if phase == "round_done" else "refined"
+                name = ev.get("name", f"round_{rnd}") if phase == "round_done" else "refined"
                 self.snap = self.project.snapshot_from_reconstruction(name, ev["rec"])
                 self._draw_points()
                 self._draw_cameras()
                 self._draw_lines()
                 self._update_stats()
                 self._update_plots()
-            self.g_progress.value = 100.0 * (rnd + 1) / rounds if phase == "round_done" else 100.0
+            if stage not in ("polish",):
+                self.g_progress.value = 100.0 * (rnd + 1) / rounds if phase == "round_done" else 100.0
 
     def _update_cameras_live(self, rec):
         """Move existing frustums to the poses Ceres is currently evaluating (cheap: no re-adding)."""

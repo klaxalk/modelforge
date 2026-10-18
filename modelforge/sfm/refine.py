@@ -12,7 +12,7 @@ cameras stop moving after ~10-80 iterations while Ceres runs hundreds more nudgi
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pyceres
@@ -42,10 +42,11 @@ class Settle:
     rot_deg: float = 0.001
     focal_px: float = 0.01
     window: int = 10
+    quantile: float = 100.0  # over the cameras: 100 = every camera; lower lets a slow tail creep on
 
 
-def init_from_database(db_path, priors):
-    """Reconstruction with all database images registered at their prior poses."""
+def init_from_database(db_path, priors, names=None):
+    """Reconstruction with all database images registered at their prior poses (names: only these)."""
     db = pycolmap.Database.open(db_path)
     rec = pycolmap.Reconstruction()
     for cam in db.read_all_cameras():
@@ -58,7 +59,10 @@ def init_from_database(db_path, priors):
         rec.add_image(img)
     db.close()
     missing = []
+    keep = None if names is None else set(names)
     for image_id, img in rec.images.items():
+        if keep is not None and img.name not in keep:
+            continue
         prior = priors.get(img.name)
         if prior is None:
             missing.append(img.name)
@@ -71,7 +75,27 @@ def init_from_database(db_path, priors):
     return rec
 
 
-def triangulate(rec, db_path, image_path, out_dir, rnd):
+def refine_points(rec, loss_scale_px=1.0, max_iterations=50):
+    """Points-only BA: poses and intrinsics constant, so every point is its own 3x3 problem (sparse
+    normal Cholesky on a block-diagonal system, no Schur complement over thousands of cameras)."""
+    opts = pycolmap.BundleAdjustmentOptions()
+    opts.refine_focal_length = opts.refine_extra_params = opts.refine_principal_point = False
+    opts.refine_rig_from_world = False
+    opts.ceres.loss_function_type = pycolmap.LossFunctionType.CAUCHY
+    opts.ceres.loss_function_scale = loss_scale_px
+    opts.ceres.solver_options.max_num_iterations = max_iterations
+    config = pycolmap.BundleAdjustmentConfig()
+    for image_id in rec.reg_image_ids():
+        config.add_image(image_id)
+    ba = pycolmap.create_default_ceres_bundle_adjuster(opts, config, rec)
+    solver_options = pyceres.SolverOptions(opts.ceres.create_solver_options(config, ba.problem))
+    solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+    summary = pyceres.SolverSummary()
+    pyceres.solve(solver_options, ba.problem, summary)
+    return summary
+
+
+def triangulate(rec, db_path, image_path, out_dir, rnd, refine=False):
     opts = pycolmap.IncrementalPipelineOptions()
     tri = opts.triangulation
     tri.merge_max_reproj_error = rnd.max_reproj_px
@@ -79,9 +103,20 @@ def triangulate(rec, db_path, image_path, out_dir, rnd):
     tri.create_max_angle_error = rnd.max_angle_error_deg
     tri.continue_max_angle_error = rnd.max_angle_error_deg
     opts.mapper.filter_max_reproj_error = rnd.max_reproj_px
+    # no points-only global BA after triangulating: the poses are fixed in it, and the prior BA that
+    # follows refines the points anyway (kladno_dira, 4000 images: 10.5 of 12.5 min per triangulation).
+    # Track completion / merging and retriangulation still run; the filter it would have applied
+    # (reprojection error, triangulation angle) is done here instead. refine: the points alone are
+    # refined first (refine_points; for the final model, which no prior BA follows).
+    opts.ba_global_max_refinements = 0
     os.makedirs(out_dir, exist_ok=True)
-    return pycolmap.triangulate_points(rec, db_path, image_path, out_dir, clear_points=True,
-                                       options=opts, refine_intrinsics=False)
+    rec = pycolmap.triangulate_points(rec, db_path, image_path, out_dir, clear_points=True,
+                                      options=opts, refine_intrinsics=False)
+    if refine:
+        refine_points(rec, rnd.loss_scale_px)
+    pycolmap.ObservationManager(rec).filter_all_points3D(rnd.max_reproj_px, opts.mapper.filter_min_tri_angle)
+    rec.write(out_dir)
+    return rec
 
 
 class _Progress(pyceres.IterationCallback):
@@ -112,8 +147,8 @@ class _Progress(pyceres.IterationCallback):
             self.history = (self.history + [self._state()])[-(s.window + 1):]
             if len(self.history) > s.window:
                 (c0, q0, f0), (c1, q1, f1) = self.history[0], self.history[-1]
-                dpos = np.linalg.norm(c1 - c0, axis=1).max()
-                drot = np.degrees(2 * np.arccos(np.abs(np.sum(q0 * q1, 1)).clip(0, 1))).max()
+                dpos = np.percentile(np.linalg.norm(c1 - c0, axis=1), s.quantile)
+                drot = np.percentile(np.degrees(2 * np.arccos(np.abs(np.sum(q0 * q1, 1)).clip(0, 1))), s.quantile)
                 dfoc = np.abs(f1 - f0).max() if len(f0) else 0.0
                 if dpos < s.pos_m and drot < s.rot_deg and dfoc < s.focal_px:
                     self.settled = True
@@ -123,7 +158,7 @@ class _Progress(pyceres.IterationCallback):
 
 def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
              refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle(),
-             token=None, skip=None):
+             token=None, skip=None, images=None, image_weight=1.0):
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
@@ -131,6 +166,12 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     model.rel_rejected). No gauge fixing: the priors pin position, rotation and
     metric scale in ENU. `settle` (None: run to Ceres' own convergence) ends the solve once the
     cameras stop moving.
+
+    images (image ids, None = all): a local BA. Only these poses are free; their points are free and
+    keep their observations in the other images, whose poses are held constant (COLMAP adds those
+    as constant-pose residuals). Relative priors join pairs with both images inside.
+
+    image_weight scales every reprojection term (a solve on thinned points: see local_ba).
     """
     from modelforge.sfm import robust
     model = model or robust.PriorModel(use_relative=False)
@@ -140,10 +181,19 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     ba_options.refine_principal_point = False
     ba_options.ceres.loss_function_type = pycolmap.LossFunctionType.CAUCHY
     ba_options.ceres.loss_function_scale = loss_scale_px
+    ba_options.ceres.loss_function_weight = image_weight
+    # direct sparse Schur at any size: COLMAP switches to iterative Schur above 1000 images, which on
+    # kladno_dira (4000 images, 2.9M points) took 27-150 s per iteration against 11 s direct
+    ba_options.ceres.max_num_images_direct_sparse_cpu_solver = 1_000_000
     ba_options.ceres.solver_options.max_num_iterations = max_iterations
     ba_config = pycolmap.BundleAdjustmentConfig()
-    for image_id in rec.reg_image_ids():
+    local = images is not None
+    for image_id in (images if local else rec.reg_image_ids()):
         ba_config.add_image(image_id)
+    if local:  # the window's points, with their observations outside it (constant poses)
+        for image_id in images:
+            for p2 in rec.image(image_id).get_observation_points2D():
+                ba_config.add_variable_point(p2.point3D_id)
 
     ba = pycolmap.create_default_ceres_bundle_adjuster(ba_options, ba_config, rec)
     problem = ba.problem
@@ -154,7 +204,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     abs_loss = pyceres.HuberLoss(prior_loss_scale)
     prior_loss = pyceres.CauchyLoss(prior_loss_scale)
     poses = {}
-    for image_id in rec.reg_image_ids():
+    for image_id in (images if local else rec.reg_image_ids()):
         img = rec.image(image_id)
         pose = rec.frame(img.frame_id).rig_from_world
         if problem.has_parameter_block(pose.params):  # else: no observations, stays at its prior
@@ -192,6 +242,132 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
             "termination": "SETTLED" if progress.settled else ("SKIPPED" if skip is not None and skip.is_set() else
                                                                 str(summary.termination_type).split(".")[-1]),
             "num_abs_priors": n_abs, "num_rel_priors": n_rel, "seconds": round(time.time() - t0, 1)}
+
+
+@dataclass
+class Local:
+    """Local BA for large projects, in two levels:
+    1. a global BA on a thinned copy of the points (refine.thin_points: about `points_per_image` per
+       image); it sets the large-scale shape, which the priors decide by averaging over all images;
+    2. windows of `window` consecutive images in capture order, each adjusted with all its points and
+       everything outside held fixed (prior_ba(images=...)); each later sweep shifts the windows by
+       window / sweeps, so every boundary lies inside a window once.
+    Why both: the images tie neighbouring cameras together far tighter than the priors hold them
+    (mm vs 0.6 m), so a window whose neighbours are still at their priors snaps onto them, and more
+    sweeps barely help (block Gauss-Seidel on stiff coupling; synthetic chain: global 2.1 cm, two
+    windows 6.9 cm, priors 8.6 cm). After level 1 the neighbours are right.
+    One global BA over thousands of images with all points is what is slow: kladno_dira (4000 images,
+    2.9M points) took 11 s per iteration (direct sparse Schur; COLMAP's default iterative Schur
+    above 1000 images 27-150 s), a 300-image window 0.2 s. Intrinsics stay fixed in the windows
+    (shared by all images): calibrate them first (stage_refine does, on a subset)."""
+    window: int = 300
+    sweeps: int = 1
+    points_per_image: int = 300
+    weighted: bool = True  # scale the thinned reprojection terms by full / thinned observations
+    # the global pass ends when 90 % of the cameras settle: the last 1 % creep for hundreds of
+    # iterations (kladno_dira: strict rule at 271), and the windows settle them in tens
+    global_settle: Settle = field(default_factory=lambda: Settle(pos_m=0.001, rot_deg=0.002, quantile=90))
+    min_images: int = 1000  # BA mode "auto": local from this many images on
+
+
+def thin_points(rec, per_image, seed=0):
+    """Delete 3D points until each image keeps about `per_image` of them: points in random order, each
+    kept while one of its images still has fewer than per_image kept. Returns the number deleted.
+    (No observation is lost for good: the next triangulation starts afresh.) Random, not longest
+    tracks first: in drone footage the longest tracks are distant features, which pin rotation but
+    triangulate depth poorly, so a solve on them leaned on the priors for position."""
+    ids = list(rec.point3D_ids())
+    tracks = [[e.image_id for e in rec.point3D(p).track.elements] for p in ids]
+    count = {}
+    deleted = 0
+    for k in np.random.default_rng(seed).permutation(len(ids)):
+        tr = tracks[k]
+        if any(count.get(i, 0) < per_image for i in tr):
+            for i in tr:
+                count[i] = count.get(i, 0) + 1
+        else:
+            rec.delete_point3D(ids[k])
+            deleted += 1
+    return deleted
+
+
+def calibration_subset(priors, names, blocks=5, size=60):
+    """Image names for calibrating the intrinsics and the prior model before a local BA: `blocks`
+    runs of `size` consecutive images spread evenly over the capture order (consecutive, so they
+    share matches; spread, so they see different parts and attitudes of the flight)."""
+    from modelforge.sfm.priors import by_order
+    order = by_order(priors, names)
+    if len(order) <= blocks * size:
+        return order
+    starts = np.linspace(0, len(order) - size, blocks).round().astype(int)
+    return [order[s + k] for s in starts for k in range(size)]
+
+
+def windows(order, local):
+    """[(sweep, ids)] for image ids in capture order (none for 0 sweeps: the global pass only)."""
+    n, w = len(order), max(2, local.window)
+    out = []
+    for s in range(local.sweeps):
+        start = (s * w) // local.sweeps
+        cuts = ([0] if start else []) + list(range(start, n, w)) + [n]
+        out += [(s, order[a:b]) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
+    return out
+
+
+def local_ba(rec, priors, model, local, on_window=None, token=None, skip=None, refine_intrinsics=False,
+             global_pass=True, **kw):
+    """Two-level local BA (see Local). on_window(k, n, sweep, rec) before each step, k = -1 for the
+    global pass on the thinned copy (rec = that copy, whose poses Ceres moves). kw go to prior_ba;
+    refine_intrinsics applies to the global pass only. global_pass=False: the windows alone, for
+    poses already consistent at large scale (chunked: after the pose graph). Returns the stats."""
+    t0 = time.time()
+    names = {rec.image(i).name: i for i in rec.reg_image_ids()}
+    from modelforge.sfm.priors import by_order
+    order = [names[n] for n in by_order(priors, [n for n in names if n in priors])]
+    wins = windows(order, local)
+    g, deleted, n_points, weight, points_seconds = {"iterations": 0, "num_abs_priors": 0, "num_rel_priors": 0,
+                                                    "usable": True, "termination": "NONE"}, 0, rec.num_points3D(), 1.0, 0.0
+    if global_pass:
+        thin = pycolmap.Reconstruction(rec)
+        n_points, n_obs = thin.num_points3D(), thin.compute_num_observations()
+        deleted = thin_points(thin, local.points_per_image)
+        weight = n_obs / max(1, thin.compute_num_observations()) if local.weighted else 1.0
+        if on_window:
+            on_window(-1, len(wins), 0, thin)
+        g = prior_ba(thin, priors, model, token=token, skip=skip, refine_intrinsics=refine_intrinsics,
+                     image_weight=weight, **{**kw, "settle": local.global_settle})
+        for frame_id in rec.reg_frame_ids():
+            rec.frame(frame_id).rig_from_world = thin.frame(frame_id).rig_from_world
+        for cid, cam in thin.cameras.items():
+            rec.camera(cid).params = cam.params
+        del thin
+        # the full points were triangulated at the old poses (kladno_dira: median 93 px off after the
+        # global pass, 0.5 px after this); a window starting from them first swings its cameras away
+        tp = time.time()
+        refine_points(rec, kw.get("loss_scale_px", 1.0), max_iterations=5)
+        points_seconds = round(time.time() - tp, 1)
+    stats = {"global": {**g, "points": n_points - deleted, "of_points": n_points, "image_weight": round(weight, 2)},
+             "refine_points_seconds": points_seconds,
+             "iterations": g["iterations"], "usable": bool(g["usable"]), "windows": len(wins), "window": local.window,
+             "sweeps": local.sweeps, "num_abs_priors": g["num_abs_priors"], "num_rel_priors": g["num_rel_priors"],
+             "window_iterations": 0, "settled": 0, "max_window_iterations": 0}
+    tw = time.time()
+    for k, (sweep, ids) in enumerate(wins):
+        if (token is not None and token.cancelled) or (skip is not None and skip.is_set()):
+            break
+        if on_window:
+            on_window(k, len(wins), sweep, rec)
+        r = prior_ba(rec, priors, model, token=token, skip=skip, images=ids, refine_intrinsics=False, **kw)
+        stats["iterations"] += r["iterations"]
+        stats["window_iterations"] += r["iterations"]
+        stats["max_window_iterations"] = max(stats["max_window_iterations"], r["iterations"])
+        stats["settled"] += r["termination"] == "SETTLED"
+        stats["usable"] &= bool(r["usable"])
+    stats["termination"] = ("SKIPPED" if skip is not None and skip.is_set() else
+                            f"LOCAL (global {g['termination']}, {stats['settled']}/{len(wins)} windows settled)")
+    stats["window_seconds"] = round(time.time() - tw, 1)
+    stats["seconds"] = round(time.time() - t0, 1)
+    return stats
 
 
 def rot_angle_deg(qa, qb):  # (x, y, z, w)

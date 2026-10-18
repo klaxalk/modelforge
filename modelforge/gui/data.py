@@ -139,8 +139,10 @@ def _snapshot_order(name):
         return (-1, 0)
     if name == "refined":
         return (10 ** 6, 0)
-    m = re.match(r"round_(\d+)(_tri)?$", name)
-    return (int(m.group(1)), 0 if m.group(2) else 1) if m else (10 ** 5, 0)
+    m = re.match(r"(round|calib)_(\d+)(_tri)?$", name)  # calib_N: a local refine's calibration subset, first
+    if not m:
+        return (10 ** 5, 0)
+    return (int(m.group(2)) - (100 if m.group(1) == "calib" else 0), 0 if m.group(3) else 1)
 
 
 class Project:

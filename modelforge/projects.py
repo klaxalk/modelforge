@@ -41,6 +41,7 @@ INTERMEDIATE = (
     ("database.db", "matches"),
     ("pairs.txt", "pair list"),
     ("sparse/round_*", "refinement rounds"),
+    ("sparse/calib_*", "refinement calibration rounds (local BA)"),
     ("dense/images", "undistorted images"),
     ("dense/sparse", "undistorted model"),
     ("dense/stereo", "PatchMatch depth/normal maps"),

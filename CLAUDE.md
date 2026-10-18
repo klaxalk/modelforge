@@ -197,7 +197,7 @@ modelforge/
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── video/          # ingest for videos without metadata (project kind "video"): motion sampling
 │   ├── rosbag/         # ROS 2 bags (kind "rosbag"): bag reading, TF buffer, ingest (poses, camera_info, LiDAR)
-│   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors), reconstruct (incremental SfM)
+│   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors), chunked (large projects: chunks + pose graph), reconstruct (incremental SfM)
 │   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab), ckpt_dump (live splat)
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
@@ -765,6 +765,60 @@ Known limitations:
   - Ceres reports iteration 0 before any step, so a skip that early keeps
     the priors exactly.
   - Unlike Stop, Skip is not a failure and writes `sparse/refined`.
+- **Large projects: chunked refinement** (the user asked, 2026-10-18: the 4000-image Mavic 4
+  project `kladno_dira` ran > 30 min in round 0's BA alone, and it must work for 10k+ images).
+  Sparse tab "BA mode" (auto / global / chunked), "Chunk size", "Chunk overlap", "Polish sweeps";
+  CLI `--ba-mode --chunk-size --chunk-overlap --polish-sweeps`. `modelforge/sfm/chunked.py`,
+  `pipeline._refine_chunks`.
+  - **auto = chunked from 1000 images on.** `stage_refine` then:
+    1. calibrates intrinsics + prior model on a subset (`refine.calibration_subset`: 5 runs of 60
+       consecutive images spread over the flight; rounds 0–1, global BA; snapshots `calib_N`);
+    2. cuts the capture order into chunks (500 images, 100 shared with the next) and runs each
+       through rounds 1–2 **on its own**: only its images registered, so COLMAP loads only its
+       matches (`DatabaseCache` filters by the registered images), intrinsics fixed, its own copy of
+       the prior model (rejections are merged);
+    3. a **pose graph** over all cameras, no points (`chunked.pose_graph`): edges i → i+1/4/16/64
+       inside each chunk from its solution (σ 5 mm + 0.2 % of the baseline, 0.02°, Cauchy) plus the
+       absolute priors (Huber, as in the BA). Shared cameras tie the chunks; ~6 parameters per
+       camera, so 10k+ cameras take seconds;
+    4. triangulates all images at those poses and polishes with one sweep of 300-image windows
+       (`refine.local_ba(global_pass=False)`), which also brings in the matches between chunks
+       (revisits); snapshot `posegraph`;
+    5. the usual final triangulation with refined points.
+  - Memory and time per chunk do not grow with the project. Still global: steps 4–5 (one
+    triangulation of all images; COLMAP reads every pair's inlier matches, ~0.5 GB at 4000 images,
+    and keeps the correspondence graph) and the pose graph. `report.json["refine"]["peak_rss_gb"]`
+    records the peak. Revisits between chunks enter only through the polish and the final
+    triangulation, not the pose graph.
+  - Why not windows alone: a window holds its neighbours fixed, and since images bind neighbours
+    in mm and the priors only in 0.6 m, it snaps onto their (prior) poses; more sweeps barely help
+    (synthetic chain: global 2.1 cm, windows 6.9 cm, priors 8.6 cm). Chunks hold nothing fixed; the
+    pose graph spreads the corrections.
+  - Tried first, on kladno_dira round 1: a global BA on a thinned copy of the points (~300 per
+    image, random, reprojection weighted ×9, stopping at 90 % of cameras settled) + windows gave the
+    full global BA's image fit (0.586 vs 0.585 px; thinned pass alone 0.594) in 10 instead of 37
+    min, but it is still a BA over all cameras, and the process peaked at ~20 GB of 31. Kept as
+    `refine.local_ba` (the polish uses its windows) and `refine.thin_points`.
+  - As the user noted, the GPS is not ground truth: absolute distance to it, or to another
+    solution (~17 cm, smooth), is not the target; the image fit (final reprojection error) is.
+  - **Also for all projects:**
+    - Triangulation without COLMAP's point BA. `pycolmap.triangulate_points` ends with up to 5
+      points-only global BAs (poses fixed): 10.5 of 12.5 min per triangulation on 4000 images,
+      redone by the prior BA right after. Now `ba_global_max_refinements = 0` plus COLMAP's point
+      filter called directly: 3.3 min. The final triangulation refines its points
+      (`refine.refine_points`, poses + intrinsics constant). fullrun_test (80 images): final
+      error 0.475 / 1.229 → 0.457 / 1.066 px, poses unchanged, refine 47 → 38 s.
+    - Direct sparse Schur at any size: COLMAP's iterative Schur above 1000 images took 27–150 s
+      per iteration on 4000 images, direct 11 s.
+    - Relative priors skip pairs more than 10 images apart in capture order
+      (`robust.MAX_ORDER_GAP`), so the calibration subset's blocks are not linked.
+  - **Measured:** fullrun_test (80 images, chunks of 30, GUI test): final 0.465 / 1.072 px vs
+    global 0.457 / 1.066. karlak (500 images, chunks of 150 / overlap 40 → 4 chunks): final
+    0.640 / 1.296 px, 268k points, 262 s, peak RSS 2.7 GB (chunks 11–31 s each, pose graph 0.4 s,
+    polish 30 s); its earlier global refine (before the triangulation changes, so not like for
+    like) 0.693 / 1.605 px, 249k points, 358 s. Not yet run on 4000+ images end to end.
+  - Tests: `tests/test_local_ba.py` (synthetic chain with local visibility: chunks + pose graph ≈
+    global BA; windows alone stay near the priors; thinning; chunk / window cover; the GUI run).
 - Pair gating was **not** implemented, by measurement. Geometries are
   uncalibrated (F only), and the ~2.5% false pairs are already removed by
   triangulation filtering.
@@ -1244,8 +1298,9 @@ Code layout:
   - **Sparse**: "Run SfM (all)", or features, pairs, match, refine (live),
     export one at a time.
     - A state line: ⏳ running stage k/n with stage/total time and a detail
-      line (BA round and iteration), then ✅ finished + next step, or ❌
-      failed + error.
+      line (BA round and iteration; in a chunked refine "calibration round", "chunk k/n",
+      "pose graph" or "polish … window k/n"), then ✅ finished + next step, or ❌ failed + error.
+    - BA mode / chunk size / overlap / polish sweeps (see "Large projects: chunked refinement").
     - A **History** of finished stages with key numbers, and a **Log** of
       the last 40 `pipeline.log` lines (`pipeline.LISTENERS`).
     - The ticker and the final message share `App.lock` plus a run id, so
