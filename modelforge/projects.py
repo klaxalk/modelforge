@@ -87,6 +87,36 @@ def create(root, name, copy_plan_from=None):
     return path
 
 
+def _check_project(root, path):
+    """Absolute path of a project folder directly under root; ValueError otherwise."""
+    p = os.path.abspath(path)
+    if os.path.dirname(p) != os.path.abspath(root) or not is_project(p):
+        raise ValueError(f"not a project folder in {root}: {path}")
+    return p
+
+
+def rename(root, path, new_name):
+    """Rename a project folder (same root). Paths inside it are relative, so nothing else changes;
+    only old nerfstudio run configs keep the old absolute path (they are not reused)."""
+    p = _check_project(root, path)
+    if not NAME_RE.match(new_name):
+        raise ValueError("project names use letters, digits, '_', '-', '.' (max 64), starting with a letter or digit")
+    dst = os.path.join(os.path.abspath(root), new_name)
+    if os.path.exists(dst):
+        raise FileExistsError(f"{new_name} already exists")
+    os.rename(p, dst)
+    return dst
+
+
+def delete(root, path):
+    """Delete a project folder with everything in it (videos live in the shared library, not here).
+    Returns the bytes freed."""
+    p = _check_project(root, path)
+    freed = size(p)
+    shutil.rmtree(p)
+    return freed
+
+
 def size(path):
     if os.path.isfile(path):
         return os.path.getsize(path)

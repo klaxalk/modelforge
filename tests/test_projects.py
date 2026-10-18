@@ -106,3 +106,54 @@ def test_gui_switches_projects(tmp_path):
         app.running = False
     finally:
         app.server.stop()
+
+
+def test_rename_and_delete(tmp_path):
+    root = str(tmp_path)
+    a = fake_project(root, "site_a")
+    fake_project(root, "site_b")
+    new = projects.rename(root, a, "site_c")
+    assert new == os.path.join(root, "site_c") and os.path.exists(os.path.join(new, "images", "a_00001.jpg"))
+    assert not os.path.exists(a)
+    with pytest.raises(FileExistsError):
+        projects.rename(root, new, "site_b")
+    with pytest.raises(ValueError):
+        projects.rename(root, new, "../evil")
+    os.makedirs(os.path.join(root, "plain"))
+    with pytest.raises(ValueError):  # not a project
+        projects.delete(root, os.path.join(root, "plain"))
+    with pytest.raises(ValueError):  # not directly under root
+        projects.delete(root, os.path.join(new, "images"))
+    assert projects.delete(root, new) > 0 and not os.path.exists(new)
+    assert [os.path.basename(p) for p in projects.list_projects(root)] == ["site_b"]
+
+
+def test_gui_rename_and_delete(tmp_path):
+    from modelforge.gui.app import App
+    root = str(tmp_path)
+    a, b = projects.create(root, "one"), projects.create(root, "two")
+    with socket.socket() as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+    app = App(a, port=port, root=root)
+    try:
+        p = app.projects
+        p.refresh()
+        p.g_list.value = "one"  # the open project
+        p.g_new_name.value = "uno"
+        p.rename_selected()
+        assert app.path == os.path.join(root, "uno") and "renamed" in p.g_msg.content
+        assert "uno" in p.g_list.options and "one" not in p.g_list.options
+        p.g_del_confirm.value = True
+        p.delete_selected()  # the open project: refused
+        assert os.path.exists(app.path) and "open project" in p.g_msg.content
+        p.g_list.value = "two"
+        p.g_del_confirm.value = False
+        p.delete_selected()  # no confirmation: refused
+        assert os.path.exists(b)
+        p.g_del_confirm.value = True
+        p.delete_selected()
+        assert not os.path.exists(b) and "deleted" in p.g_msg.content and not p.g_del_confirm.value
+        assert p.g_list.options == ("uno",)
+    finally:
+        app.server.stop()

@@ -40,7 +40,8 @@ Done:
   - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
     Dense / Splat, history;
   - a third window with the log, floating at the bottom of the 3D view.
-  - Projects: list, open, create; final vs. intermediate results; clean.
+  - Projects: list, open, create, rename, delete; final vs. intermediate
+    results; clean.
   - Videos: the shared video library (upload from the browser, info, used-by,
     add to project, download, rename, delete).
   - Sparse / Dense / Splat: run each part; live state above the tabs,
@@ -245,6 +246,23 @@ The sample clip is `data/berlin_3_1.MP4`, recorded on a DJI NEO2: HEVC
   - stream `0:2`, `dbgi` ("CAM dbgi"): debug info, high bitrate, still
     undecoded.
 
+**The SRT is optional.** Everything the pipeline uses comes from the MP4's
+djmd track: position, altitude, velocity, attitude and camera settings. The
+SRT only helps two things:
+- **Lead.** The SRT method takes 21.6 frames, instantly. Without an SRT,
+  optical flow gives 21.5 (corr 0.546, just above the 0.5 threshold) in
+  ~50 s, else the default 20.7.
+  - `ingest._cached_flow_lead` stores the flow result in the video's folder
+    (`.modelforge_leads.json`, keyed by size + mtime, so it survives
+    renames), so a clip pays it once.
+- **Start time** (orders sources, places each video on the project
+  timeline). `ingest._wall_start` returns UTC for every clip.
+  - The SRT timestamp is local time (ms); the MP4 `creation_time` is UTC
+    (1 s). On the sample clip they differ by exactly 2 h.
+  - With both, the SRT's zone offset (rounded to 15 min) is removed.
+  - Without an SRT, the MP4 tag is used. This fixed a 2 h skew when videos
+    with and without SRT were mixed.
+
 Key facts (details in `docs/djmd_format.md`):
 - Attitude is in 0.1° units. Velocity is NED in m/s. Aircraft yaw is a true
   heading.
@@ -295,8 +313,8 @@ Output:
   **moved** to `PROJECT/previous/<time>/`, never deleted.
 
 Multiple sources:
-- **Order.** Sources are ordered chronologically by SRT wall clock (else list
-  order). The first one is the reference: the ENU origin is its first image,
+- **Order.** Sources are ordered chronologically by their UTC start (MP4
+  creation_time, refined to ms by the SRT; else list order). The first one is the reference: the ENU origin is its first image,
   and z comes from its `rel_alt`.
 - **Altitude.** Other flights are lifted by the difference of their takeoff
   altitudes, median(`abs_alt` − `rel_alt`). On the sample clip that value is
@@ -682,6 +700,14 @@ Code layout:
     `ingest.json`.
   - Status: sources, image count, stages done, and final vs. intermediate
     files with their sizes.
+  - **Rename / delete** (`projects.rename` / `projects.delete`) acts on the
+    selected project folder directly under the root.
+    - Renaming the open project reopens it under the new path, and is
+      refused while a job runs in it.
+    - Delete needs a confirmation box and refuses the open project.
+    - Paths inside a project are relative, so a rename breaks nothing; only
+      old nerfstudio run configs keep the old absolute path, and they are
+      not reused.
   - **Clean intermediates** needs a confirmation box. It deletes the
     databases, `sparse/round_*`, the dense workspace (depth maps),
     `nerfstudio/` runs, `splat/splat.ply` and `previous/`. It keeps the

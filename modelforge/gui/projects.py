@@ -35,6 +35,20 @@ class ProjectsPanel:
                                hint="Create the folder with an ingest.json and switch to it; then add sources in "
                                     "the Ingest tab.")
             b.on_click(lambda _: self.create())
+        with gui.add_folder("Rename / delete", expand_by_default=False):
+            self.g_new_name = gui.add_text("New name", initial_value="",
+                                           hint="New folder name for the project selected above: letters, digits, "
+                                                "'_', '-', '.'.")
+            gui.add_button("Rename selected", icon=viser.Icon.PENCIL,
+                           hint="Rename the selected project's folder. The open project is reopened under the new "
+                                "name; not while a job runs in it.").on_click(lambda _: self.rename_selected())
+            self.g_del_confirm = gui.add_checkbox("Yes, delete the selected project and everything in it",
+                                                  initial_value=False,
+                                                  hint="Deletes the folder: images, models, mesh, splat, exports. "
+                                                       "There is no undo. Videos in the library are not touched.")
+            gui.add_button("Delete selected", icon=viser.Icon.TRASH, color="red",
+                           hint="Needs the confirmation box. The open project cannot be deleted: open another one "
+                                "first.").on_click(lambda _: self.delete_selected())
         with gui.add_folder("Disk", expand_by_default=False):
             self.g_disk = gui.add_markdown("")
             self.g_confirm = gui.add_checkbox("Yes, delete the intermediates of the open project",
@@ -117,6 +131,50 @@ class ProjectsPanel:
             self.g_msg.content = f"✅ created and opened **{name}**: add sources in the Ingest tab"
         except (ValueError, FileExistsError, RuntimeError) as e:
             self.g_msg.content = f"❌ {e}"
+
+    def _is_open(self, path):
+        return os.path.abspath(path) == os.path.abspath(self.app.path)
+
+    def rename_selected(self):
+        path = self.selected_path()
+        if not path:
+            return
+        busy = self.app.running or self.app.ingest.running
+        if self._is_open(path) and busy:
+            self.g_msg.content = "⚪ a job is running in this project: rename it after the job finishes"
+            return
+        try:
+            new = projects.rename(self.app.root, path, self.g_new_name.value.strip())
+        except (ValueError, OSError) as e:
+            self.g_msg.content = f"❌ {e}"
+            return
+        self.g_new_name.value = ""
+        name = os.path.basename(new)
+        if self._is_open(path):
+            self.app.open_project(new)  # reloads everything under the new path
+        self.refresh()
+        self.g_list.value = name
+        self.g_msg.content = f"✅ renamed **{os.path.basename(path)}** to **{name}**"
+        self.app.videos.refresh()  # its "used by" column names projects
+
+    def delete_selected(self):
+        path = self.selected_path()
+        if not path:
+            return
+        if self._is_open(path):
+            self.g_msg.content = "⚪ this is the open project: open another one first, then delete it"
+            return
+        if not self.g_del_confirm.value:
+            self.g_msg.content = "⚪ tick the confirmation box first"
+            return
+        try:
+            freed = projects.delete(self.app.root, path)
+            self.g_msg.content = f"✅ deleted **{os.path.basename(path)}** ({projects.human(freed)} freed)"
+        except (ValueError, OSError) as e:
+            self.g_msg.content = f"❌ {e}"
+        self.g_del_confirm.value = False
+        self.refresh()
+        self.app.videos.refresh()
 
     def clean(self):
         if self.app.running or self.app.ingest.running:
