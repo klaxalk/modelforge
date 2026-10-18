@@ -69,6 +69,7 @@ class Settings:
     window: float = 0.5
     yaw_source: str = "aircraft"
     quality: int = 95
+    ros: dict = None  # kind "rosbag": topics, frames, pose source (modelforge.rosbag.ingest.ros_defaults)
 
 
 def load_plan(project):
@@ -80,7 +81,8 @@ def load_plan(project):
 
 
 KINDS = {"dji": "DJI drone video (embedded position + attitude)",
-         "video": "video without metadata (phone, action camera, ...)"}
+         "video": "video without metadata (phone, action camera, ...)",
+         "rosbag": "ROS 2 bag (images + TF / odometry + optional LiDAR)"}
 
 
 def load_kind(project):

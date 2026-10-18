@@ -15,7 +15,7 @@ EXTRACTORS = {
 }
 
 
-def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift"):
+def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift", camera_params=None):
     """Write PROJECT/features.db (keypoints/descriptors only) for the images in poses.json.
 
     Matching works on a copy, so pairs can be re-matched without re-extracting.
@@ -31,6 +31,8 @@ def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True,
 
     reader = pycolmap.ImageReaderOptions()
     reader.camera_model = camera_model
+    if camera_params:  # known intrinsics (ROS camera_info), kept fixed in BA
+        reader.camera_params = ",".join(f"{x:.10g}" for x in camera_params)
     extraction = pycolmap.FeatureExtractionOptions()
     extraction.sift.max_num_features = max_num_features
     # The gimbal keeps the horizon level (camera roll ~0, max ~7 deg), so one fixed

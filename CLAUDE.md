@@ -196,6 +196,7 @@ modelforge/
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
 │   ├── video/          # ingest for videos without metadata (project kind "video"): motion sampling
+│   ├── rosbag/         # ROS 2 bags (kind "rosbag"): bag reading, TF buffer, ingest (poses, camera_info, LiDAR)
 │   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors), reconstruct (incremental SfM)
 │   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab), ckpt_dump (live splat)
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
@@ -289,6 +290,7 @@ splat, export and the View tab are shared: they only need images + poses +
 intrinsics in one frame.
 
 | | `dji` | `video` (phone, action cam, …) |
+| *(kind `rosbag`: see "Kind rosbag" below)* | | |
 |---|---|---|
 | Ingest back end | `modelforge/dji/ingest.py` (telemetry, lead) | `modelforge/video/ingest.py` (same interface: `load_clip`, `make_plan`, `preview`, `run`) |
 | Frame spacing | distance + rotation credit, or time | **motion** (cumulative dense optical flow on a 160 px copy, in image widths; cached in the video's folder as `.modelforge_motion.json`), or time |
@@ -361,10 +363,101 @@ Video-kind notes:
   - The Sparse tab shows reconstruct instead of refine and the BA controls.
   - The View tab skips prior frustums, lines and deviations.
 - Tests: `tests/test_video_kind.py`.
-- **Next, the user's plan:** kind 3, ROS 2 bags (images + odometry + LiDAR +
-  TF), reading with the `rosbags` library, priors from odometry × TF, intrinsics
-  from camera_info, and the LiDAR cloud for geometry / splat init. It needs a
-  sample bag.
+### Kind `rosbag` (ROS 2 bags)
+
+Built while the user was away (2026-10-18), from their spec: image topic
+(usually compressed), a world frame (TF world → camera), or an odometry topic
+for the pose, plus optional point cloud topics (several) used for sparse, dense
+and the splat.
+
+- **Reading.** The `rosbags` library (`rosbags==0.11.8`, a late Dockerfile
+  layer) reads sqlite3 and MCAP bags, no ROS install.
+  - `modelforge/rosbag/bag.py`: inventory, TF, image stamps, decoding
+    (CompressedImage, raw rgb8 / bgr8 / mono8 / mono16), camera_info,
+    odometry, PointCloud2 (x / y / z / intensity fields of any type).
+  - `modelforge/rosbag/tf.py`: a TF buffer. Static + dynamic edges, lookups
+    along the tree, linear translation + slerp interpolation, None outside a
+    dynamic edge's range (±0.1 s).
+- **Settings.** `Settings.ros` (new optional field, older ingest.json still
+  load). `ros_defaults` guesses:
+  - the first CompressedImage topic and its CameraInfo;
+  - the TF root above the camera as world;
+  - TF poses when a dynamic edge reaches the camera, else odometry;
+  - all PointCloud2 topics.
+- **Poses** (`rosbag/ingest.py` `Poser`):
+  - `tf`: `T_world_cam = lookup(world, camera_frame, stamp)`;
+  - `odometry`: `T_world_odomframe(TF) · T_odomframe_child(interpolated)
+    · T_child_cam(TF)`.
+  - The camera frame is the optical frame (OpenCV), the image header
+    frame_id by default.
+- **Images and priors.** Spaced by distance + rotation credit (0.15 m/°
+  default) or time, the sharpest per window.
+  - poses.json carries priors in the DJI format (`enu_*` = world xyz,
+    finite-difference velocity, `ground_z` from the LiDAR's 2nd percentile
+    z), so refine runs unchanged (`sfm_stages("rosbag")` = DJI stages).
+  - camera_info → `camera.json`: plumb_bob → OPENCV (k3 dropped),
+    equidistant → OPENCV_FISHEYE; it is scaled if the image size differs.
+  - `features.extract(camera_params=)` uses it, and refine passes
+    `refine_intrinsics=False` (`pipeline.known_camera`). Upright defaults off.
+- **LiDAR.**
+  - **Ingest:** each cloud topic's scans in the source's range (≤400 scans
+    per topic) are transformed into world at their stamps, range-cropped,
+    voxel-downsampled (5 cm) and merged into `lidar/cloud.ply`.
+  - **Sparse:** `refine` reports `lidar_check`, the SfM points' distance to
+    the LiDAR over the covered points (nearest within 2 m; OpenCV FLANN).
+  - **Dense:** `dense.add_lidar` after fusion (Dense tab "Use LiDAR points").
+    - Every LiDAR point gets the cameras that see it (in front, inside the
+      frame, occlusion-checked against the geometric depth maps) as `.vis`
+      entries, up to 5 and at least 2.
+    - Index = position in the dense model's `reg_image_ids()`, as COLMAP's
+      `mvs::Model` numbers images.
+    - Colour from the nearest camera, normal towards them. The image-only
+      cloud stays as `fused_mvs.ply`.
+  - **Splat:** `export.lidar.merged_cloud` puts LiDAR points, coloured from
+    the nearest seeing camera (no occlusion), into `sparse_pc.ply`, which
+    splatfacto / splatfacto-big start from (Splat tab "Start from LiDAR
+    points"; re-exports before training).
+- **Test bag.** `tests/rosbag_fixture.py` builds a realistic one from
+  `data/fullrun_test` + the clip:
+  - images 960×540 @ 5 Hz, camera_info (refined intrinsics, plumb_bob);
+  - `/tf` world → base_link 30 Hz (DJI telemetry poses), static base_link →
+    camera_optical / lidar / lidar2, world → odom (offset, rotated);
+  - `/odom`, and two LiDARs from the fused cloud.
+  - The user's `data/videos/synthetic_bag` (306–326 s) and the project
+    `data/rosbag_exp` were made with it.
+- **Measured on the test bag** (40 images, superfast dense):
+  - Poses from TF and from odometry match the truth to 1e-15 m.
+  - SfM: 40/40, 0.26 px median, intrinsics kept fixed; priors moved 0.24 m
+    (telemetry error).
+  - SfM vs LiDAR (70% covered): median 8.5 cm, about the test cloud's
+    spacing.
+  - Dense: +260,911 LiDAR points (98% passed the visibility test); the
+    Delaunay mesh has 76k faces vs 38k image-only.
+  - sparse_pc.ply: 10k SfM + 266k LiDAR points.
+- GUI:
+  - Projects "Kind: ROS 2 bag".
+  - The Ingest tab lists bags; a "ROS 2 bag" folder holds topic / frame
+    pickers, a checkbox per cloud topic, voxel and range. The plot shows
+    height + speed; 3D shows the track and a frustum preview.
+  - Upload is hidden (bags are folders).
+- Tests: `tests/test_rosbag_kind.py` (TF, a tiny in-test bag, the GUI flow on
+  the berlin-derived bag).
+- **Splat constraints (the user asked).** LiDAR initialisation is done.
+  Depth supervision is the next step:
+  - render depth in splatfacto and add an L1 loss to LiDAR depth maps
+    (LiDAR projected per training image, written as `depth_file_path` in
+    transforms.json);
+  - nerfstudio 1.1.5's splatfacto has no depth loss, so this needs a small
+    method plugin ("splatfacto-lidar", entry point `nerfstudio.method_configs`)
+    installed into `/opt/nerfstudio`: a SplatfactoModel subclass with the
+    extra loss and a datamanager that loads the depth images;
+  - it is expected to help most on poorly textured surfaces.
+- Not done yet:
+  - per-point LiDAR timestamps (motion distortion within a scan);
+  - LiDAR as a BA constraint (point-to-plane residuals on SfM points);
+  - fisheye images through dense / splat (export supports
+    OPENCV_FISHEYE, untested);
+  - multiple cameras per bag.
 
 ## Frame extraction (workstream 1)
 

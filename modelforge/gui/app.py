@@ -321,6 +321,11 @@ class App:
                      "stages run). superfast: 320 px, fast PatchMatch (default, the quickest, coarse mesh). low: "
                      "640 px, fast PatchMatch. medium: 1200 px. high: full resolution. max: COLMAP defaults at full "
                      "resolution (hours for 300 images).")
+            self.g_dense_lidar = gui.add_checkbox(
+                "Use LiDAR points", initial_value=True,
+                hint="ROS 2 bag projects: merge the LiDAR cloud into the fused points before meshing (each point "
+                     "with the cameras that see it, occlusion-checked against the depth maps), so surfaces without "
+                     "texture still get geometry. The image-only cloud stays as dense/fused_mvs.ply.")
             self.g_mesh_method = gui.add_dropdown(
                 "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
                 hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
@@ -357,6 +362,11 @@ class App:
                 "Downsample factor", initial_value=1, min=1, max=16, step=1,
                 hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
                      "less detail. The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+            self.g_splat_lidar = gui.add_checkbox(
+                "Start from LiDAR points", initial_value=True,
+                hint="ROS 2 bag projects: the splat's initial cloud (sparse_pc.ply) gets the LiDAR points, coloured "
+                     "from the images, besides the SfM points, so Gaussians start on the true surfaces even where "
+                     "the images lack texture. Re-exports the dataset before training (seconds).")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -476,10 +486,13 @@ class App:
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = not video
         self.g_mapper.visible = video
-        self.g_upright.value = not video  # the kind's default
+        self.g_dense_lidar.visible = self.g_splat_lidar.visible = self._kind() == "rosbag"
+        self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
         self.g_sparse_md.content = (
             "Incremental SfM from the images alone (video without metadata): features → pairs → match → "
             "reconstruct → export. Arbitrary frame and scale, oriented up." if video else
+            "Pose refinement from the bag's TF / odometry priors (camera_info intrinsics fixed): features → pairs → "
+            "match → refine → export; SfM points are checked against the LiDAR." if self._kind() == "rosbag" else
             "Pose refinement from the DJI priors: features → pairs → match → refine → export (nerfstudio dataset).")
         if video and self.g_color.value in ("position deviation", "rotation deviation"):
             self.g_color.value = "time"
@@ -870,7 +883,8 @@ class App:
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
                 else:
                     pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value],
-                                         token=self._token, on_progress=self._on_stereo_progress)
+                                         token=self._token, on_progress=self._on_stereo_progress,
+                                         lidar=bool(self.g_dense_lidar.value))
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
@@ -1045,6 +1059,8 @@ class App:
             if m.startswith("splat:"):  # also on the server console, for diagnosing the preview
                 print(m, flush=True)
         try:
+            if self._kind() == "rosbag":  # the initial cloud with or without the LiDAR points
+                pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
             live = self.g_splat_live.value
             if live:  # the live layer stands in for the previous result while training
                 self.server.scene.remove_by_name("/dense/splat")

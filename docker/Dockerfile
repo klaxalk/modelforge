@@ -90,6 +90,9 @@ print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gsplat', gsplat._
     fi
 ENV NERFSTUDIO_BIN=/opt/nerfstudio/bin
 
+# ROS 2 bags (project kind "rosbag"): pure-Python reader for sqlite3 / MCAP bags, no ROS install needed.
+RUN pip install --no-cache-dir "rosbags==0.11.8"
+
 # Browser tab title of the GUI: viser's page hardcodes <title>Viser</title> and never changes it.
 RUN sed -i 's|<title>Viser</title>|<title>ModelForge</title>|' \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" && \

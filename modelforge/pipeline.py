@@ -31,6 +31,7 @@ import time
 import pycolmap
 
 from modelforge import dense, jobs
+from modelforge.export import lidar as lidar_mod
 from modelforge.export import nerfstudio
 from modelforge.dji import ingest
 from modelforge.sfm import features, pairs, priors as priors_mod, reconstruct, refine, robust
@@ -44,7 +45,7 @@ GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": SFM_STAGES + DENSE_ST
 
 def sfm_stages(kind):
     """The sparse stages of a project kind (ingest.json "kind")."""
-    return VIDEO_SFM_STAGES if kind == "video" else SFM_STAGES
+    return VIDEO_SFM_STAGES if kind == "video" else SFM_STAGES  # dji, rosbag: priors -> refine
 
 
 LISTENERS = []  # callables(msg), e.g. the GUI log panel
@@ -66,14 +67,23 @@ class Report:
         json.dump(self.data, open(self.path, "w"), indent=1)
 
 
+def known_camera(project):
+    """PROJECT/camera.json (from a ROS camera_info), or None: then the intrinsics are estimated."""
+    path = os.path.join(project, "camera.json")
+    return json.load(open(path)) if os.path.exists(path) else None
+
+
 def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None):
     """DJI: upright SIFT (the gimbal keeps the horizon level) and an OPENCV camera refined against the
     priors. Videos without metadata: oriented SIFT (handheld footage rolls) and a RADIAL camera (one
     focal length: without priors, separate fx / fy drift apart on short sequences). upright None = by kind."""
     video = kind == "video"
-    upright = (not video) if upright is None else upright
+    upright = (kind == "dji") if upright is None else upright
+    cam = known_camera(project)  # ROS camera_info: fixed intrinsics
+    model = cam["model"] if cam else ("RADIAL" if video else "OPENCV")
     stats = features.extract(project, max_num_features=max_features, upright=upright, extractor=extractor,
-                             camera_model="RADIAL" if video else "OPENCV")
+                             camera_model=model, camera_params=cam["params"] if cam else None)
+    stats["camera"] = {"model": model, "known": bool(cam)}
     log(f"features: {stats}")
     report.set("features", stats)
 
@@ -94,7 +104,7 @@ def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
     seqs = [[n for n in names if pri[n].source == s] for s in sorted({pri[n].source for n in names})]
     rep = {"mode": mode}
     if mode == "auto" and priors_mod.has_poses(pri):  # DJI: look-at overlap from the priors
-        rep["ground_z"] = meta.get("ground_z", -meta["enu_origin_lla"][2])
+        rep["ground_z"] = meta["ground_z"] if "ground_z" in meta else -meta["enu_origin_lla"][2]
         pp = pairs.select(pri, rep["ground_z"])
     elif mode == "exhaustive":
         pp = pairs.sequential(seqs, exhaustive_below=len(names))
@@ -187,7 +197,8 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         ba = refine.prior_ba(rec, corrected, model, loss_scale_px=rnd.loss_scale_px, relative=i >= model.start_round,
                              on_iteration=lambda s, i=i: emit({"phase": "ba", "round": i, "rounds": len(rounds),
                                                                "iteration": s.iteration, "cost": s.cost, "rec": live}),
-                             token=token, max_iterations=max_iterations, skip=skip)
+                             token=token, max_iterations=max_iterations, skip=skip,
+                             refine_intrinsics=known_camera(project) is None)
         jobs.check(token)  # an aborted BA leaves no round_N
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
@@ -221,6 +232,12 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     rec.extract_colors_for_all_images(image_path)
     rec.write(os.path.join(project, "sparse", "refined"))
     results["final"] = refine.evaluate(rec, pri)
+    check = lidar_mod.sfm_check(rec, project)  # rosbag projects: SfM points vs the LiDAR cloud
+    if check:
+        results["lidar_check"] = check
+        if "median_m" in check:
+            log(f"refine: SfM points vs LiDAR ({check['covered'] * 100:.0f}% covered): median {check['median_m']} m, "
+                f"p90 {check['p90_m']} m, {check['within_10cm'] * 100:.0f}% within 10 cm")
     results["prior_model"] = model.summary()
     results["seconds"] = round(time.time() - t_start, 1)
     report.set("refine", results)
@@ -241,17 +258,20 @@ def stage_reconstruct(project, report, progress=None, token=None, mapper="increm
     return stats
 
 
-def stage_export(project, report, rec=None):
+def stage_export(project, report, rec=None, lidar=True):
+    """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud."""
     if rec is None:
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    world = "ENU" if ingest.load_kind(project) != "video" else "local: up-oriented, arbitrary scale"
-    path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"})
-    report.set("export", {"transforms": path, "frames": rec.num_reg_images()})
+    kind = ingest.load_kind(project)
+    world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
+    path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar)
+    n_lidar = json.load(open(path)).get("modelforge", {}).get("lidar_points_in_ply", 0)
+    report.set("export", {"transforms": path, "frames": rec.num_reg_images(), "lidar_points": n_lidar})
     log(f"export: {path}")
 
 
 def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dense.DEFAULT_QUALITY,
-                max_image_size=None, token=None, on_progress=None):
+                max_image_size=None, token=None, on_progress=None, lidar=True):
     """One dense stage. `quality` is a dense.QUALITY preset; `max_image_size` overrides its image size."""
     q = dict(dense.QUALITY[quality])
     size = q.pop("max_image_size") if max_image_size is None else max_image_size
@@ -263,6 +283,9 @@ def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dens
                          "quality": quality}
     elif stage == "fusion":
         rep["fusion"] = dense.fusion(project)
+        if lidar and lidar_mod.load(project) is not None:  # rosbag projects: LiDAR joins the fused cloud
+            rep["fusion"]["lidar"] = dense.add_lidar(project)
+            log(f"fusion: + LiDAR {rep['fusion']['lidar']}")
     elif stage == "mesh":
         rep["mesh"] = {m: {**dense.mesh(project, m, token=token), "preview": dense.preview(project, m, token=token)}
                        for m in mesh_methods}

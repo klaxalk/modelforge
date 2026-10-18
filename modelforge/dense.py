@@ -19,6 +19,7 @@ import re
 import shutil
 import time
 
+import numpy as np
 import pycolmap
 
 from modelforge import jobs
@@ -105,6 +106,114 @@ def fusion(project, input_type="geometric", min_num_pixels=5):
     # only output_type "ply" also writes fused.ply.vis, which the Delaunay mesher needs
     rec = pycolmap.stereo_fusion(out, workspace(project), input_type=input_type, options=opts, output_type="ply")
     return {"points": rec.num_points3D(), "path": out, "seconds": round(time.time() - t0, 1)}
+
+
+def _read_map(path):
+    """A COLMAP depth / normal map (.bin): "w&h&c&" header, then float32, row-major."""
+    with open(path, "rb") as f:
+        head = b""
+        while head.count(b"&") < 3:
+            head += f.read(1)
+        w, h, c = map(int, head.decode().split("&")[:3])
+        return np.fromfile(f, np.float32).reshape(c, h, w).transpose(1, 2, 0).squeeze()
+
+
+def _read_vis(path):
+    with open(path, "rb") as f:
+        n = int(np.frombuffer(f.read(8), np.uint64)[0])
+        out = []
+        for _ in range(n):
+            k = int(np.frombuffer(f.read(4), np.uint32)[0])
+            out.append(np.frombuffer(f.read(4 * k), np.uint32).tolist())
+    return out
+
+
+def _write_vis(path, vis):
+    with open(path, "wb") as f:
+        f.write(np.uint64(len(vis)).tobytes())
+        for v in vis:
+            f.write(np.uint32(len(v)).tobytes() + np.asarray(v, np.uint32).tobytes())
+
+
+def add_lidar(project, max_points=1_000_000, max_cams=5, min_cams=2, max_depth=80.0, tol=0.05, seed=0):
+    """Merge the project's LiDAR cloud (kind rosbag) into dense/fused.ply (+ .vis) before meshing, so
+    surfaces the images cannot reconstruct (no texture) still get geometry. A LiDAR point lists the
+    cameras that see it (inside the image, in front, not behind the PatchMatch depth there by more
+    than tol * depth: occluded), up to max_cams nearest; it needs min_cams. Colour from the nearest,
+    normal towards them. The image-only cloud stays as dense/fused_mvs.ply. Returns stats."""
+    from plyfile import PlyData, PlyElement
+
+    from modelforge.export import lidar as lidar_mod
+    ws = workspace(project)
+    xyz = lidar_mod.load(project)
+    if xyz is None or not len(xyz):
+        return {"lidar_points": 0}
+    fused, vis_path = os.path.join(ws, "fused.ply"), os.path.join(ws, "fused.ply.vis")
+    mvs, mvs_vis = os.path.join(ws, "fused_mvs.ply"), os.path.join(ws, "fused_mvs.ply.vis")
+    if not os.path.exists(mvs):  # keep the image-only result (re-running this replaces only the merge)
+        shutil.copyfile(fused, mvs)
+        shutil.copyfile(vis_path, mvs_vis)
+    if len(xyz) > max_points:
+        xyz = xyz[np.random.default_rng(seed).choice(len(xyz), max_points, replace=False)]
+    rec = pycolmap.Reconstruction(os.path.join(ws, "sparse"))
+    ids = list(rec.reg_image_ids())  # the order mvs::Model gives image indices in the .vis file
+    n = len(xyz)
+    cand_d = np.full((n, max_cams), np.inf)
+    cand_i = np.full((n, max_cams), -1, np.int64)
+    color = np.zeros((n, 3), np.uint8)
+    t0 = time.time()
+    from PIL import Image as PILImage
+    for idx, image_id in enumerate(ids):
+        img = rec.image(image_id)
+        cam = rec.cameras[img.camera_id]
+        T = img.cam_from_world().matrix()
+        Xc = xyz @ T[:, :3].T + T[:, 3]
+        sel = np.flatnonzero((Xc[:, 2] > 0.1) & (Xc[:, 2] < max_depth))
+        if not len(sel):
+            continue
+        uv = cam.img_from_cam(Xc[sel])
+        inside = (uv[:, 0] >= 0) & (uv[:, 1] >= 0) & (uv[:, 0] < cam.width - 1) & (uv[:, 1] < cam.height - 1)
+        sel, uv = sel[inside], uv[inside].astype(int)
+        depth_path = os.path.join(ws, "stereo", "depth_maps", f"{img.name}.geometric.bin")
+        if os.path.exists(depth_path) and len(sel):  # occlusion: a nearer surface in the depth map
+            d = _read_map(depth_path)
+            sy, sx = d.shape[0] / cam.height, d.shape[1] / cam.width
+            dm = d[np.clip((uv[:, 1] * sy).astype(int), 0, d.shape[0] - 1),
+                   np.clip((uv[:, 0] * sx).astype(int), 0, d.shape[1] - 1)]
+            z = Xc[sel, 2]
+            ok = (dm <= 0) | (z <= dm * (1 + tol))
+            sel, uv = sel[ok], uv[ok]
+        if not len(sel):
+            continue
+        dist = np.linalg.norm(xyz[sel] - img.projection_center(), axis=1)
+        worst = cand_d[sel].argmax(1)
+        better = dist < cand_d[sel, worst]
+        rows = sel[better]
+        cand_d[rows, worst[better]] = dist[better]
+        cand_i[rows, worst[better]] = idx
+        nearest = dist <= cand_d[sel].min(1)
+        if nearest.any():
+            pix = np.asarray(PILImage.open(os.path.join(ws, "images", img.name)).convert("RGB"))
+            color[sel[nearest]] = pix[uv[nearest, 1], uv[nearest, 0]]
+    keep = (cand_i >= 0).sum(1) >= min_cams
+    centers = np.array([rec.image(i).projection_center() for i in ids])
+    vis_l = [sorted(int(i) for i in row if i >= 0) for row in cand_i[keep]]
+    nrm = np.array([centers[v].mean(0) for v in vis_l]) - xyz[keep] if vis_l else np.zeros((0, 3))
+    nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+    base = PlyData.read(mvs)["vertex"].data
+    add = np.zeros(int(keep.sum()), dtype=base.dtype)
+    for i, c in enumerate("xyz"):
+        add[c] = xyz[keep, i]
+    for i, c in enumerate(("nx", "ny", "nz")):
+        if c in add.dtype.names:
+            add[c] = nrm[:, i]
+    for i, c in enumerate(("red", "green", "blue")):
+        if c in add.dtype.names:
+            add[c] = color[keep, i]
+    PlyData([PlyElement.describe(np.concatenate([base, add]), "vertex")]).write(fused)
+    _write_vis(vis_path, _read_vis(mvs_vis) + vis_l)
+    return {"lidar_points": int(keep.sum()), "lidar_candidates": n, "mvs_points": len(base),
+            "seconds": round(time.time() - t0, 1)}
 
 
 def mesh(project, method="delaunay", poisson_depth=13, poisson_trim=10.0, token=None):

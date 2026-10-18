@@ -23,9 +23,12 @@ from plotly.subplots import make_subplots
 from modelforge import jobs, videos
 from modelforge.dji import extract as ex
 from modelforge.dji import ingest
+from modelforge.rosbag import bag as rbag
+from modelforge.rosbag import ingest as ros_ingest
 from modelforge.video import ingest as video_ingest
 
-SAMPLING = {"dji": ("distance", "time"), "video": video_ingest.SAMPLING}
+SAMPLING = {"dji": ("distance", "time"), "video": video_ingest.SAMPLING, "rosbag": ros_ingest.SAMPLING}
+NO_INFO, IMAGE_FRAME = "(none: estimate intrinsics)", "(image header frame)"
 
 PALETTE = [(70, 134, 251), (251, 185, 56), (27, 229, 181), (228, 70, 11), (164, 252, 60), (180, 90, 250),
            (250, 110, 180), (120, 200, 255)]
@@ -62,15 +65,19 @@ class IngestPanel:
     def _set_kind(self, kind):
         """Project kind -> back end with the same plan / extract interface (DJI or video without metadata)."""
         self.kind = kind
-        self.be = video_ingest if kind == "video" else ingest
+        self.be = {"video": video_ingest, "rosbag": ros_ingest}.get(kind, ingest)
+        self._ros_bag = None  # bag whose topics fill the ROS 2 widgets
 
     def _apply_kind(self):
         """Show only the controls the kind uses (videos without metadata have no telemetry)."""
-        dji_only = self.kind != "video"
+        poses = self.kind != "video"  # DJI and ROS bags carry poses; videos without metadata do not
         self.g_sampling.options = SAMPLING[self.kind]
-        for h in (self.g_rotw, self.g_yaw, self.g_show):
-            h.visible = dji_only
-        self.g_extract.label = "Extract images + priors" if dji_only else "Extract images"
+        for h in (self.g_rotw, self.g_show):
+            h.visible = poses
+        self.g_yaw.visible = self.kind == "dji"
+        self.g_ros.visible = self.kind == "rosbag"
+        self.g_upload.visible = self.g_upload_md.visible = self.kind != "rosbag"  # bags are folders
+        self.g_extract.label = "Extract images + priors" if poses else "Extract images"
 
     def set_project(self, path):
         """Show another project's plan (called by App.open_project)."""
@@ -145,6 +152,36 @@ class IngestPanel:
                      "progress shows below. An existing file is not overwritten.")
             self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
             self.g_upload_md = gui.add_markdown("")
+        self.g_ros = gui.add_folder("ROS 2 bag")
+        with self.g_ros:
+            self.g_ros_md = gui.add_markdown("_add a bag as a source above_")
+            self.g_ros_image = gui.add_dropdown("Image topic", options=("-",),
+                                                hint="sensor_msgs/CompressedImage (preferred) or Image.")
+            self.g_ros_info = gui.add_dropdown("Camera info", options=(NO_INFO,),
+                                               hint="sensor_msgs/CameraInfo: known intrinsics, kept fixed in BA "
+                                                    "(plumb_bob -> OPENCV, equidistant -> fisheye). None: estimated.")
+            self.g_ros_pose = gui.add_dropdown("Pose source", options=("tf", "odometry"),
+                                               hint="tf: the camera pose from the TF tree (world -> camera frame) at "
+                                                    "each image stamp. odometry: an Odometry topic (its frame -> its "
+                                                    "child), chained with TF to the world and to the camera.")
+            self.g_ros_world = gui.add_dropdown("World frame", options=("-",),
+                                                hint="The frame the poses are expressed in: the project's world.")
+            self.g_ros_camera = gui.add_dropdown("Camera frame", options=(IMAGE_FRAME,),
+                                                 hint="The camera's optical frame (x right, y down, z forward; ROS "
+                                                      "*_optical_frame). Default: the image messages' frame_id.")
+            self.g_ros_odom = gui.add_dropdown("Odometry topic", options=("-",),
+                                               hint="nav_msgs/Odometry, for pose source odometry.")
+            self.g_ros_clouds = gui.add_folder("Point clouds")
+            with self.g_ros_clouds:
+                self.g_ros_clouds_md = gui.add_markdown("")
+            self.g_ros_voxel = gui.add_number("LiDAR voxel [m]", initial_value=0.05, min=0.0, step=0.01,
+                                              hint="The merged cloud keeps one point per voxel (0 = all points).")
+            self.g_ros_range = gui.add_number("LiDAR max range [m]", initial_value=60.0, min=1.0, step=5.0,
+                                              hint="Returns farther from the sensor are dropped.")
+            for h in (self.g_ros_image, self.g_ros_info, self.g_ros_pose, self.g_ros_world, self.g_ros_camera,
+                      self.g_ros_odom, self.g_ros_voxel, self.g_ros_range):
+                h.on_update(lambda _: self._ros_changed())
+            self._cloud_boxes = {}
         self.g_sources = gui.add_folder("Sources")
         with self.g_sources:
             self.g_sources_md = gui.add_markdown("")
@@ -213,9 +250,10 @@ class IngestPanel:
     def rescan(self):
         roots = [self.app.root, os.path.dirname(os.path.abspath(self.path)), os.path.join(os.getcwd(), "data")]
         found = []
+        find = rbag.find_bags if self.kind == "rosbag" else ingest.find_videos
         for r in dict.fromkeys(roots):
             if os.path.isdir(r):
-                found += [os.path.relpath(v) for v in ingest.find_videos(r)]
+                found += [os.path.relpath(v) for v in find(r)]
         found = list(dict.fromkeys(found))
         self.g_video.options = tuple(found) or ("(none found)",)
 
@@ -241,6 +279,9 @@ class IngestPanel:
         v = video or self.g_video_path.value.strip() or self.g_video.value
         if not v or v == "(none found)" or not os.path.exists(v):
             self.g_status.content = f"❌ video not found: `{v}`"
+            return
+        if self.kind == "rosbag" and not rbag.is_bag(v):
+            self.g_status.content = f"❌ not a ROS 2 bag (a folder with metadata.yaml, or an .mcap file): `{v}`"
             return
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
@@ -281,7 +322,7 @@ class IngestPanel:
                 rng.on_update(lambda _, k=k: self._range_changed(k))
                 en.on_update(lambda _, k=k: self._enabled_changed(k))
                 lead.on_update(lambda _, k=k: self._lead_changed(k))
-                lead.visible = self.kind != "video"
+                lead.visible = self.kind == "dji"
                 btn.on_click(lambda e, k=k: self._source_action(k, e.target.value))
                 self._source_handles.append(f)
                 self._source_widgets.append({"md": md, "range": rng, "enabled": en, "lead": lead, "ready": False})
@@ -331,7 +372,71 @@ class IngestPanel:
             sampling=self.g_sampling.value, num_images=max(1, int(self.g_num.value)),
             spacing=float(self.g_spacing.value) or None,
             rot_weight=None if self.g_rotw.value < 0 else float(self.g_rotw.value),
-            window=float(self.g_window.value), yaw_source=self.g_yaw.value, quality=self.settings.quality)
+            window=float(self.g_window.value), yaw_source=self.g_yaw.value, quality=self.settings.quality,
+            ros=self.settings.ros)
+        self.request_plan()
+
+    # ------------------------------------------------------------------ ROS 2 bags
+    def _load_clip(self, s):
+        if self.kind == "rosbag":
+            return self.be.load_clip(s.video, ros=self._ros_full(s.video))
+        return self.be.load_clip(s.video, s.lead, s.srt)
+
+    def _ros_full(self, path):
+        r = dict(ros_ingest.ros_defaults(path))
+        r.update({k: v for k, v in (self.settings.ros or {}).items() if v is not None})
+        return r
+
+    def _ros_refresh(self, path):
+        """Fill the ROS 2 widgets from a bag's topics and TF frames (and the saved Settings.ros)."""
+        inv = rbag.inventory(path)
+        r = self._ros_full(path)
+        frames = rbag.tf_buffer(path).frames
+        clouds = rbag.topics_of(inv, rbag.CLOUD_TYPE)
+        self._loading = True
+        try:
+            self.g_ros_image.options = tuple(rbag.topics_of(inv, rbag.IMAGE_TYPES)) or ("-",)
+            self.g_ros_info.options = (NO_INFO,) + tuple(rbag.topics_of(inv, rbag.INFO_TYPE))
+            self.g_ros_world.options = tuple(frames) or ("-",)
+            self.g_ros_camera.options = (IMAGE_FRAME,) + tuple(frames)
+            self.g_ros_odom.options = tuple(rbag.topics_of(inv, rbag.ODOM_TYPE)) or ("-",)
+            for h, v in ((self.g_ros_image, r["image_topic"]), (self.g_ros_info, r["info_topic"] or NO_INFO),
+                         (self.g_ros_pose, r["pose_source"]), (self.g_ros_world, r["world_frame"]),
+                         (self.g_ros_camera, r["camera_frame"] or IMAGE_FRAME), (self.g_ros_odom, r["odom_topic"])):
+                if v in h.options:
+                    h.value = v
+            self.g_ros_voxel.value, self.g_ros_range.value = r["voxel"], r["max_range"]
+            for h in self._cloud_boxes.values():
+                h.remove()
+            self._cloud_boxes = {}
+            with self.g_ros_clouds:
+                for t in clouds:
+                    cb = self.gui.add_checkbox(t, initial_value=t in (r["cloud_topics"] or []),
+                                               hint=f"Merge {t} into the LiDAR cloud (world frame, voxel-"
+                                                    "downsampled).")
+                    cb.on_update(lambda _: self._ros_changed())
+                    self._cloud_boxes[t] = cb
+            self.g_ros_clouds_md.content = "" if clouds else "_no PointCloud2 topics in this bag_"
+        finally:
+            self._loading = False
+        dur = inv["end"] - inv["start"]
+        name = os.path.basename(path.rstrip("/"))
+        self.g_ros_md.content = f"`{name}` · {dur:.0f} s · {len(inv['topics'])} topics · {len(frames)} TF frames"
+        self._ros_bag = path
+
+    def _ros_changed(self):
+        if self._loading:
+            return
+        ros = {"image_topic": self.g_ros_image.value, "pose_source": self.g_ros_pose.value,
+               "info_topic": "" if self.g_ros_info.value == NO_INFO else self.g_ros_info.value,
+               "world_frame": self.g_ros_world.value,
+               "camera_frame": "" if self.g_ros_camera.value == IMAGE_FRAME else self.g_ros_camera.value,
+               "odom_topic": "" if self.g_ros_odom.value == "-" else self.g_ros_odom.value,
+               "cloud_topics": [t for t, cb in self._cloud_boxes.items() if cb.value],
+               "voxel": float(self.g_ros_voxel.value), "max_range": float(self.g_ros_range.value)}
+        self.settings = ingest.Settings(**{**asdict(self.settings), "ros": ros})
+        for w in self._source_widgets:  # the clip (poses) depends on the topics and frames: re-analyse
+            w["ready"] = False
         self.request_plan()
 
     # ------------------------------------------------------------------ planning
@@ -358,9 +463,12 @@ class IngestPanel:
                 break
             w = self._source_widgets[k]
             if not w["ready"]:
-                w["md"].content = ("⏳ analysing: decoding telemetry, estimating the lead …" if self.kind != "video"
-                                   else "⏳ analysing: measuring image motion (about a minute once per clip) …")
-                c = self.be.load_clip(s.video, s.lead, s.srt)
+                w["md"].content = {"video": "⏳ analysing: measuring image motion (about a minute once per clip) …",
+                                   "rosbag": "⏳ reading the bag: image stamps, TF / odometry poses …"}.get(
+                    self.kind, "⏳ analysing: decoding telemetry, estimating the lead …")
+                if self.kind == "rosbag" and k == 0 and self._ros_bag != s.video:
+                    self._ros_refresh(s.video)
+                c = self._load_clip(s)
                 w["range"].max = round(c.duration, 1)
                 end = c.duration if s.end is None else min(s.end, c.duration)
                 w["range"].value = (min(s.start, end - 0.5), end)
@@ -386,10 +494,12 @@ class IngestPanel:
         for k, s in enumerate(self.sources):
             if k >= len(self._source_widgets):
                 break
-            c = self.be.load_clip(s.video, s.lead, s.srt)
+            c = self._load_clip(s)
             sp = by_source.get(id(s))
-            lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + (
-                f" · lead {c.lead:g} frames ({c.align['method']})" if self.kind != "video" else "")]
+            extra = {"dji": f" · lead {c.lead:g} frames ({c.align['method']})",
+                     "rosbag": f" · poses from {c.align['method']}: {int(c.valid_pose.sum())}/{c.n} images"
+                     if self.kind == "rosbag" else ""}.get(self.kind, "")
+            lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + extra]
             if sp:
                 r = sp.report
                 if "path_m" in r:
@@ -464,6 +574,9 @@ class IngestPanel:
         if self.kind == "video":
             self._update_plot_video()
             return
+        if self.kind == "rosbag":
+            self._update_plot_rosbag()
+            return
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                             subplot_titles=("altitude [m] · ● planned images", "speed [m/s]", "gimbal pitch [deg]"))
         for sp in self.plan.sources:
@@ -512,6 +625,31 @@ class IngestPanel:
                           xaxis_title="time [s] (project timeline)")
         self.g_plot.figure = fig
 
+    def _update_plot_rosbag(self):
+        """Camera height and speed (from the TF / odometry poses) with the planned images."""
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                            subplot_titles=("camera height (world z) [m] · ● planned images", "speed [m/s]"))
+        for sp in self.plan.sources:
+            c = sp.clip
+            t = sp.time_base + c.pts
+            z = c.centers[:, 2]
+            v = np.r_[0.0, np.linalg.norm(np.diff(c.centers, axis=0), axis=1) / np.maximum(np.diff(c.stamps), 1e-6)]
+            col = "rgb(%d,%d,%d)" % source_color(sp.index)
+            sel = np.where(sp.valid, 1.0, np.nan)
+            for row, y in ((1, z), (2, v)):
+                fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(150,150,150)", width=1),
+                                         showlegend=False, hoverinfo="skip"), row, 1)
+                fig.add_trace(go.Scatter(x=t, y=y * sel, mode="lines", line=dict(color=col, width=2),
+                                         name=f"{sp.index + 1}. {sp.prefix}", showlegend=row == 1), row, 1)
+            if sp.windows:
+                k = np.array([(w0 + w1) // 2 for w0, w1 in sp.windows])
+                fig.add_trace(go.Scatter(x=sp.time_base + c.pts[k], y=z[k], mode="markers",
+                                         marker=dict(size=5, color=col), showlegend=False), 1, 1)
+        fig.update_xaxes(title_text="time [s] (project timeline)", row=2, col=1)
+        fig.update_layout(margin=dict(l=40, r=10, t=30, b=30), height=440, legend=dict(orientation="h", y=-0.15),
+                          template=self.app.plot_template())
+        self.g_plot.figure = fig
+
     # ------------------------------------------------------------------ frame preview
     def _preview_index(self):
         opts = self.g_pv_source.options
@@ -524,7 +662,7 @@ class IngestPanel:
         if k is None or k >= len(self._source_widgets) or not self._source_widgets[k]["ready"]:
             return
         s = self.sources[k]
-        c = self.be.load_clip(s.video, s.lead, s.srt)
+        c = self._load_clip(s)
         t = self.g_pv_time.value
         self.g_pv_time.max = round(c.duration, 1)
         if not keep_time or t > c.duration:
@@ -555,9 +693,23 @@ class IngestPanel:
 
     def _show_preview(self, k, t):
         s = self.sources[k]
-        c = self.be.load_clip(s.video, s.lead, s.srt)
+        c = self._load_clip(s)
         i = int(np.clip(np.searchsorted(c.pts, t), 0, c.n - 1))
         self.g_pv_image.image = c.frame_image(c.pts[i])
+        if self.kind == "rosbag":  # the camera pose from TF / odometry, and its frustum in 3D
+            inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
+            if not c.valid_pose[i]:
+                self.g_pv_md.content = f"image {i} · t = {c.pts[i]:.2f} s · **no pose at this stamp**"
+                return
+            p = c.centers[i]
+            where = "inside" if inside else "outside"
+            self.g_pv_md.content = (f"image {i} · t = {c.pts[i]:.2f} s · {where} the range  \n"
+                                    f"camera at ({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}) m in `{c.ros['world_frame']}`")
+            if self.g_show.value:
+                self.server.scene.add_camera_frustum(
+                    "/ingest/cursor", fov=np.radians(60), aspect=c.width / c.height, scale=1.0, color=(255, 255, 255),
+                    wxyz=ex.rot_to_quat(c.T[i][:3, :3]), position=p, image=self.g_pv_image.image[::4, ::4].copy())
+            return
         if self.kind == "video":  # no telemetry: frame and time only
             inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
             self.g_pv_md.content = f"frame {i} · t = {c.pts[i]:.2f} s · {'inside' if inside else 'outside'} the range"

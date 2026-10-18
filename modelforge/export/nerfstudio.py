@@ -25,12 +25,20 @@ def opencv_params(cam):
     raise ValueError(f"camera model {m} has no OPENCV equivalent for nerfstudio")
 
 
-def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None):
+def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None, lidar=True):
+    """lidar: add the project's coloured LiDAR points (lidar/cloud.ply, kind rosbag) to the initial cloud."""
     cams = list(rec.cameras.values())
     if len(cams) != 1:
         raise ValueError(f"expected one shared camera, got {len(cams)}")
     cam = cams[0]
-    fx, fy, cx, cy, k1, k2, p1, p2 = opencv_params(cam)
+    if cam.model.name == "OPENCV_FISHEYE":  # nerfstudio's fisheye: k1..k4
+        fx, fy, cx, cy, k1, k2, k3, k4 = (float(v) for v in cam.params)
+        intr = {"camera_model": "OPENCV_FISHEYE", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
+                "k1": k1, "k2": k2, "k3": k3, "k4": k4}
+    else:
+        fx, fy, cx, cy, k1, k2, p1, p2 = opencv_params(cam)
+        intr = {"camera_model": "OPENCV", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
+                "k1": k1, "k2": k2, "p1": p1, "p2": p2}
 
     frames = []
     for image_id in sorted(rec.reg_image_ids(), key=lambda i: rec.image(i).name):
@@ -42,10 +50,15 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
         frames.append({"file_path": f"{image_dir}/{img.name}", "transform_matrix": c2w.tolist(),
                        "colmap_im_id": int(image_id)})
 
-    rec.export_PLY(os.path.join(project, ply_name))
-    out = {"camera_model": "OPENCV", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
-           "w": int(cam.width), "h": int(cam.height), "k1": k1, "k2": k2, "p1": p1, "p2": p2,
-           "frames": frames, "ply_file_path": ply_name}
+    n_lidar = 0
+    from modelforge.export import lidar as lidar_mod
+    if lidar and lidar_mod.load(project) is not None:
+        xyz, rgb, n_lidar = lidar_mod.merged_cloud(rec, project, image_dir)
+        lidar_mod.write_ply(os.path.join(project, ply_name), xyz, rgb)
+    else:
+        rec.export_PLY(os.path.join(project, ply_name))
+    out = {**intr, "w": int(cam.width), "h": int(cam.height), "frames": frames, "ply_file_path": ply_name}
+    extra = {**(extra or {}), **({"lidar_points_in_ply": n_lidar} if n_lidar else {})}
     if extra:
         out["modelforge"] = extra
     path = os.path.join(project, "transforms.json")
