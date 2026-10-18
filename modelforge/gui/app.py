@@ -198,7 +198,7 @@ class App:
                 self.g_point_size = gui.add_slider("Point size", min=0.01, max=0.5, step=0.01, initial_value=0.08)
                 self.g_cams = gui.add_checkbox("Cameras", initial_value=True,
                                                hint="Camera frustums of the snapshot; click one to inspect it.")
-                self.g_thumbs = gui.add_checkbox("Thumbnails", initial_value=True,
+                self.g_thumbs = gui.add_checkbox("Thumbnails", initial_value=False,
                                                  hint="Image thumbnails in the frustums (slower with many cameras).")
                 self.g_priors = gui.add_checkbox("Prior cameras", initial_value=False,
                                                  hint="Grey frustums at the telemetry poses.")
