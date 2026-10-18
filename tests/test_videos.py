@@ -104,7 +104,7 @@ def test_videos_tab(app, root):
     assert "used by" in v.g_list.content and "site" in v.g_list.content
     v._upload(UploadedFile("new.MP4", open(os.path.join(root, "b.mp4"), "rb").read()))
     assert wait_for(lambda: v.selected() and v.selected()["name"] == "new.MP4"), v.g_msg.content
-    assert "missing" in v.g_info.content  # no SRT yet
+    assert "SRT: none (optional" in v.g_info.content  # no SRT: fine
     assert any(o.endswith("new.MP4") for o in app.ingest.g_video.options)
     n = len(app.ingest.sources)
     v.add_to_project()

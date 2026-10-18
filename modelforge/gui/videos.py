@@ -39,9 +39,10 @@ class VideosPanel:
         self.g_upload = gui.add_upload_button(
             "Upload video / SRT", icon=viser.Icon.UPLOAD,
             mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
-            hint="Upload a DJI clip (.MP4 / .MOV) or its .SRT sidecar from this computer into data/videos/. "
-                 "Upload the .SRT too, with the same name: it carries per-frame metadata. Large clips take a "
-                 "while; progress shows below. An existing file is not overwritten.")
+            hint="Upload a DJI clip (.MP4 / .MOV), and optionally its .SRT sidecar (same name), from this computer "
+                 "into data/videos/. The video carries all the metadata; the .SRT only gives a quicker, firmer "
+                 "telemetry alignment. Large clips take a while; progress shows below. An existing file is not "
+                 "overwritten.")
         self.g_upload.on_upload(lambda e: self._upload(e.target.value))
         self.g_video = gui.add_dropdown("Video", options=("(none)",),
                                         hint="A clip of the library; its details are shown below.")
@@ -115,7 +116,8 @@ class VideosPanel:
                  f"{projects.human(e['bytes'])} · {_dur(e['duration_s'])} · {res}{fps}" +
                  (f" · recorded {e['created'][:19].replace('T', ' ')}" if e["created"] else ""),
                  "SRT: " + (f"`{os.path.basename(e['srt'])}` ✓" if e["srt"] else
-                            "**missing**: upload it (same name) for per-frame metadata"),
+                            "none (optional: the telemetry alignment is then estimated from the video, about a "
+                            "minute once per clip)"),
                  "used by: " + (", ".join(f"**{p}**" for p in e["used_by"]) if e["used_by"] else "no project")]
         self.g_info.content = "  \n".join(lines)
 

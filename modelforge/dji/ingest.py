@@ -5,7 +5,8 @@ settings. A source is a video and a time range [start, end]; the same video may 
 several times (several pieces of one clip). `run` writes the selected frames of all
 sources into PROJECT/images and one poses.json, in one ENU frame:
 
-- sources are ordered chronologically (SRT wall clock, else list order). The first one
+- sources are ordered chronologically (UTC start: MP4 creation_time, refined to ms by the SRT
+  when there is one; else list order). The first one
   is the reference: ENU origin = its first image, z from its rel_alt (above takeoff);
 - other flights are lifted by the difference of their takeoff altitudes,
   median(abs_alt - rel_alt), which is constant within a flight (-31.011 m on the sample
@@ -122,7 +123,7 @@ class Clip:
             self.align = {"method": "manual", "lead_frames": lead}
         else:
             self.align = (ex.estimate_lead_srt(srt, self.gimbal, self.n) if srt else None) \
-                or ex.estimate_lead_flow(video, self.gimbal, self.n) \
+                or _cached_flow_lead(video, self.gimbal, self.n) \
                 or {"method": "default", "lead_frames": ex.DEFAULT_LEAD_FRAMES}
         self.lead = self.align["lead_frames"]
         self.align["lead_s"] = round(self.lead / self.fps, 3)
@@ -152,17 +153,53 @@ class Clip:
         return np.frombuffer(out[:width * h * 3], np.uint8).reshape(h, width, 3)
 
 
-def _wall_start(srt, video):
-    """POSIX-like seconds of the first frame (camera local clock; only differences matter)."""
-    s = next((e["datetime"] for e in (srt or [])[:5] if "datetime" in e), None)
-    if s:
-        return datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).timestamp()
+def _mp4_creation_time(video):
+    """The MP4 creation_time tag (UTC, whole seconds) as POSIX seconds, or None."""
     try:
         out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=creation_time", "-of",
                               "default=nw=1:nk=1", video], capture_output=True, text=True, check=True).stdout.strip()
         return datetime.datetime.fromisoformat(out.replace("Z", "+00:00")).timestamp() if out else None
     except (subprocess.CalledProcessError, ValueError):
         return None
+
+
+def _wall_start(srt, video):
+    """UTC POSIX seconds of the first frame, so clips with and without an SRT share one clock.
+    The SRT timestamp is local time (ms resolution), the MP4 creation_time is UTC (1 s resolution):
+    the SRT's time-zone offset is taken from their difference (rounded to 15 min) and removed."""
+    s = next((e["datetime"] for e in (srt or [])[:5] if "datetime" in e), None)
+    local = datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).timestamp() if s else None
+    utc = _mp4_creation_time(video)
+    if local is not None and utc is not None:
+        return local - round((local - utc) / 900.0) * 900.0
+    return utc if utc is not None else local
+
+
+LEAD_CACHE = ".modelforge_leads.json"  # per video folder: optical-flow leads, keyed by file size + mtime
+
+
+def _cached_flow_lead(video, gimbal, n):
+    """ex.estimate_lead_flow (about a minute per clip) remembered on disk, so a clip without an SRT
+    pays it once. The key (size, mtime) survives renames; a failed estimate is remembered too."""
+    st = os.stat(video)
+    key = f"{st.st_size}:{st.st_mtime_ns}"
+    path = os.path.join(os.path.dirname(os.path.abspath(video)), LEAD_CACHE)
+    try:
+        cache = json.load(open(path))
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return cache[key]
+    align = ex.estimate_lead_flow(video, gimbal, n)
+    if align is not None:
+        align = {k: (float(v) if isinstance(v, (np.floating, float)) else v) for k, v in align.items()}
+    try:
+        cache[key] = align
+        with open(path, "w") as f:
+            json.dump(cache, f, indent=1)
+    except OSError:  # read-only folder: just not cached
+        pass
+    return align
 
 
 _CLIPS = {}

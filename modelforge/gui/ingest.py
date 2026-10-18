@@ -105,8 +105,8 @@ class IngestPanel:
         with gui.add_folder("Videos"):
             self.g_video = gui.add_dropdown("Video", options=("(none found)",),
                                             hint="Videos of the library (data root, incl. data/videos/; project "
-                                                 "folders are skipped; Videos tab to manage them). The .SRT sidecar "
-                                                 "is used if present.")
+                                                 "folders are skipped; Videos tab to manage them). An .SRT sidecar "
+                                                 "is optional: used if present for a quicker telemetry alignment.")
             self.g_video_path = gui.add_text("or path", initial_value="",
                                              hint="Any video path inside the container (repo = /workspace); "
                                                   "overrides the dropdown.")
@@ -117,10 +117,10 @@ class IngestPanel:
             self.g_upload = gui.add_upload_button(
                 "Upload video / SRT", icon=viser.Icon.UPLOAD,
                 mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
-                hint="Upload a DJI video (.MP4 / .MOV) or its .SRT sidecar from this computer into the shared "
-                     "video library (data/videos/, managed in the Videos tab); upload the .SRT too (same name), it "
-                     "carries per-frame metadata. Large clips take a while: progress shows below. An existing file "
-                     "is not overwritten.")
+                hint="Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, from this computer into "
+                     "the shared video library (data/videos/, managed in the Videos tab). The video carries all the "
+                     "metadata; the .SRT only gives a quicker, firmer telemetry alignment. Large clips take a while: "
+                     "progress shows below. An existing file is not overwritten.")
             self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
             self.g_upload_md = gui.add_markdown("")
         self.g_sources = gui.add_folder("Sources")
@@ -202,7 +202,8 @@ class IngestPanel:
                     self.g_video.value = rel
                 hint = "" if rel.lower().endswith(".srt") else (
                     "; then **Add as source**" + ("" if ingest.find_srt(path) else
-                                                  " (no .SRT next to it yet: upload it too)"))
+                                                  " (no .SRT: fine, the alignment is estimated from the video, "
+                                                  "about a minute once per clip)"))
                 self.g_upload_md.content = f"✅ uploaded `{rel}` ({len(up.content) / 1e6:.0f} MB){hint}"
                 self.app.videos.refresh()
             except (OSError, ValueError) as e:
@@ -245,7 +246,8 @@ class IngestPanel:
                     lead = gui.add_number("Lead [frames] (−1 = auto)", initial_value=-1.0 if s.lead is None else s.lead,
                                           min=-1.0, step=0.1,
                                           hint="How many frames the djmd telemetry runs ahead of the video. "
-                                               "Auto = estimated from the SRT (21.6 on the NEO2 sample).")
+                                               "Auto = estimated from the SRT, or without one from the video's "
+                                               "optical flow (21.6 / 21.5 on the NEO2 sample).")
                     btn = gui.add_button_group("", options=("Preview", "Add piece", "Remove"),
                                                hint="Preview: show this source in Frame preview. Add piece: another "
                                                     "range of the same video. Remove: drop the source.")
