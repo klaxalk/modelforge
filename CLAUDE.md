@@ -228,7 +228,8 @@ modelforge/
 
 ## DJI metadata sources
 
-The sample clip is `data/berlin_3_1.MP4`, recorded on a DJI NEO2: HEVC
+The sample clip is `data/berlin/berlin_3_1.MP4` (tests find it anywhere in
+`data/` via `tests/sample_clip.py`, or `$MODELFORGE_TEST_VIDEO`), recorded on a DJI NEO2: HEVC
 1920x1080 at 29.97 fps, 8:46 long, about 1.2 GB. Metadata lives in two places:
 
 - **`.SRT` sidecar**, one entry per frame (about 33 ms apart):
@@ -741,8 +742,21 @@ Code layout:
       "Selected clip" with Add to open project / Download.
     - ✏ / 🗑 / New folder open a viser modal (name input or "Delete …? There
       is no undo").
-    - Folders can be renamed too (`rename_folder`, refused like
-      `delete_folder`).
+    - **➜ Move** a clip (with its .SRT) or a folder to another library folder
+      (`videos.move`, destination picked from `all_folders` in a modal).
+    - Renames and moves keep projects pointed at their clips:
+      `update_references` rewrites the matching path strings in every
+      project's `ingest.json` and `poses.json`, stored the way they were
+      (relative or absolute).
+      - So renaming a used clip is no longer refused. Delete still is.
+      - The open project's (maybe unsaved) Ingest sources follow in memory
+        (`_retarget_open_project`).
+      - Both are refused while a job runs.
+      - A clip's cached optical-flow lead moves with it.
+      - The user moved berlin_3_1.MP4 / .SRT into `data/berlin/` (done by
+        hand first; parking and fullrun_test were updated).
+    - Folders can be renamed too (`rename_folder`); a folder holding a
+      project cannot be renamed, moved or deleted.
     - Rows are rebuilt on each refresh (`_refresh`, ≤300 rows).
     - **New folder** (`make_folder`); **Delete** a folder (`delete_folder`,
       refused for the root, for folders holding a project folder and for

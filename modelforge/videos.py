@@ -129,9 +129,9 @@ def save_upload(root, filename, data, overwrite=False, rel_dir=LIBRARY_DIR):
 
 
 def rename(root, path, new_name):
-    """Rename a video and its .SRT (same folder; the extension is kept). Returns the new path."""
+    """Rename a video and its .SRT (same folder; the extension is kept); projects using it are updated
+    (update_references). Returns the new path."""
     p = check_video(root, path)
-    _refuse_if_used(root, p, "rename")
     stem = os.path.splitext(safe_name(new_name))[0]
     ext = os.path.splitext(p)[1]
     dst = os.path.join(os.path.dirname(p), stem + ext)
@@ -140,9 +140,11 @@ def rename(root, path, new_name):
     for t in (dst, srt_dst):
         if t and os.path.lexists(t) and os.path.abspath(t) != p:
             raise FileExistsError(f"{os.path.basename(t)} already exists")
+    moves = {os.path.realpath(p): dst, **({os.path.realpath(srt): srt_dst} if srt else {})}
     os.rename(p, dst)
     if srt:
         os.rename(srt, srt_dst)
+    update_references(root, moves)
     return dst
 
 
@@ -248,8 +250,8 @@ def delete_folder(root, rel):
 
 
 def rename_folder(root, rel, new_name):
-    """Rename a library folder in place; refused like delete_folder (clips inside would change path).
-    Returns the new path."""
+    """Rename a library folder in place; projects using clips inside are updated. Refused for folders
+    holding a project. Returns the new path."""
     path = resolve_dir(root, rel)
     if path == os.path.realpath(root):
         raise ValueError("refusing to rename the library root")
@@ -257,19 +259,7 @@ def rename_folder(root, rel, new_name):
     if not FOLDER_RE.match(new_name):
         raise ValueError("folder names use letters, digits, spaces and '_ . ( ) -' (max 64), starting with a "
                          "letter or digit")
-    used = usage(root)
-    for d, _, names in os.walk(path):
-        if projects.is_project(d):
-            raise ValueError(f"cannot rename {rel}: it contains the project folder {os.path.relpath(d, path)}")
-        for n in names:
-            users = used.get(os.path.realpath(os.path.join(d, n)))
-            if users:
-                raise ValueError(f"cannot rename {rel}: {n} is used by project(s) {', '.join(sorted(set(users)))}")
-    dst = os.path.join(os.path.dirname(path), new_name)
-    if os.path.lexists(dst):
-        raise FileExistsError(f"{new_name} already exists")
-    os.rename(path, dst)
-    return dst
+    return _move_folder(root, path, os.path.join(os.path.dirname(path), new_name), rel)
 
 
 def delete_file(root, path):
@@ -279,3 +269,119 @@ def delete_file(root, path):
     if not p.lower().endswith(".srt") or not os.path.isfile(p):
         raise ValueError(f"not an .SRT file in the library: {path}")
     os.unlink(p)
+
+
+# --- moving, and keeping projects pointed at their clips ----------------------------------------
+def all_folders(root):
+    """Every library folder, relative to the root ("" = the root), projects and hidden ones left out."""
+    base = os.path.realpath(root)
+    out = [""]
+    for d, dirs, _ in os.walk(base):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and not projects.is_project(os.path.join(d, x)))
+        out += [os.path.relpath(os.path.join(d, x), base) for x in dirs]
+    return out
+
+
+def _stored_like(old, new_abs):
+    """new_abs written the way the old path was stored: absolute, or relative to the working directory."""
+    return new_abs if os.path.isabs(old) else os.path.relpath(new_abs)
+
+
+def update_references(root, moves):
+    """Point every project at moved files. moves: {old realpath: new absolute path}. Rewrites the
+    sources in ingest.json and every matching path string in poses.json. Returns the projects changed."""
+    changed = []
+    exts = tuple(ingest.VIDEO_EXTS) + (".srt",)
+
+    def fix(v):
+        if isinstance(v, str) and v.lower().endswith(exts) and os.path.realpath(v) in moves:
+            return _stored_like(v, moves[os.path.realpath(v)]), True
+        if isinstance(v, list):
+            out = [fix(x) for x in v]
+            return [x for x, _ in out], any(c for _, c in out)
+        if isinstance(v, dict):
+            out = {k: fix(x) for k, x in v.items()}
+            return {k: x for k, (x, _) in out.items()}, any(c for _, c in out.values())
+        return v, False
+
+    for p in projects.list_projects(root):
+        hit = False
+        for name in (ingest.PLAN_FILE, "poses.json"):
+            f = os.path.join(p, name)
+            if not os.path.exists(f):
+                continue
+            with open(f) as fh:
+                data, c = fix(json.load(fh))
+            if c:
+                with open(f, "w") as fh:
+                    json.dump(data, fh, indent=1)
+                hit = True
+        if hit:
+            changed.append(os.path.basename(p))
+    return changed
+
+
+def _move_lead_cache(src_dir, dst_dir, video):
+    """Carry the clip's cached optical-flow lead (keyed by size + mtime) to its new folder."""
+    st = os.stat(video)
+    key = f"{st.st_size}:{st.st_mtime_ns}"
+    try:
+        entry = json.load(open(os.path.join(src_dir, ingest.LEAD_CACHE)))[key]
+    except (OSError, ValueError, KeyError):
+        return
+    path = os.path.join(dst_dir, ingest.LEAD_CACHE)
+    try:
+        cache = json.load(open(path)) if os.path.exists(path) else {}
+        cache[key] = entry
+        with open(path, "w") as f:
+            json.dump(cache, f, indent=1)
+    except (OSError, ValueError):
+        pass
+
+
+def _move_folder(root, path, dst, rel):
+    for d, _, _ in os.walk(path):
+        if projects.is_project(d):
+            raise ValueError(f"cannot move {rel}: it contains the project folder {os.path.relpath(d, path)}")
+    if os.path.lexists(dst):
+        raise FileExistsError(f"{os.path.basename(dst)} already exists there")
+    moves = {}
+    for d, _, names in os.walk(path):
+        for n in names:
+            old = os.path.join(d, n)
+            moves[os.path.realpath(old)] = os.path.join(dst, os.path.relpath(old, path))
+    os.rename(path, dst)
+    update_references(root, moves)
+    return dst
+
+
+def move(root, path, dest_rel):
+    """Move a clip (with its .SRT) or a library folder into the library folder dest_rel; projects
+    using the moved clips are updated. Returns the new path."""
+    dest = resolve_dir(root, dest_rel)
+    p = os.path.abspath(path)
+    if os.path.isdir(p):
+        rel = os.path.relpath(os.path.realpath(p), os.path.realpath(root))
+        src = resolve_dir(root, rel)
+        if src == os.path.realpath(root):
+            raise ValueError("refusing to move the library root")
+        if dest == src or dest.startswith(src + os.sep):
+            raise ValueError(f"cannot move {rel} into itself")
+        if os.path.dirname(src) == dest:
+            raise ValueError(f"{rel} is already there")
+        return _move_folder(root, src, os.path.join(dest, os.path.basename(src)), rel)
+    v = check_video(root, p)
+    if os.path.dirname(v) == dest:
+        raise ValueError(f"{os.path.basename(v)} is already there")
+    srt = ingest.find_srt(v)
+    pairs = [(v, os.path.join(dest, os.path.basename(v)))] + ([(srt, os.path.join(dest, os.path.basename(srt)))]
+                                                             if srt else [])
+    for _, t in pairs:
+        if os.path.lexists(t):
+            raise FileExistsError(f"{os.path.basename(t)} already exists there")
+    moves = {os.path.realpath(a): b for a, b in pairs}  # resolved before the files move
+    _move_lead_cache(os.path.dirname(v), dest, v)
+    for a, b in pairs:
+        os.rename(a, b)
+    update_references(root, moves)
+    return pairs[0][1]

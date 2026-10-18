@@ -3,8 +3,9 @@
 A toolbar (Up, New folder, Refresh) and an upload button on top; below, one row per folder / clip /
 stray .SRT with its context buttons (✏ rename, 🗑 delete) next to it. Clicking a folder opens it,
 clicking a clip shows its details with Add to open project / Download. Rename, delete and new folder
-ask in a dialog (viser modal). Project folders and hidden files are left out; clips used by a project
-cannot be renamed or deleted, and neither can folders that hold them."""
+ask in a dialog (viser modal); ➜ moves a clip or folder to another folder. Project folders and hidden
+files are left out. Renames and moves keep projects pointed at their clips (videos.update_references);
+clips used by a project cannot be deleted, and neither can folders that hold them."""
 
 import os
 import threading
@@ -124,10 +125,11 @@ class VideosPanel:
     def _row(self, k, e):
         """One entry: its name (click: open / select) and context buttons."""
         name = self._label(e)
-        opts = (name, "✏", "🗑") if e["kind"] != "srt" else (name, "🗑")
-        hint = {"folder": "Click the name to open the folder. ✏ rename, 🗑 delete (with everything in it).",
-                "video": "Click the name for details (add to project, download). ✏ rename (the .SRT follows), "
-                         "🗑 delete (the .SRT too).",
+        opts = (name, "✏", "➜", "🗑") if e["kind"] != "srt" else (name, "🗑")
+        hint = {"folder": "Click the name to open the folder. ✏ rename, ➜ move to another folder, 🗑 delete (with "
+                          "everything in it). Projects using clips inside follow a rename or move.",
+                "video": "Click the name for details (add to project, download). ✏ rename, ➜ move to another folder "
+                         "(the .SRT follows, and so do the projects using it), 🗑 delete (the .SRT too).",
                 "srt": "An .SRT without a video of the same name. 🗑 delete."}[e["kind"]]
         g = self.gui.add_button_group("", options=opts, hint=hint, order=float(k))
         g.on_click(lambda ev, e=e, name=name: self._row_click(e, ev.target.value, name, ev.client))
@@ -143,6 +145,8 @@ class VideosPanel:
                 self.show_current()
         elif value == "✏":
             self.ask_rename(e, client)
+        elif value == "➜":
+            self.ask_move(e, client)
         elif value == "🗑":
             self.ask_delete(e, client)
 
@@ -180,11 +184,32 @@ class VideosPanel:
             return
         stem = os.path.splitext(e["name"])[0] if e["kind"] == "video" else e["name"]
         with client.gui.add_modal(f"Rename {e['name']}") as m:
-            client.gui.add_markdown("The extension is kept and the .SRT is renamed too." if e["kind"] == "video"
-                                    else "Clips inside keep their names.")
+            client.gui.add_markdown("The extension is kept and the .SRT is renamed too; projects using the clip "
+                                    "are updated." if e["kind"] == "video" else
+                                    "Clips inside keep their names; projects using them are updated.")
             name = client.gui.add_text("New name", initial_value=stem)
             row = client.gui.add_button_group("", options=("Rename", "Cancel"))
         row.on_click(lambda ev: (m.close(), self.rename_entry(e, name.value) if ev.target.value == "Rename" else None))
+
+    def ask_move(self, e, client):
+        if client is None:
+            return
+        here = os.path.dirname(e["rel"]) if e["kind"] == "folder" else os.path.relpath(
+            os.path.dirname(os.path.realpath(e["path"])), os.path.realpath(self.app.root))
+        here = "" if here == "." else here
+        own = e["rel"] if e["kind"] == "folder" else None
+        root = os.path.basename(os.path.realpath(self.app.root))
+        targets = {f"{root}/{d + '/' if d else ''}": d for d in videos.all_folders(self.app.root)
+                   if d != here and not (own and (d == own or d.startswith(own + os.sep)))}
+        if not targets:
+            self.g_msg.content = "⚪ no other folder to move it to: create one first (📁＋ New folder)"
+            return
+        with client.gui.add_modal(f"Move {e['name']}") as m:
+            client.gui.add_markdown("Projects using the moved clips are updated to the new location.")
+            dest = client.gui.add_dropdown("To folder", options=tuple(targets))
+            row = client.gui.add_button_group("", options=("Move", "Cancel"))
+        row.on_click(lambda ev: (m.close(), self.move_entry(e, targets[dest.value]) if ev.target.value == "Move"
+                                 else None))
 
     def ask_delete(self, e, client):
         if client is None:
@@ -217,18 +242,68 @@ class VideosPanel:
             return True
         return False
 
+    def _busy(self):
+        if self.app.running or self.app.ingest.running:
+            self.g_msg.content = "⚪ a job is running (it may be reading this clip): wait for it to finish"
+            return True
+        return False
+
+    def _retarget_open_project(self, old, new):
+        """The open project's Ingest sources (maybe not saved yet) follow a moved / renamed clip or folder."""
+        old, new = os.path.abspath(old), os.path.abspath(new)
+        hit = False
+        for src in self.app.ingest.sources:
+            a = os.path.abspath(src.video)
+            if a == old or a.startswith(old + os.sep):
+                src.video = videos._stored_like(src.video, new + a[len(old):])
+                hit = True
+        if hit:
+            from modelforge.dji import ingest
+            ingest.save_plan(self.app.path, self.app.ingest.sources, self.app.ingest.settings)
+            self.app.ingest.request_plan()
+        self.app.ingest.rescan()
+
+    def _changed_note(self, before):
+        """' · projects updated: a, b' for the projects whose paths a rename / move rewrote."""
+        users = sorted(set(before))
+        return f" · projects updated: {', '.join(users)}" if users else ""
+
+    def _users(self, e):
+        """Projects using the entry (a clip, or any clip inside a folder)."""
+        used, base = videos.usage(self.app.root), os.path.realpath(e["path"])
+        if e["kind"] == "video":
+            return used.get(base, [])
+        return [p for k, ps in used.items() if k.startswith(base + os.sep) for p in ps]
+
     def rename_entry(self, e, new_name):
-        if e["kind"] == "srt" or self._in_open_project(e["path"]):
+        if e["kind"] == "srt" or self._busy():
             return
+        users = self._users(e)
         try:
             if e["kind"] == "folder":
                 new = videos.rename_folder(self.app.root, e["rel"], new_name)
             else:
                 new = videos.rename(self.app.root, e["path"], new_name)
+            self._retarget_open_project(e["path"], new)
             self.g_msg.content = f"✅ renamed `{e['name']}` to `{os.path.basename(new)}`" + (
-                " (and its .SRT)" if e.get("srt") else "")
+                " (and its .SRT)" if e.get("srt") else "") + self._changed_note(users)
             self._refresh(select=new if e["kind"] == "video" else None)
-            self.app.ingest.rescan()
+        except (OSError, ValueError) as ex:
+            self.g_msg.content = f"❌ {ex}"
+
+    def move_entry(self, e, dest_rel):
+        if e["kind"] == "srt" or self._busy():
+            return
+        users = self._users(e)
+        try:
+            new = videos.move(self.app.root, e["path"], dest_rel)
+            self._retarget_open_project(e["path"], new)
+            where = f"{os.path.basename(os.path.realpath(self.app.root))}/{dest_rel + '/' if dest_rel else ''}"
+            self.g_msg.content = (f"✅ moved `{e['name']}` to `{where}`" + (" (and its .SRT)" if e.get("srt") else "")
+                                  + self._changed_note(users))
+            if self.current is not None and os.path.realpath(self.current["path"]) == os.path.realpath(e["path"]):
+                self.current = None
+            self._refresh()
         except (OSError, ValueError) as ex:
             self.g_msg.content = f"❌ {ex}"
 

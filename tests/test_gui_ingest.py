@@ -8,8 +8,10 @@ import time
 import numpy as np
 import pytest
 
-VIDEO = os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1.MP4")
-pytestmark = pytest.mark.skipif(not os.path.exists(VIDEO), reason="needs data/berlin_3_1.MP4")
+from tests.sample_clip import sample_video
+
+VIDEO = sample_video()
+pytestmark = pytest.mark.skipif(not os.path.exists(VIDEO), reason="needs the sample clip berlin_3_1.MP4 in data/")
 
 
 def free_port():

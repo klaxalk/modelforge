@@ -53,15 +53,15 @@ def test_upload(root):
     assert not [f for f in os.listdir(os.path.join(root, "videos")) if ".part" in f]
 
 
-def test_rename_moves_srt_and_refuses_used(root):
+def test_rename_moves_srt_and_updates_projects(root):
     new = videos.rename(root, os.path.join(root, "videos", "a.MP4"), "flight1.mp4")
     assert new == os.path.join(root, "videos", "flight1.MP4")  # extension kept
     assert os.path.exists(os.path.join(root, "videos", "flight1.SRT"))
     assert not os.path.exists(os.path.join(root, "videos", "a.SRT"))
-    with pytest.raises(ValueError, match="used by project"):
-        videos.rename(root, os.path.join(root, "b.mp4"), "x")
+    new_b = videos.rename(root, os.path.join(root, "b.mp4"), "x")  # used by "site": its plan follows
+    assert [s.video for s in ingest.load_plan(os.path.join(root, "site"))[0]] == [new_b]
     with pytest.raises(ValueError):
-        videos.rename(root, os.path.join(root, "site", "inside.mp4"), "x")  # project folder
+        videos.rename(root, os.path.join(root, "site", "inside.mp4"), "y")  # project folder
     make_clip(os.path.join(root, "videos", "z.MP4"))
     with pytest.raises(FileExistsError):
         videos.rename(root, os.path.join(root, "videos", "z.MP4"), "flight1")
@@ -127,12 +127,12 @@ def test_folders(root):
     ingest.save_plan(os.path.join(root, "site"), [ingest.Source(os.path.join(q, "b.mp4"))], ingest.Settings())
     with pytest.raises(ValueError, match="used by project"):
         videos.delete_folder(root, "keep")
-    with pytest.raises(ValueError, match="used by project"):
-        videos.rename_folder(root, "keep", "moved")
+    moved = videos.rename_folder(root, "keep", "kept")  # its used clip moves with it: the plan follows
+    assert ingest.load_plan(os.path.join(root, "site"))[0][0].video == os.path.join(moved, "b.mp4")
     r = videos.make_folder(root, "", "old name")
     assert videos.rename_folder(root, "old name", "new name") == os.path.join(os.path.realpath(root), "new name")
     with pytest.raises(FileExistsError):
-        videos.rename_folder(root, "new name", "keep")
+        videos.rename_folder(root, "new name", "kept")
     assert not os.path.exists(r)
 
 
@@ -157,12 +157,20 @@ def test_videos_tab(app, root):
     n = len(app.ingest.sources)
     v.add_to_project()
     assert len(app.ingest.sources) == n + 1
-    v.rename_entry(entry("new.MP4"), "renamed")  # a source of the open project: refused
-    assert "source of the open project" in v.g_msg.content
+    v.rename_entry(entry("new.MP4"), "renamed")  # a source of the open project (maybe unsaved): it follows
+    assert "renamed `new.MP4` to `renamed.MP4`" in v.g_msg.content and v.current["name"] == "renamed.MP4"
+    assert os.path.realpath(app.ingest.sources[-1].video) == os.path.realpath(os.path.join(root, "flights",
+                                                                                         "renamed.MP4"))
+    v.move_entry(entry("renamed.MP4"), "videos")  # ➜ into videos/: the open project follows again
+    assert "moved `renamed.MP4`" in v.g_msg.content and v.current is None
+    moved = os.path.join(root, "videos", "renamed.MP4")
+    assert os.path.exists(moved) and os.path.realpath(app.ingest.sources[-1].video) == os.path.realpath(moved)
+    assert os.path.realpath(ingest.load_plan(app.path)[0][-1].video) == os.path.realpath(moved)  # and on disk
+    v.move_entry({"kind": "video", "path": moved, "name": "renamed.MP4", "srt": None}, "flights")  # and back
     app.ingest.sources.pop()
     ingest.save_plan(app.path, app.ingest.sources, app.ingest.settings)
-    v.rename_entry(entry("new.MP4"), "renamed")
-    assert "renamed `new.MP4` to `renamed.MP4`" in v.g_msg.content and v.current["name"] == "renamed.MP4"
+    v._refresh()
+    v.current = entry("renamed.MP4")
     sent = []
 
     class Client:
@@ -186,3 +194,33 @@ def test_videos_tab(app, root):
     v.ask_new_folder(Browser())
     v.ask_rename(entry("b.mp4"), Browser())
     v.ask_delete(entry("videos"), Browser())
+
+
+def test_move(root):
+    site = os.path.join(root, "site")
+    poses = os.path.join(site, "poses.json")
+    json.dump({"sources": [{"video": os.path.relpath(os.path.join(root, "b.mp4")), "prefix": "b"}],
+               "images": [{"video": "b"}]}, open(poses, "w"))
+    dst = videos.make_folder(root, "", "flights")
+    new = videos.move(root, os.path.join(root, "b.mp4"), "flights")  # used by site
+    assert new == os.path.join(dst, "b.mp4") and os.path.exists(new) and not os.path.exists(os.path.join(root, "b.mp4"))
+    assert os.path.realpath(ingest.load_plan(site)[0][0].video) == os.path.realpath(new)
+    p = json.load(open(poses))
+    assert os.path.realpath(p["sources"][0]["video"]) == os.path.realpath(new) and p["images"] == [{"video": "b"}]
+    assert not os.path.isabs(p["sources"][0]["video"])  # stored the way it was (relative)
+    a = videos.move(root, os.path.join(root, "videos", "a.MP4"), "flights")  # the .SRT follows
+    assert os.path.exists(os.path.join(dst, "a.SRT")) and not os.path.exists(os.path.join(root, "videos", "a.SRT"))
+    with pytest.raises(ValueError, match="already there"):
+        videos.move(root, a, "flights")
+    make_clip(os.path.join(root, "videos", "a.MP4"))
+    with pytest.raises(FileExistsError):
+        videos.move(root, os.path.join(root, "videos", "a.MP4"), "flights")
+    sub = videos.make_folder(root, "flights", "sub")
+    with pytest.raises(ValueError, match="into itself"):
+        videos.move(root, dst, "flights/sub")
+    with pytest.raises(ValueError):
+        videos.move(root, new, "site")  # a project folder is no destination
+    moved = videos.move(root, dst, "videos")  # a folder, with the used clip inside
+    assert moved == os.path.join(os.path.realpath(root), "videos", "flights") and not os.path.exists(sub)
+    assert os.path.realpath(ingest.load_plan(site)[0][0].video) == os.path.realpath(os.path.join(moved, "b.mp4"))
+    assert videos.all_folders(root) == ["", "videos", "videos/flights", "videos/flights/sub"]

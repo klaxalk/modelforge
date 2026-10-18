@@ -1,5 +1,5 @@
 """Multi-video projects: per-source offset recovery on a synthetic scene, and ingest of two
-pieces of the sample clip into one project (skipped without data/berlin_3_1.MP4)."""
+pieces of the sample clip into one project (skipped without the sample clip in data/)."""
 
 import json
 import os
@@ -11,8 +11,9 @@ import pytest
 from modelforge.sfm import pairs, priors as priors_mod, refine, robust
 from modelforge.sfm.priors import Prior, PriorSigmas
 from tests.test_m3_robust import quat_to_rot
+from tests.sample_clip import sample_video
 
-VIDEO = os.path.join(os.path.dirname(__file__), "..", "data", "berlin_3_1.MP4")
+VIDEO = sample_video()
 
 
 def make_two_source_scene(tmp_path, offset, seed=0, n=40):
@@ -90,10 +91,10 @@ def test_pairs_and_relative_links_stay_within_sources():
     assert len(rel) == 18 and all(pri[a].source == pri[b].source for a, b in rel)
 
 
-@pytest.mark.skipif(not os.path.exists(VIDEO), reason="needs data/berlin_3_1.MP4")
+@pytest.mark.skipif(not os.path.exists(VIDEO), reason="needs the sample clip berlin_3_1.MP4 in data/")
 def test_ingest_two_pieces(tmp_path):
     from modelforge.dji import ingest
-    sources = [ingest.Source("data/berlin_3_1.MP4" if os.path.exists("data/berlin_3_1.MP4") else VIDEO, 60.0, 90.0),
+    sources = [ingest.Source(os.path.relpath(VIDEO), 60.0, 90.0),
                ingest.Source(VIDEO, 10.0, 40.0)]
     settings = ingest.Settings(num_images=8)
     plan = ingest.make_plan(sources, settings)
