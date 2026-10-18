@@ -520,8 +520,6 @@ class App:
                 b.on_click(lambda e: self._export("splat", e.client, download=True))
                 self.g_export_buttons["splat_dl"] = b
 
-        with self.left.add_tab("Hardware", viser.Icon.CPU):
-            self.hardware = HardwarePanel(self, gui)
         with self.left.add_tab("Settings", viser.Icon.SETTINGS):
             self.g_dark = gui.add_checkbox("Dark mode", initial_value=self.dark,
                                            hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
@@ -539,6 +537,8 @@ class App:
         with self.log_panel.add_tab("Log", viser.Icon.TERMINAL_2):
             gui.add_markdown(f"_last {LOG_LINES} lines of the running job, newest first_")
             self.g_log = gui.add_markdown("")
+        with self.log_panel.add_tab("Hardware", viser.Icon.CPU):
+            self.hardware = HardwarePanel(self, gui, plot_aspect=0.25)  # the bottom window is wide and low
         self._place_panels()
 
     def _place_panels(self):

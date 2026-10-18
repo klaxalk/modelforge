@@ -82,7 +82,7 @@ def _gb(b):
 class HardwarePanel:
     """Bars + numbers + a 2-minute history; a daemon thread samples and updates them."""
 
-    def __init__(self, app, gui):
+    def __init__(self, app, gui, plot_aspect=0.7):
         self.app = app
         self.gui = gui
         self.hist = collections.deque(maxlen=HISTORY)  # (t, cpu %, ram %, [gpu util %], [gpu mem %])
@@ -96,7 +96,7 @@ class HardwarePanel:
         for g in gpus() or []:
             gui.add_markdown(f"**GPU {g['index']}** utilization / memory")
             self.g_gpu.append((gui.add_progress_bar(0.0, color="green"), gui.add_progress_bar(0.0, color="orange")))
-        self.g_plot = gui.add_plotly(go.Figure(), aspect=0.7)
+        self.g_plot = gui.add_plotly(go.Figure(), aspect=plot_aspect)
         self.g_plot_on = gui.add_checkbox("History plot", initial_value=True,
                                           hint="Plot the last 2 minutes (CPU, RAM, GPU, GPU memory, in %). "
                                                "Untick to save bandwidth.")
