@@ -162,7 +162,7 @@ MODELFORGE_GPU=1 scripts/dev /opt/nerfstudio/bin/python -c \
 MODELFORGE_GPU=1 scripts/dev pytest -q tests          # all pass except the no-CUDA error test (skipped)
 # dense on the existing refined project (or build a project in the GUI)
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/berlin_3_1_frames --stages dense --mesh delaunay
-#   default quality is low (640 px, fast PatchMatch); --dense-quality medium|high|max for more
+#   default quality is superfast (320 px, fast PatchMatch); --dense-quality low|medium|high|max for more
 scripts/splat data/berlin_3_1_frames --iterations 2000   # quick splat check; viewer on :7007
 MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app   # :8080; Projects, Dense, Splat, Export tabs; View → Dense / splat
 ```
@@ -539,12 +539,13 @@ cameras.
 GUI), run in the CUDA container:
 `MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline PROJECT --stages dense [--mesh delaunay|poisson|both] [--dense-quality low|medium|high|max] [--dense-max-image-size N]`
 
-**Quality presets** (`dense.QUALITY`; the user wants the lowest quality by
-default, so the default is `low`):
+**Quality presets** (`dense.QUALITY`; the user wants the quickest dense by
+default, so the default is `superfast`):
 
 | Preset | Image size | PatchMatch | berlin_test, 20 views, stereo |
 |---|---|---|---|
-| **low** (default) | 640 px | `window_step 2`, `num_samples 7` | 39 s, 38.2k fused points |
+| **superfast** (default) | 320 px | `window_step 2`, `num_samples 7` | not measured (the user tests it) |
+| low | 640 px | `window_step 2`, `num_samples 7` | 39 s, 38.2k fused points |
 | medium | 1200 px | `num_samples 7` | |
 | high | full | `num_samples 7` | |
 | max | full | COLMAP defaults | 170 s at 640 px, 43.5k points |
@@ -850,7 +851,7 @@ Code layout:
       move the existing frustums (throttled to 4 Hz), and each round reloads
       the snapshot.
   - **Dense**: "Run dense (all)" plus one button per stage, with a Quality
-    picker (low default / medium / high / max) and a mesh-method picker. Each
+    picker (superfast default / low / medium / high / max) and a mesh-method picker. Each
     run is in a background thread.
   - **Splat**: method, iterations, disk cache, downsample factor, train, Stop.
   - **Export**: mesh and splat exports (see "Export" above), with

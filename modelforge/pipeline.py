@@ -224,7 +224,8 @@ def main():
     ap.add_argument("--mesh", default="delaunay", choices=dense.MESH_METHODS + ("both",),
                     help="dense meshing method (default delaunay: keeps open surfaces)")
     ap.add_argument("--dense-quality", default=dense.DEFAULT_QUALITY, choices=tuple(dense.QUALITY),
-                    help=f"dense speed/detail preset (default {dense.DEFAULT_QUALITY}: 640 px, fast PatchMatch); "
+                    help=f"dense speed/detail preset (default {dense.DEFAULT_QUALITY}: "
+                         f"{dense.QUALITY[dense.DEFAULT_QUALITY]['max_image_size']} px, fast PatchMatch); "
                          "max = COLMAP defaults at full resolution")
     ap.add_argument("--dense-max-image-size", type=int,
                     help="override the preset's image size for PatchMatch/fusion (-1 = full resolution)")

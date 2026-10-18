@@ -11,7 +11,7 @@ Everything stays in the refined world frame, i.e. ENU like transforms.json, so t
 mesh lines up with the cameras (and with the splat after export.splat_to_enu).
 Delaunay (visibility-based, keeps open surfaces) suits drone scenes better than
 Poisson, which closes the surface; it has no pycolmap binding, so it runs through
-the COLMAP CLI. QUALITY holds the speed/detail presets (default "low").
+the COLMAP CLI. QUALITY holds the speed/detail presets (default "superfast", 320 px).
 """
 
 import os
@@ -33,12 +33,13 @@ MESH_METHODS = ("delaunay", "poisson")
 #   num_samples 7               90 s   42.6k  (same accuracy against the SfM points)
 #   + window_step 2             39 s   38.2k  (same accuracy, ~12% fewer points)
 QUALITY = {
+    "superfast": {"max_image_size": 320, "window_step": 2, "num_samples": 7},
     "low": {"max_image_size": 640, "window_step": 2, "num_samples": 7},
     "medium": {"max_image_size": 1200, "num_samples": 7},
     "high": {"max_image_size": -1, "num_samples": 7},
     "max": {"max_image_size": -1},  # COLMAP defaults at full resolution
 }
-DEFAULT_QUALITY = "low"
+DEFAULT_QUALITY = "superfast"  # the user wants the quickest dense by default
 
 
 def workspace(project):

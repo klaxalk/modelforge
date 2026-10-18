@@ -26,8 +26,8 @@ from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 
-DENSE_QUALITY = {"low (640 px, fast)": "low", "medium (1200 px)": "medium", "high (full res)": "high",
-                 "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
+DENSE_QUALITY = {"superfast (320 px)": "superfast", "low (640 px, fast)": "low", "medium (1200 px)": "medium",
+                 "high (full res)": "high", "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
 DENSE_QUALITY_DEFAULT = next(k for k, v in DENSE_QUALITY.items() if v == dense.DEFAULT_QUALITY)
 
 STAGE_HINTS = {
@@ -273,8 +273,9 @@ class App:
             self.g_dense_quality = gui.add_dropdown(
                 "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
                 hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
-                     "stages run). low: 640 px, fast PatchMatch (default, minutes). medium: 1200 px. high: full "
-                     "resolution. max: COLMAP defaults at full resolution (hours for 300 images).")
+                     "stages run). superfast: 320 px, fast PatchMatch (default, the quickest, coarse mesh). low: "
+                     "640 px, fast PatchMatch. medium: 1200 px. high: full resolution. max: COLMAP defaults at full "
+                     "resolution (hours for 300 images).")
             self.g_mesh_method = gui.add_dropdown(
                 "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
                 hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
