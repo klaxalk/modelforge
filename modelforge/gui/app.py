@@ -851,6 +851,10 @@ class App:
                     sent.clear()
                 if now < hold_until:
                     continue
+                if ours:  # an echo, often of an older step: continue from the latest pose sent, never go back
+                    pos, center = sent[-1]
+                else:  # adopting the browser's camera (start, or after a drag): its late echoes are ours too
+                    sent.append((pos, center))
                 a = np.radians(float(self.g_orbit_speed.value)) * dt
                 c, s = np.cos(a), np.sin(a)
                 off = pos - center

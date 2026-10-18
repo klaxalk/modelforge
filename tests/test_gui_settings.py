@@ -84,3 +84,48 @@ def test_orbit_keeps_center_distance_and_height(tmp_path):
         assert abs(np.hypot(*(q - ctr)[:2]) - 20.0) < 1e-6 and not np.allclose(q, (3.0, 4.0, 20.0))
     finally:
         a.server.stop()
+
+
+def test_orbit_never_steps_back_with_lagging_echoes(tmp_path):
+    """A browser reports the camera a few updates late; the orbit must not restart from those."""
+    import contextlib
+    import time
+
+    import numpy as np
+
+    from modelforge.gui.app import App
+    root = tmp_path / "data"
+    proj = root / "p"
+    proj.mkdir(parents=True)
+    ingest.save_plan(str(proj), [], ingest.Settings())
+
+    class LaggingCamera:
+        def __init__(self):
+            self.history = [(10.0, 0.0, 5.0)]  # poses set by the server, oldest first
+            self.look_at = (0.0, 0.0, 0.0)
+
+        @property
+        def position(self):  # the browser's report: 3 updates behind
+            return self.history[max(0, len(self.history) - 4)]
+
+        @position.setter
+        def position(self, p):
+            self.history.append(tuple(p))
+
+    class Client:
+        client_id, camera = 9, LaggingCamera()
+
+        def atomic(self):
+            return contextlib.nullcontext()
+
+    a = App(str(proj), port=free_port(), root=str(root))
+    try:
+        c = Client()
+        a.g_orbit_speed.value = 30
+        a.toggle_orbit(c)
+        time.sleep(0.6)
+        a.toggle_orbit(c)
+        ang = np.unwrap([np.arctan2(p[1], p[0]) for p in c.camera.history])
+        assert len(ang) > 10 and np.all(np.diff(ang) > 0)  # every step forward
+    finally:
+        a.server.stop()

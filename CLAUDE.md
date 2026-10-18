@@ -829,7 +829,13 @@ Code layout:
       user asked.
     - A camera that matches none of the last 15 poses sent (echoes) counts
       as the user dragging; rotation then pauses until 0.6 s after the last
-      such change, so it doesn't fight the mouse. Layers: points, cameras with
+      such change, so it doesn't fight the mouse.
+    - The browser reports the camera a few updates late. On an echo the
+      orbit continues from the **latest** pose sent: restarting from the
+      echoed older pose made it jump back in time, as the user saw. A camera
+      it adopts (at start, after a drag) joins the sent list, so its late
+      echoes don't count as a drag (a 0.6 s stutter).
+    - Tested with a stand-in browser that lags 3 updates. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
     time, or source. Stats list the per-source offsets.
