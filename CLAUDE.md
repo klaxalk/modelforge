@@ -1017,6 +1017,10 @@ Code layout:
       `_tree_moves` maps folders too (a bag folder is a source path) and
       `update_references` rewrites any path-like string that moved.
       Deleting a used bag, or a folder holding one, is refused.
+    - A refused delete (clip, bag or folder used by a project, including the
+      open project's unsaved sources) opens a "Cannot delete" dialog naming
+      the projects and how to free it. Before, only the status line at the
+      top of the tab said so, and the user took it for a broken delete.
     - Download sends a bag folder as a `.zip` (stored, built in memory).
     - Add to open project only pairs bags with ROS 2 bag projects and clips
       with the others (also checked in `IngestPanel.add_source`).

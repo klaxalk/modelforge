@@ -199,6 +199,8 @@ def test_videos_tab(app, root):
     v.make_folder("empty")
     v.ask_delete(entry("empty"), Browser())
     v.ask_move(entry("a.MP4"), Browser())
+    v.ask_delete(entry("b.mp4"), Browser())  # used by site: the dialog explains, nothing is deleted
+    assert "used by site" in v.g_msg.content and os.path.exists(os.path.join(root, "videos", "b.mp4"))
 
 
 def test_move(root):

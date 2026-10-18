@@ -252,6 +252,24 @@ class VideosPanel:
     def ask_delete(self, e, client):
         if client is None:
             return
+        if e["kind"] != "srt":  # refused anyway: say why in the dialog, not only in the status line
+            users = sorted(set(self._users(e)))
+            p = os.path.realpath(e["path"])
+            if any(os.path.realpath(s.video) == p or os.path.realpath(s.video).startswith(p + os.sep)
+                   for s in self.app.ingest.sources):
+                users = sorted(set(users) | {os.path.basename(self.app.path)})
+            if users:
+                what = {"folder": "something in it is", "bag": "the bag is", "video": "the clip is"}[e["kind"]]
+                names = ", ".join(f"**{u}**" for u in users)
+                with client.gui.add_modal(f"Cannot delete {e['name']}") as m:
+                    client.gui.add_markdown(
+                        f"It cannot be deleted: {what} a source of the project(s) {names}.  \n"
+                        "Remove it from the sources first (open the project → Ingest tab → **Remove** on the "
+                        "source), or delete the project (Projects tab). Extracted images and results stay with "
+                        "the project; only re-extraction needs the source.")
+                    client.gui.add_button("OK").on_click(lambda _: m.close())
+                self.g_msg.content = f"❌ `{e['name']}` is used by {', '.join(users)}: not deleted"
+                return
         if e["kind"] == "folder":  # built per kind: only folders carry a clip count
             what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips / bags)"
         elif e["kind"] == "bag":
