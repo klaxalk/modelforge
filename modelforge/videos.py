@@ -285,6 +285,21 @@ def rename(root, path, new_name):
     return dst
 
 
+def remove_from_projects(root, path):
+    """Drop every project source that is path (a clip or bag) or lies inside it (a folder) from the
+    projects' ingest.json. Extracted images and results stay. Returns the projects changed."""
+    p = os.path.realpath(path)
+    changed = []
+    for proj in projects.list_projects(root):
+        sources, settings = ingest.load_plan(proj)
+        keep = [x for x in sources if os.path.realpath(x.video) != p
+                and not os.path.realpath(x.video).startswith(p + os.sep)]
+        if len(keep) != len(sources):
+            ingest.save_plan(proj, keep, settings)
+            changed.append(os.path.basename(proj))
+    return changed
+
+
 def _srt(p):
     """The .SRT sidecar of a video (bags have none)."""
     return ingest.find_srt(p) if p.lower().endswith(ingest.VIDEO_EXTS) else None

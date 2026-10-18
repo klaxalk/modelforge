@@ -201,6 +201,15 @@ def test_videos_tab(app, root):
     v.ask_move(entry("a.MP4"), Browser())
     v.ask_delete(entry("b.mp4"), Browser())  # used by site: the dialog explains, nothing is deleted
     assert "used by site" in v.g_msg.content and os.path.exists(os.path.join(root, "videos", "b.mp4"))
+    v.remove_and_delete(entry("b.mp4"))  # the dialog's "Remove from sources and delete"
+    assert not os.path.exists(os.path.join(root, "videos", "b.mp4")) and ingest.load_plan(os.path.join(root, "site"))[0] == []
+    assert "removed from the sources of site" in v.g_msg.content, v.g_msg.content
+    v.current = entry("a.MP4")
+    v.add_to_project()  # now a source of the open project, not saved yet
+    v.remove_and_delete(entry("a.MP4"))
+    assert not os.path.exists(os.path.join(root, "videos", "a.MP4")) and not os.path.exists(os.path.join(root, "videos",
+                                                                                                         "a.SRT"))
+    assert not app.ingest.sources and ingest.load_plan(app.path)[0] == []
 
 
 def test_move(root):

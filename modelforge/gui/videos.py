@@ -261,14 +261,18 @@ class VideosPanel:
             if users:
                 what = {"folder": "something in it is", "bag": "the bag is", "video": "the clip is"}[e["kind"]]
                 names = ", ".join(f"**{u}**" for u in users)
-                with client.gui.add_modal(f"Cannot delete {e['name']}") as m:
+                with client.gui.add_modal(f"{e['name']} is in use") as m:
                     client.gui.add_markdown(
-                        f"It cannot be deleted: {what} a source of the project(s) {names}.  \n"
-                        "Remove it from the sources first (open the project → Ingest tab → **Remove** on the "
-                        "source), or delete the project (Projects tab). Extracted images and results stay with "
-                        "the project; only re-extraction needs the source.")
-                    client.gui.add_button("OK").on_click(lambda _: m.close())
-                self.g_msg.content = f"❌ `{e['name']}` is used by {', '.join(users)}: not deleted"
+                        f"{what[0].upper() + what[1:]} a source of the project(s) {names}.  \n"
+                        "**Remove from sources and delete** drops it from those projects' sources (their "
+                        "extracted images and results stay; only re-extraction needs the source), then deletes "
+                        "it. There is no undo.  \n"
+                        "Or remove the source yourself (open the project → Ingest tab → **Remove**), or delete "
+                        "the project (Projects tab).")
+                    row = client.gui.add_button_group("", options=("Remove from sources and delete", "Cancel"))
+                row.on_click(lambda ev: (m.close(), self.remove_and_delete(e) if ev.target.value != "Cancel"
+                                         else None))
+                self.g_msg.content = f"⚪ `{e['name']}` is used by {', '.join(users)}"
                 return
         if e["kind"] == "folder":  # built per kind: only folders carry a clip count
             what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips / bags)"
@@ -383,6 +387,31 @@ class VideosPanel:
             self.g_msg.content = f"❌ {ex}"
         self._refresh()
         self.app.ingest.rescan()
+
+    def remove_and_delete(self, e):
+        """Drop the entry from every project's sources (the open project's Ingest list too), then delete it."""
+        if self._busy():
+            return
+        p = os.path.realpath(e["path"])
+        ing = self.app.ingest
+        keep = [x for x in ing.sources if os.path.realpath(x.video) != p
+                and not os.path.realpath(x.video).startswith(p + os.sep)]
+        changed = []
+        if len(keep) != len(ing.sources):  # the open project, maybe with unsaved edits
+            from modelforge.dji import ingest
+            ing.sources[:] = keep
+            ingest.save_plan(self.app.path, ing.sources, ing.settings)
+            ing._rebuild_sources()
+            ing.request_plan()
+            changed.append(os.path.basename(self.app.path))
+        try:
+            changed += [c for c in videos.remove_from_projects(self.app.root, e["path"]) if c not in changed]
+        except (OSError, ValueError) as ex:
+            self.g_msg.content = f"❌ {ex}"
+            return
+        self.delete_entry(e)
+        if changed and self.g_msg.content.startswith("✅"):
+            self.g_msg.content += f" · removed from the sources of {', '.join(sorted(changed))}"
 
     def add_to_project(self):
         e = self.current
