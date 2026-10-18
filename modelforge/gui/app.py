@@ -521,7 +521,9 @@ class App:
         self.server.gui.main_panel.dock_right()
         self.log_panel.float(x=8, y=-8, width=900, height=260)  # negative y: measured from the bottom
         self.log_panel.minimize()  # folded by default; one click opens it
-        self.quick.float(x=8, y=8, width=470, height=96)
+        # one row: viser gives every button of a group the same width and wraps when they do not fit (the
+        # 7th, Fly, wrapped at 470 px and was stretched across a row of its own); ~78 px per button
+        self.quick.float(x=8, y=8, width=24 + 78 * len(self._quick_items()), height=96)
 
     # ------------------------------------------------------------- settings
     def _settings_path(self):
