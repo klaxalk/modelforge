@@ -817,7 +817,18 @@ Code layout:
     - `App._unchanged` remembers each layer's inputs (file + mtime +
       options), so these refreshes don't re-send unchanged layers (the
       splat is tens of MB).
-    - Each layer has its own status line (`_dense_status`). Layers: points, cameras with
+    - Each layer has its own status line (`_dense_status`).
+  - **Orbit** (View tab, the user asked): **Start / Stop orbit** + speed
+    (°/s).
+    - `App._orbit` rotates the pressing client's camera about +z through its
+      look-at point at 30 Hz (`client.atomic()` sets position + look_at
+      together). One stop event per client.
+    - Each tick starts from the browser's *current* camera, so mouse zoom /
+      tilt / pan stick and the orbit continues from the new view, as the
+      user asked.
+    - A camera that matches none of the last 15 poses sent (echoes) counts
+      as the user dragging; rotation then pauses until 0.6 s after the last
+      such change, so it doesn't fight the mouse. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
     time, or source. Stats list the per-source offsets.

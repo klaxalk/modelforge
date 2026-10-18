@@ -127,6 +127,7 @@ class App:
         self._run_id = 0
         self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
         self._token = None  # jobs.Token of the running job (the Stop button cancels it)
+        self._orbits = {}  # client id -> threading.Event that stops its orbit
         self._build_gui()
         if self.project:
             names = self.project.snapshot_names()
@@ -212,6 +213,16 @@ class App:
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
+            with gui.add_folder("Orbit"):
+                self.g_orbit = gui.add_button(
+                    "Start orbit", icon=viser.Icon.ROTATE_360,
+                    hint="Circle the camera around the point you are looking at, keeping your distance and "
+                         "height; press again to stop. You can still zoom, tilt and pan with the mouse: the orbit "
+                         "pauses while you drag and continues from the new view. Only moves the view of the "
+                         "browser that pressed it.")
+                self.g_orbit.on_click(lambda e: self.toggle_orbit(e.client))
+                self.g_orbit_speed = gui.add_slider("Speed (°/s)", min=1, max=90, step=1, initial_value=12,
+                                                    hint="Orbit speed; can be changed while orbiting.")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
             for h in (self.g_cams, self.g_thumbs, self.g_priors, self.g_scale):
@@ -806,6 +817,53 @@ class App:
         self._on_log("--- stop requested")
         for t in tokens:
             threading.Thread(target=t.cancel, daemon=True).start()
+
+    def toggle_orbit(self, client):
+        """Start / stop orbiting this client's camera around its current look-at point (about +z)."""
+        if client is None:
+            return
+        stop = self._orbits.pop(client.client_id, None)
+        if stop is not None:
+            stop.set()
+        else:
+            stop = threading.Event()
+            self._orbits[client.client_id] = stop
+            threading.Thread(target=self._orbit, args=(client, stop), daemon=True).start()
+        self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+
+    def _orbit(self, client, stop, rate_hz=30.0, hold_s=0.6):
+        """Each tick rotates the browser's *current* camera about its look-at point (+z axis), so mouse
+        zoom / tilt / pan stick and the orbit continues from there. While the user drags (the camera
+        differs from every pose sent recently) rotation pauses, resuming hold_s after the last change."""
+        cam = client.camera
+        sent = []  # recent (position, look_at) we set: the browser may still echo them back
+        hold_until, t_prev = 0.0, time.time()
+        try:
+            while not stop.wait(1.0 / rate_hz):  # no step after Stop
+                now = time.time()
+                dt, t_prev = now - t_prev, now
+                pos, center = np.array(cam.position, float), np.array(cam.look_at, float)
+                eps = 1e-3 * max(np.linalg.norm(pos - center), 1e-3)
+                ours = any(np.linalg.norm(pos - p) < eps and np.linalg.norm(center - c) < eps for p, c in sent)
+                if sent and not ours:  # moved by the mouse
+                    hold_until = now + hold_s
+                    sent.clear()
+                if now < hold_until:
+                    continue
+                a = np.radians(float(self.g_orbit_speed.value)) * dt
+                c, s = np.cos(a), np.sin(a)
+                off = pos - center
+                new = center + np.array([c * off[0] - s * off[1], s * off[0] + c * off[1], off[2]])
+                with client.atomic():
+                    cam.position = new
+                    cam.look_at = center
+                sent = (sent + [(new, center)])[-15:]
+        except Exception:  # the browser went away
+            pass
+        finally:
+            if self._orbits.get(client.client_id) is stop:
+                self._orbits.pop(client.client_id, None)
+                self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
 
     def skip_refine(self):
         """Skip button: end the running BA where it is and continue after refine."""
