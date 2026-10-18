@@ -58,6 +58,8 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
     else:
         rec.export_PLY(os.path.join(project, ply_name))
     out = {**intr, "w": int(cam.width), "h": int(cam.height), "frames": frames, "ply_file_path": ply_name}
+    if os.path.exists(os.path.join(project, lidar_mod.CLOUD)):  # for splatfacto-lidar's depth loss (modelforge/nsplugin)
+        out["lidar_ply_file_path"] = lidar_mod.CLOUD.replace(os.sep, "/")
     extra = {**(extra or {}), **({"lidar_points_in_ply": n_lidar} if n_lidar else {})}
     if extra:
         out["modelforge"] = extra

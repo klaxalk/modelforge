@@ -231,6 +231,9 @@ def make_plan(sources, settings):
         if mode == "distance" and valids[i].any():
             v = valids[i]
             rep["path_m"] = float(np.nansum(np.linalg.norm(np.diff(c.centers[v], axis=0), axis=1)))
+            ax = c.axes[v]  # the GUI's summary shows path + view rotation, as for DJI
+            rep["rotation_deg"] = float(np.nansum(np.degrees(np.arccos(np.clip(
+                np.sum(ax[1:] * ax[:-1], axis=1), -1.0, 1.0)))))
         plans.append(SourcePlan(k, s, c, prefixes[s.video], valids[i], curves[i], windows,
                                 {**rep, "num_images": len(windows)}, 0.0, (c.wall_start or 0.0) - t_first))
     sizes = {(c.width, c.height) for c in clips.values()}
@@ -238,7 +241,9 @@ def make_plan(sources, settings):
         warnings.append(f"sources differ in resolution {sorted(sizes)}: one project = one camera")
     report = {"mode": mode, "unit": "m" if mode == "distance" else "s", "rot_weight_m_per_deg": w,
               "total": round(total, 3), "spacing": round(spacing, 4), "num_images": sum(len(p.windows) for p in plans),
-              "window": settings.window, "sources": len(plans)}
+              "window": settings.window, "sources": len(plans),
+              "path_m": round(sum(p.report.get("path_m", 0.0) for p in plans), 1),
+              "rotation_deg": round(sum(p.report.get("rotation_deg", 0.0) for p in plans), 1)}
     return Plan(plans, report, warnings)
 
 

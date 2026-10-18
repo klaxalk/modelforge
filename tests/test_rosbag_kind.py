@@ -178,3 +178,42 @@ def test_rosbag_project_through_the_gui(tmp_path):
         assert d["export"]["lidar_points"] > 1000  # the splat starts from the LiDAR points too
     finally:
         app.server.stop()
+
+
+def test_splat_lidar_command():
+    from modelforge import splat
+    cmd = splat.train_command("p", "splatfacto-big", 100, lidar_depth=0.3)
+    assert cmd[1] == "splatfacto-big-lidar" and cmd[cmd.index("--method-name") + 1] == "splatfacto-big-lidar"
+    assert cmd[cmd.index("--pipeline.model.lidar-depth-lambda") + 1] == "0.3" and cmd[-3] == "lidar-data"
+    plain = splat.train_command("p", "splatfacto")
+    assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
+    assert splat.parse_lidar("[lidar] step 1500: depth error median 0.64% p90 2.57% within 5% 95.3%") == {
+        "step": 1500, "median_pct": 0.64, "p90_pct": 2.57, "within_5pct": 95.3}
+
+
+@pytest.mark.skipif(not os.path.exists("/opt/nerfstudio/bin/python"), reason="needs nerfstudio's venv (CUDA image)")
+def test_lidar_depth_image_in_nerfstudio_venv():
+    """The plugin's per-view LiDAR depth: nearest return per pixel, returns seen through the gaps of a
+    nearer surface dropped; and the plugin's methods register with ns-train."""
+    import subprocess
+    from modelforge import splat
+    code = """
+import torch
+from mf_splatfacto_lidar import lidar_depth_image
+g = torch.stack(torch.meshgrid(torch.linspace(-1, 1, 21), torch.linspace(-1, 1, 21), indexing="ij"), -1).reshape(-1, 2)
+front = torch.cat([g, torch.full((len(g), 1), 5.0)], 1)                    # sparse wall at z = 5
+back = torch.cat([g * 6 + 0.05, torch.full((len(g), 1), 10.0)], 1)          # far wall, peeking through
+K = torch.tensor([[50.0, 0, 50], [0, 50.0, 50], [0, 0, 1]])
+d = lidar_depth_image(torch.cat([front, back]), torch.eye(4), K, 100, 100, window=5, tol=0.05)
+v = d[d > 0]
+centre = d[42:58, 42:58][d[42:58, 42:58] > 0]  # inside the near wall (u, v in 40..60)
+assert d.shape == (100, 100, 1) and torch.allclose(centre, torch.tensor(5.0)), centre.unique()
+assert (v == 10.0).any()  # the far wall outside the near one stays
+print("ok")
+"""
+    r = subprocess.run([os.path.join(splat.NS_BIN, "python"), "-c", code], env=splat._env(),
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
+    r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "--help"], env=splat._env(),
+                       capture_output=True, text=True, timeout=300)
+    assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]

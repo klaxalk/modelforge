@@ -14,10 +14,13 @@ Live preview: with preview_every=N, ns-train saves a checkpoint every N steps; a
 each new one (export/ckpt_dump.py, in nerfstudio's venv) to PROJECT/splat/live.npz and calls
 on_snapshot(step, npz, dataparser_transforms.json). The GUI shows it in the View tab.
 Stats go to report.json["splat"]. The GUI Splat tab and scripts/splat both call `run`.
+LiDAR depth supervision (lidar_depth=weight, projects with lidar/cloud.ply): trains splatfacto-lidar /
+splatfacto-big-lidar from modelforge/nsplugin (registered through nerfstudio's environment variables,
+nothing installed) with the lidar-data dataparser; its "[lidar] ..." depth error lines go to the report.
 
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
-        [--cache disk|cpu|gpu] [--downscale 2] [extra ns-train args]
+        [--cache disk|cpu|gpu] [--downscale 2] [--lidar-depth 0.2] [extra ns-train args]
 """
 
 import argparse
@@ -34,6 +37,9 @@ from modelforge import jobs
 
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
+PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nsplugin")
+DEFAULT_LIDAR_DEPTH = 0.2  # weight of the LiDAR depth loss (relative depth error, see the plugin)
+_LIDAR = re.compile(r"\[lidar\] step (\d+): depth error median ([\d.]+)% p90 ([\d.]+)% within 5% ([\d.]+)%")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
 CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps memory use flat
 VIEWER_PORT = 7007
@@ -64,6 +70,10 @@ def _env():
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     for k in ("VIRTUAL_ENV", "PYTHONPATH"):  # keep /opt/venv and the repo out of its imports
         env.pop(k, None)
+    env["PYTHONPATH"] = PLUGIN_DIR  # only the nerfstudio plugin (splatfacto-lidar)
+    env["NERFSTUDIO_METHOD_CONFIGS"] = ("splatfacto-lidar=mf_splatfacto_lidar:splatfacto_lidar,"
+                                        "splatfacto-big-lidar=mf_splatfacto_lidar:splatfacto_big_lidar")
+    env["NERFSTUDIO_DATAPARSER_CONFIGS"] = "lidar-data=mf_lidar_dataparser:lidar_dataparser"
     return env
 
 
@@ -75,26 +85,42 @@ def _stream(cmd, on_line, job):
     job.run(cmd, line, env=_env())  # Cancelled when stopped, RuntimeError on failure
 
 
+def ns_method(method, lidar_depth=None):
+    """nerfstudio method name: the -lidar variant when LiDAR depth is on (a weight, also 0)."""
+    return method if lidar_depth is None else method + "-lidar"
+
+
+def has_lidar(project):
+    import json
+    path = os.path.join(project, "transforms.json")
+    return os.path.exists(path) and "lidar_ply_file_path" in json.load(open(path))
+
+
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
-                  steps_per_save=None):
+                  steps_per_save=None, lidar_depth=None):
+    """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
+    method of modelforge/nsplugin with the lidar-data dataparser."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
         raise ValueError(f"cache must be one of {CACHE_MODES}")
-    cmd = [os.path.join(NS_BIN, "ns-train"), method, "--data", project,
+    cmd = [os.path.join(NS_BIN, "ns-train"), ns_method(method, lidar_depth), "--data", project,
            "--output-dir", os.path.join(project, "nerfstudio"),
            "--viewer.quit-on-train-completion", "True", "--viewer.websocket-port", str(VIEWER_PORT),
            "--pipeline.datamanager.cache-images", cache,
            # splatfacto-big (and -mcmc) keep method_name "splatfacto", so their runs would land in
            # nerfstudio/*/splatfacto/ where the preview watcher and latest_config don't look
-           "--method-name", method]
+           "--method-name", ns_method(method, lidar_depth)]
     if iterations:
         cmd += ["--max-num-iterations", str(int(iterations))]
     if steps_per_save:
         cmd += ["--steps-per-save", str(int(steps_per_save))]
+    if lidar_depth is not None:
+        cmd += ["--pipeline.model.lidar-depth-lambda", str(float(lidar_depth))]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
     # auto-picking a leftover images_2/ for images wider than 1600 px
-    return cmd + list(extra) + ["nerfstudio-data", "--downscale-factor", str(int(downscale))]
+    parser = "nerfstudio-data" if lidar_depth is None else "lidar-data"
+    return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))]
 
 
 def prepare_downscaled(project, factor, on_line=print):
@@ -122,6 +148,15 @@ def prepare_downscaled(project, factor, on_line=print):
             made += 1
     on_line(f"splat: images_{factor}/ ready ({made} of {len(frames)} images written)")
     return out
+
+
+def parse_lidar(line):
+    """{"step", "median_pct", "p90_pct", "within_5pct"} from the plugin's "[lidar] step ..." line."""
+    m = _LIDAR.search(line)
+    if not m:
+        return None
+    return {"step": int(m.group(1)), "median_pct": float(m.group(2)), "p90_pct": float(m.group(3)),
+            "within_5pct": float(m.group(4))}
 
 
 def parse_progress(line):
@@ -178,8 +213,9 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
-        cache="disk", downscale=1, preview_every=None, on_snapshot=None):
-    """Train, export and convert to ENU. Returns stats (also written to report.json["splat"])."""
+        cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None):
+    """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
+    lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     reason = available()
@@ -187,29 +223,38 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         raise RuntimeError(reason)
     if not os.path.exists(os.path.join(project, "transforms.json")):
         raise RuntimeError("transforms.json missing: run the SfM export stage first")
+    if lidar_depth is not None and not has_lidar(project):
+        raise RuntimeError("LiDAR depth needs LiDAR points (a ROS 2 bag project with point cloud topics); "
+                           "re-run the export stage after extraction")
     job = job or Job()
     t0 = time.time()
+    lidar_log = []
+    method_dir = ns_method(method, lidar_depth)
 
     def line(text):
         on_line(text)
         p = parse_progress(text)
         if p and on_progress:
             on_progress(*p)
+        q = parse_lidar(text)
+        if q:
+            lidar_log.append(q)
 
     prepare_downscaled(project, int(downscale), on_line)
-    on_line(f"splat: training {method}, cache {cache}, downscale {downscale} "
+    on_line(f"splat: training {method_dir}, cache {cache}, downscale {downscale}"
+            + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "") + " "
             f"(viewer on http://localhost:{VIEWER_PORT})")
     stop = threading.Event()
     if on_snapshot:
-        threading.Thread(target=_watch_checkpoints, args=(project, method, t0, on_snapshot, stop, on_line),
+        threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
                          daemon=True).start()
     try:
         _stream(train_command(project, method, iterations, extra, cache, downscale,
-                              preview_every if on_snapshot else None), line, job)
+                              preview_every if on_snapshot else None, lidar_depth), line, job)
     finally:
         stop.set()
     t_train = time.time() - t0
-    config = latest_config(project, method)
+    config = latest_config(project, method_dir)
     out_dir = os.path.join(project, "splat")
     on_line(f"splat: exporting {config}")
     _stream([os.path.join(NS_BIN, "ns-export"), "gaussian-splat", "--load-config", config, "--output-dir", out_dir],
@@ -218,12 +263,16 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     enu = os.path.join(out_dir, "splat_enu.ply")
     splat_to_enu.convert(os.path.join(out_dir, "splat.ply"),
                          os.path.join(os.path.dirname(config), "dataparser_transforms.json"), enu)
-    stats = {"method": method, "iterations": iterations or DEFAULT_ITERATIONS, "cache": cache,
+    stats = {"method": method_dir, "iterations": iterations or DEFAULT_ITERATIONS, "cache": cache,
              "downscale": int(downscale), "config": config, "splat": enu,
              "num_gaussians": _num_vertices(enu), "train_seconds": round(t_train, 1),
              "seconds": round(time.time() - t0, 1)}
+    if lidar_depth is not None:
+        stats["lidar_depth"] = {"weight": float(lidar_depth), "error": lidar_log[-1] if lidar_log else None,
+                                "history": lidar_log}
     Report(project).set("splat", stats)
-    on_line(f"splat: {stats}")
+    on_line(f"splat: {dict(stats, lidar_depth={k: v for k, v in stats['lidar_depth'].items() if k != 'history'})}"
+            if "lidar_depth" in stats else f"splat: {stats}")
     return stats
 
 
@@ -240,10 +289,13 @@ def main():
     ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
                     help="where training images are kept (default disk: low memory, for large datasets)")
     ap.add_argument("--downscale", type=int, default=1, help="train on images downscaled by this factor (default 1)")
+    ap.add_argument("--lidar-depth", type=float, metavar="W",
+                    help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()
     try:
         run(os.path.abspath(args.project), args.method, args.iterations, extra,
-            on_line=lambda m: print(m, flush=True), cache=args.cache, downscale=args.downscale)
+            on_line=lambda m: print(m, flush=True), cache=args.cache, downscale=args.downscale,
+            lidar_depth=args.lidar_depth)
     except (RuntimeError, ValueError, Stopped) as e:
         sys.exit(f"error: {e}")
 

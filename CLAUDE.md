@@ -96,6 +96,8 @@ Tested only partially:
   flights.**
 
 Open items, in priority order:
+0. **User TODO (2026-10-18):** an option to hide the blue spheres connected
+   by the white trajectory in the 3D view, also as a quick-bar toggle.
 1. Run the full clip (all 300 images) through dense and splat (quality
    `low`, then higher if wanted).
 2. Test multi-video ingest on real separate flights of one site.
@@ -202,6 +204,7 @@ modelforge/
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
+│   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss)
 │   ├── projects.py     # project folders: list / create / status / clean
 │   ├── jobs.py         # stopping jobs: Token (check / cancel / run killable subprocesses)
 │   ├── videos.py       # shared video library: list / probe / usage / upload / rename / delete (Videos tab)
@@ -442,16 +445,54 @@ and the splat.
   - Upload is hidden (bags are folders).
 - Tests: `tests/test_rosbag_kind.py` (TF, a tiny in-test bag, the GUI flow on
   the berlin-derived bag).
-- **Splat constraints (the user asked).** LiDAR initialisation is done.
-  Depth supervision is the next step:
-  - render depth in splatfacto and add an L1 loss to LiDAR depth maps
-    (LiDAR projected per training image, written as `depth_file_path` in
-    transforms.json);
-  - nerfstudio 1.1.5's splatfacto has no depth loss, so this needs a small
-    method plugin ("splatfacto-lidar", entry point `nerfstudio.method_configs`)
-    installed into `/opt/nerfstudio`: a SplatfactoModel subclass with the
-    extra loss and a datamanager that loads the depth images;
-  - it is expected to help most on poorly textured surfaces.
+- **Splat depth supervision** (the user asked; 2026-10-18): `splatfacto-lidar` /
+  `splatfacto-big-lidar`, a nerfstudio plugin in `modelforge/nsplugin/`.
+  - **Nothing installed.** `splat._env` puts `modelforge/nsplugin` on
+    PYTHONPATH and registers the methods and the `lidar-data` dataparser
+    through `NERFSTUDIO_METHOD_CONFIGS` / `NERFSTUDIO_DATAPARSER_CONFIGS`. So
+    plugin edits need no image rebuild.
+    - The dataparser is its own module (`mf_lidar_dataparser.py`):
+      nerfstudio discovers dataparsers while `base_datamanager` is half
+      imported, so importing the model there is a circular import.
+  - **Dataparser:** `nerfstudio-data` + transforms.json
+    `lidar_ply_file_path` (written by the export when `lidar/cloud.ply`
+    exists), mapped like `ply_file_path` into `metadata["lidar_xyz"]`.
+  - **Model:** after splatfacto's render (depth on during training), the
+    LiDAR points are projected into the training camera: the undistorted one
+    the datamanager hands over, at the current training resolution, with the
+    optimized pose.
+    - Per pixel the nearest return is kept, then dropped if it lies more than
+      5% behind the nearest return in a 5 px window. This removes returns
+      seen through the gaps of a sparse cloud.
+    - Loss: weight × mean(min(|D − z| / z, 1)), with D = expected depth.
+      Relative, so near and far count alike; the clamp bounds wrong returns.
+    - Why projecting on the fly instead of nerfstudio's `depth_file_path`:
+      nerfstudio only *crops* depth images when it undistorts, so they would
+      misalign; on-the-fly projection is exact, follows the resolution
+      schedule and the camera optimizer, and writes no files.
+    - The cloud is a non-persistent buffer, so checkpoints stay splatfacto's
+      (live preview, ns-export).
+  - **Report:** every 500 steps the plugin prints `[lidar] step N: depth error
+    median … p90 … within 5% …`. `splat.run` stores it in
+    `report.json["splat"]["lidar_depth"]`; the History line shows it.
+  - **Use:** Splat tab "LiDAR depth weight" (ROS 2 bag projects, default
+    0.2, 0 = plain splatfacto), or `scripts/splat PROJECT --lidar-depth 0.2`.
+    Weight 0 through the CLI still trains the -lidar method, which then only
+    reports the error.
+  - **Measured** on `data/rosbag_exp` (40 images, 3000 steps, both starting
+    from the LiDAR-initialized cloud):
+
+    | | depth error median / p90 | within 5% | eval PSNR / SSIM / LPIPS | train |
+    |---|---|---|---|---|
+    | weight 0 (report only) | 4.4% / 82% | 53% | 19.88 / 0.440 / 0.380 | 87 s |
+    | **weight 0.2** | **0.58% / 2.4%** | **96%** | **20.26 / 0.452 / 0.372** | 115 s |
+
+    The test bag's LiDAR comes from the MVS fused cloud, so it agrees with
+    the images by construction. Real LiDAR (noise, motion, other time) is
+    untested.
+  - Tests: `test_splat_lidar_command`,
+    `test_lidar_depth_image_in_nerfstudio_venv` (occlusion filter, method
+    registration).
 - Not done yet:
   - per-point LiDAR timestamps (motion distortion within a scan);
   - LiDAR as a BA constraint (point-to-plane residuals on SfM points);
@@ -1100,7 +1141,8 @@ Code layout:
   - **Dense**: "Run dense (all)" plus one button per stage, with a Quality
     picker (superfast default / low / medium / high / max) and a mesh-method picker. Each
     run is in a background thread.
-  - **Splat**: method, iterations, disk cache, downsample factor, train, Stop.
+  - **Splat**: method, iterations, disk cache, downsample factor, LiDAR start +
+    LiDAR depth weight (rosbag), train, Stop.
   - **Export**: mesh and splat exports (see "Export" above), with
     `export/` status.
 

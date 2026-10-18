@@ -367,6 +367,13 @@ class App:
                 hint="ROS 2 bag projects: the splat's initial cloud (sparse_pc.ply) gets the LiDAR points, coloured "
                      "from the images, besides the SfM points, so Gaussians start on the true surfaces even where "
                      "the images lack texture. Re-exports the dataset before training (seconds).")
+            self.g_splat_depth = gui.add_number(
+                "LiDAR depth weight", initial_value=splat.DEFAULT_LIDAR_DEPTH, min=0.0, max=10.0, step=0.05,
+                hint="ROS 2 bag projects: weight of the LiDAR depth loss (splatfacto-lidar). Every training step "
+                     "projects the LiDAR points into the training image and penalizes the relative difference "
+                     "between the splat's rendered depth and the LiDAR depth, so Gaussians stay on the measured "
+                     "surfaces, also where the images lack texture. 0 = off (plain splatfacto). The depth error "
+                     "is reported in the log and History.")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -486,7 +493,8 @@ class App:
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = not video
         self.g_mapper.visible = video
-        self.g_dense_lidar.visible = self.g_splat_lidar.visible = self._kind() == "rosbag"
+        self.g_dense_lidar.visible = self.g_splat_lidar.visible = self.g_splat_depth.visible = \
+            self._kind() == "rosbag"
         self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
         self.g_sparse_md.content = (
             "Incremental SfM from the images alone (video without metadata): features → pairs → match → "
@@ -1061,6 +1069,8 @@ class App:
         try:
             if self._kind() == "rosbag":  # the initial cloud with or without the LiDAR points
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
+            weight = float(self.g_splat_depth.value)
+            lidar_depth = weight if self._kind() == "rosbag" and weight > 0 and splat.has_lidar(project) else None
             live = self.g_splat_live.value
             if live:  # the live layer stands in for the previous result while training
                 self.server.scene.remove_by_name("/dense/splat")
@@ -1072,7 +1082,7 @@ class App:
             splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
                       job=self._token, cache="disk" if self.g_splat_disk.value else "gpu",
                       downscale=int(self.g_splat_down.value), preview_every=int(self.g_splat_every.value),
-                      on_snapshot=self._on_splat_snapshot if live else None)
+                      on_snapshot=self._on_splat_snapshot if live else None, lidar_depth=lidar_depth)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         finally:
             self._splat_live_on = False
@@ -1163,8 +1173,11 @@ class App:
                 return f"{r.get('points', r)}"
             if st == "splat":
                 r = rep["splat"]
+                err = (r.get("lidar_depth") or {}).get("error")
                 return (f"{r['num_gaussians']:,} gaussians, {r['method']} {r['iterations']:,} it, "
-                        f"training {_fmt_s(r['train_seconds'])}")
+                        f"training {_fmt_s(r['train_seconds'])}"
+                        + (f", LiDAR depth error median {err['median_pct']:.1f} % / p90 {err['p90_pct']:.1f} %"
+                           if err else ""))
         except (KeyError, TypeError):
             pass
         text = str(r)
