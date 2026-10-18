@@ -1,11 +1,11 @@
 """The video library: DJI clips (+ .SRT sidecars) under the data root, shared by all projects.
 
-Videos are found anywhere under the root except inside project folders (ingest.find_videos);
-browser uploads go to ROOT/videos/. A clip is "used" by every project whose ingest.json lists
-it as a source; renaming or deleting a used clip is refused, so no plan points at a missing file.
-Renames and deletes move the .SRT sidecar along with the video.
+The library is ROOT/videos/ (projects live next to it in ROOT, so names never clash); the Ingest tab
+still finds clips anywhere under ROOT outside project folders (ingest.find_videos). A clip is "used"
+by every project whose ingest.json lists it as a source: renames and moves rewrite those projects'
+paths (update_references), deleting a used clip is refused. The .SRT sidecar follows its video.
 
-The GUI Videos tab is a file manager over the root: folders (create / delete), videos (upload,
+The GUI Videos tab is a file manager over ROOT/videos: folders (create / delete), videos (upload,
 rename, delete, download) and stray .SRT files. Project folders and hidden files are not part of
 the library and are never listed, entered or deleted here (the Projects tab handles projects).
 """
@@ -19,7 +19,7 @@ import subprocess
 from modelforge import projects
 from modelforge.dji import ingest
 
-LIBRARY_DIR = "videos"
+LIBRARY_DIR = projects.LIBRARY_DIR  # ROOT/videos: the library; projects live next to it in ROOT
 UPLOAD_EXTS = tuple(ingest.VIDEO_EXTS) + (".srt",)
 _probe_cache = {}
 
@@ -112,8 +112,8 @@ def safe_name(filename):
     return name
 
 
-def save_upload(root, filename, data, overwrite=False, rel_dir=LIBRARY_DIR):
-    """A browser-uploaded video or .SRT -> ROOT/rel_dir/<name> (via a temp file)."""
+def save_upload(root, filename, data, overwrite=False, rel_dir=""):
+    """A browser-uploaded video or .SRT -> ROOT/videos/rel_dir/<name> (via a temp file)."""
     name = safe_name(filename)
     if not name.lower().endswith(UPLOAD_EXTS):
         raise ValueError(f"not a video or .SRT file: {name} (allowed: {', '.join(UPLOAD_EXTS)})")
@@ -162,10 +162,17 @@ def delete(root, path):
 FOLDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.()-]{0,63}$")
 
 
+def _lib(root):
+    """The library folder ROOT/videos (absolute, created if missing): the Videos tab's root."""
+    d = os.path.realpath(library_dir(root))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def resolve_dir(root, rel="", create=False):
-    """Absolute library folder ROOT/rel; ValueError if it leaves the root, is hidden or is (inside) a
-    project folder. create: make it if missing (uploads into ROOT/videos)."""
-    base = os.path.realpath(root)
+    """Absolute library folder ROOT/videos/rel; ValueError if it leaves the library, is hidden or is
+    (inside) a project folder. create: make it if missing."""
+    base = _lib(root)
     path = os.path.realpath(os.path.join(base, rel))
     if path != base and not path.startswith(base + os.sep):
         raise ValueError(f"outside the library: {rel}")
@@ -200,10 +207,10 @@ def listdir(root, rel="", with_probe=True):
             if projects.is_project(p):
                 continue
             vids = ingest.find_videos(p)
-            out["folders"].append({"name": n, "path": p, "rel": os.path.relpath(p, os.path.realpath(root)),
+            out["folders"].append({"name": n, "path": p, "rel": os.path.relpath(p, _lib(root)),
                                    "videos": len(vids), "bytes": sum(os.path.getsize(v) for v in vids)})
         elif n.lower().endswith(ingest.VIDEO_EXTS):
-            e = {"path": p, "name": n, "rel": os.path.relpath(p, os.path.realpath(root)),
+            e = {"path": p, "name": n, "rel": os.path.relpath(p, _lib(root)),
                  "bytes": os.path.getsize(p), "mtime": os.path.getmtime(p), "srt": ingest.find_srt(p),
                  "used_by": sorted(set(used.get(os.path.realpath(p), [])))}
             if with_probe:
@@ -231,7 +238,7 @@ def delete_folder(root, rel):
     """Delete a library folder with its contents; refused for the root, for folders holding a project
     and for folders holding a video a project uses. Returns (files, bytes)."""
     path = resolve_dir(root, rel)
-    if path == os.path.realpath(root):
+    if path == _lib(root):
         raise ValueError("refusing to delete the library root")
     used = usage(root)
     files = nbytes = 0
@@ -253,7 +260,7 @@ def rename_folder(root, rel, new_name):
     """Rename a library folder in place; projects using clips inside are updated. Refused for folders
     holding a project. Returns the new path."""
     path = resolve_dir(root, rel)
-    if path == os.path.realpath(root):
+    if path == _lib(root):
         raise ValueError("refusing to rename the library root")
     new_name = new_name.strip()
     if not FOLDER_RE.match(new_name):
@@ -265,7 +272,7 @@ def rename_folder(root, rel, new_name):
 def delete_file(root, path):
     """Delete a stray .SRT (no video next to it) from the library."""
     p = os.path.abspath(path)
-    resolve_dir(root, os.path.relpath(os.path.dirname(p), os.path.realpath(root)))
+    resolve_dir(root, os.path.relpath(os.path.dirname(p), _lib(root)))
     if not p.lower().endswith(".srt") or not os.path.isfile(p):
         raise ValueError(f"not an .SRT file in the library: {path}")
     os.unlink(p)
@@ -273,8 +280,8 @@ def delete_file(root, path):
 
 # --- moving, and keeping projects pointed at their clips ----------------------------------------
 def all_folders(root):
-    """Every library folder, relative to the root ("" = the root), projects and hidden ones left out."""
-    base = os.path.realpath(root)
+    """Every library folder, relative to the library ("" = ROOT/videos), projects and hidden ones left out."""
+    base = _lib(root)
     out = [""]
     for d, dirs, _ in os.walk(base):
         dirs[:] = sorted(x for x in dirs if not x.startswith(".") and not projects.is_project(os.path.join(d, x)))
@@ -361,9 +368,9 @@ def move(root, path, dest_rel):
     dest = resolve_dir(root, dest_rel)
     p = os.path.abspath(path)
     if os.path.isdir(p):
-        rel = os.path.relpath(os.path.realpath(p), os.path.realpath(root))
+        rel = os.path.relpath(os.path.realpath(p), _lib(root))
         src = resolve_dir(root, rel)
-        if src == os.path.realpath(root):
+        if src == _lib(root):
             raise ValueError("refusing to move the library root")
         if dest == src or dest.startswith(src + os.sep):
             raise ValueError(f"cannot move {rel} into itself")

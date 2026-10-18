@@ -95,9 +95,9 @@ class VideosPanel:
             self.current = next((e for e in entries if e["kind"] == "video" and
                                  os.path.realpath(e["path"]) == os.path.realpath(self.current["path"])), None)
         n_vid = len(listing["videos"]) + sum(f["videos"] for f in listing["folders"])
-        self.g_head.content = (f"Video library under `{root}` (project folders are in the Projects tab). "
+        self.g_head.content = (f"Video library `{videos.library_dir(root)}` (projects are in the Projects tab). "
                                "Click a folder to open it, a clip for its details; ✏ rename, 🗑 delete.")
-        self.g_path.content = (f"📂 `{os.path.basename(os.path.realpath(root))}/{self.cwd + '/' if self.cwd else ''}`"
+        self.g_path.content = (f"📂 `{videos.LIBRARY_DIR}/{self.cwd + '/' if self.cwd else ''}`"
                                f" · {n_vid} clips here and below")
         with self._lock:
             for r in self._rows:
@@ -195,10 +195,10 @@ class VideosPanel:
         if client is None:
             return
         here = os.path.dirname(e["rel"]) if e["kind"] == "folder" else os.path.relpath(
-            os.path.dirname(os.path.realpath(e["path"])), os.path.realpath(self.app.root))
+            os.path.dirname(os.path.realpath(e["path"])), os.path.realpath(videos.library_dir(self.app.root)))
         here = "" if here == "." else here
         own = e["rel"] if e["kind"] == "folder" else None
-        root = os.path.basename(os.path.realpath(self.app.root))
+        root = videos.LIBRARY_DIR
         targets = {f"{root}/{d + '/' if d else ''}": d for d in videos.all_folders(self.app.root)
                    if d != here and not (own and (d == own or d.startswith(own + os.sep)))}
         if not targets:
@@ -214,9 +214,10 @@ class VideosPanel:
     def ask_delete(self, e, client):
         if client is None:
             return
-        what = {"folder": f"the folder **{e['name']}/** with everything in it ({e['videos']} clips)",
-                "video": f"**{e['name']}**" + (" and its .SRT" if e.get("srt") else ""),
-                "srt": f"**{e['name']}**"}[e["kind"]]
+        if e["kind"] == "folder":  # built per kind: only folders carry a clip count
+            what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips)"
+        else:
+            what = f"**{e['name']}**" + (" and its .SRT" if e.get("srt") else "")
         with client.gui.add_modal("Delete?") as m:
             client.gui.add_markdown(f"Delete {what}? There is no undo.")
             row = client.gui.add_button_group("", options=("Delete", "Cancel"))
@@ -298,7 +299,7 @@ class VideosPanel:
         try:
             new = videos.move(self.app.root, e["path"], dest_rel)
             self._retarget_open_project(e["path"], new)
-            where = f"{os.path.basename(os.path.realpath(self.app.root))}/{dest_rel + '/' if dest_rel else ''}"
+            where = f"{videos.LIBRARY_DIR}/{dest_rel + '/' if dest_rel else ''}"
             self.g_msg.content = (f"✅ moved `{e['name']}` to `{where}`" + (" (and its .SRT)" if e.get("srt") else "")
                                   + self._changed_note(users))
             if self.current is not None and os.path.realpath(self.current["path"]) == os.path.realpath(e["path"]):

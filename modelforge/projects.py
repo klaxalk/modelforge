@@ -53,6 +53,14 @@ INTERMEDIATE = (
 # Never deleted by clean: the extracted frames are an input of every stage.
 KEEP_ON_CLEAN = ("images",)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+LIBRARY_DIR = "videos"  # ROOT/videos holds the video library (modelforge.videos), so it is no project name
+
+
+def _check_name(name):
+    if not NAME_RE.match(name):
+        raise ValueError("project names use letters, digits, '_', '-', '.' (max 64), starting with a letter or digit")
+    if name.lower() == LIBRARY_DIR:
+        raise ValueError(f"'{LIBRARY_DIR}' is the video library folder; choose another project name")
 
 
 def is_project(path):
@@ -77,8 +85,7 @@ def _mtime(path):
 def create(root, name, copy_plan_from=None):
     """New project folder root/name with an ingest.json (empty, or the sources and settings of
     another project)."""
-    if not NAME_RE.match(name):
-        raise ValueError("project names use letters, digits, '_', '-', '.' (max 64), starting with a letter or digit")
+    _check_name(name)
     path = os.path.join(root, name)
     if os.path.exists(path):
         raise FileExistsError(f"{path} already exists")
@@ -99,8 +106,7 @@ def rename(root, path, new_name):
     """Rename a project folder (same root). Paths inside it are relative, so nothing else changes;
     only old nerfstudio run configs keep the old absolute path (they are not reused)."""
     p = _check_project(root, path)
-    if not NAME_RE.match(new_name):
-        raise ValueError("project names use letters, digits, '_', '-', '.' (max 64), starting with a letter or digit")
+    _check_name(new_name)
     dst = os.path.join(os.path.abspath(root), new_name)
     if os.path.exists(dst):
         raise FileExistsError(f"{new_name} already exists")

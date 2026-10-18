@@ -228,7 +228,7 @@ modelforge/
 
 ## DJI metadata sources
 
-The sample clip is `data/berlin/berlin_3_1.MP4` (tests find it anywhere in
+The sample clip is `data/videos/berlin/berlin_3_1.MP4` (tests find it anywhere in
 `data/` via `tests/sample_clip.py`, or `$MODELFORGE_TEST_VIDEO`), recorded on a DJI NEO2: HEVC
 1920x1080 at 29.97 fps, 8:46 long, about 1.2 GB. Metadata lives in two places:
 
@@ -731,6 +731,16 @@ Code layout:
     `ingest.json`).
   - Actions: add to the open project (`IngestPanel.add_source(video)`),
     download, rename and delete. Rename and delete move the .SRT along.
+  - **The library is `data/videos/`** (`videos.LIBRARY_DIR`, `_lib`); projects
+    live next to it in `data/`.
+    - Why: the user could not create project "karlak" while a video folder
+      `data/karlak/` existed, because both shared the top of `data/`.
+    - `videos` is a reserved project name (`projects._check_name`).
+    - Their `berlin/` and `karlak/` folders were moved into `data/videos/`
+      with `update_references` (parking and fullrun_test now point at
+      `data/videos/berlin/berlin_3_1.MP4`).
+    - The Ingest tab still finds clips anywhere under `data/` outside
+      projects.
   - **File manager** (the user asked for "a more traditional file manager"
     with context buttons, a + for upload and a new-folder button):
     - Toolbar button group (⬆ Up, 📁＋ New folder, ⟳ Refresh) plus the
@@ -753,8 +763,8 @@ Code layout:
         (`_retarget_open_project`).
       - Both are refused while a job runs.
       - A clip's cached optical-flow lead moves with it.
-      - The user moved berlin_3_1.MP4 / .SRT into `data/berlin/` (done by
-        hand first; parking and fullrun_test were updated).
+      - The user's berlin_3_1.MP4 / .SRT now live in
+        `data/videos/berlin/`.
     - Folders can be renamed too (`rename_folder`); a folder holding a
       project cannot be renamed, moved or deleted.
     - Rows are rebuilt on each refresh (`_refresh`, ≤300 rows).
