@@ -483,6 +483,25 @@ Known limitations:
     Untested on the full 300-image clip.
   - `prior_ba(settle=None)` runs to Ceres' convergence. The report's
     termination says `SETTLED`.
+- **BA iteration cap and Skip** (Sparse tab, `stage_refine(max_iterations=,
+  skip=)`, CLI `--ba-iterations`):
+  - The cap applies per round; the default is 500, a backstop only.
+  - **0 = no BA**: one triangulation at round 0's threshold, poses at the
+    priors.
+    - The user wanted 0 as the default ("the priors are super strong"). On
+      berlin_test, 0 gives a reprojection error median 14.9 px / p90
+      24.5 px, focal stuck at 2304 px (2× off) and track length 2.99. BA
+      gives 0.42 / 1.10 px, focal 1082 px, in 8 s.
+    - Shown those numbers, the user chose the default of 500, stopped by
+      the settle rule.
+  - **Skip refinement** (enabled while refine runs) sets an event. The
+    running BA ends successfully with its current state (termination
+    `SKIPPED`), the remaining rounds are skipped, and the final
+    triangulation uses the last round's threshold. The pipeline then
+    continues (export / splat / dense).
+  - Ceres reports iteration 0 before any step, so a skip that early keeps
+    the priors exactly.
+  - Unlike Stop, Skip is not a failure and writes `sparse/refined`.
 - Pair gating was **not** implemented, by measurement. Geometries are
   uncalibrated (F only), and the ~2.5% false pairs are already removed by
   triangulation filtering.

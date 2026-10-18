@@ -45,3 +45,18 @@ def test_ba_aborts_on_stop():
 
     ba = refine.prior_ba(rec, priors, robust.PriorModel(), on_iteration=on_iteration, token=t, settle=None)
     assert ba["iterations"] == 3 and ba["termination"] == "USER_FAILURE"
+
+
+def test_ba_skip_keeps_the_current_state():
+    """Skip ends the solve successfully (the state so far is kept); Stop aborts it."""
+    rec, gt = make_scene(seed=8)
+    priors = make_priors(gt, np.random.default_rng(8), pos_sigma=0.05, rot_sigma_deg=0.2)
+    set_poses(rec, priors)
+    skip = threading.Event()
+
+    def on_iteration(summary):
+        if summary.iteration == 2:
+            skip.set()
+
+    ba = refine.prior_ba(rec, priors, robust.PriorModel(), on_iteration=on_iteration, skip=skip, settle=None)
+    assert ba["termination"] == "SKIPPED" and ba["usable"] and ba["iterations"] == 3

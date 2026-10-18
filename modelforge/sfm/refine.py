@@ -87,9 +87,9 @@ def triangulate(rec, db_path, image_path, out_dir, rnd):
 class _Progress(pyceres.IterationCallback):
     """Forwards iterations to `fn` and ends the solve once the cameras have settled."""
 
-    def __init__(self, fn, poses=(), cameras=(), settle=None, token=None):
+    def __init__(self, fn, poses=(), cameras=(), settle=None, token=None, skip=None):
         pyceres.IterationCallback.__init__(self)
-        self.fn, self.costs, self.token = fn, [], token
+        self.fn, self.costs, self.token, self.skip = fn, [], token, skip
         self.poses, self.cameras, self.settle = list(poses), list(cameras), settle
         self.history, self.settled = [], False
 
@@ -105,6 +105,8 @@ class _Progress(pyceres.IterationCallback):
             self.fn(summary)
         if self.token is not None and self.token.cancelled:  # Stop: abort the solve now
             return pyceres.CallbackReturnType.SOLVER_ABORT
+        if self.skip is not None and self.skip.is_set():  # Skip: keep the current state, end the solve
+            return pyceres.CallbackReturnType.SOLVER_TERMINATE_SUCCESSFULLY
         s = self.settle
         if s and self.poses:
             self.history = (self.history + [self._state()])[-(s.window + 1):]
@@ -121,7 +123,7 @@ class _Progress(pyceres.IterationCallback):
 
 def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
              refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle(),
-             token=None):
+             token=None, skip=None):
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
@@ -179,7 +181,7 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
 
     solver_options = pyceres.SolverOptions(ba_options.ceres.create_solver_options(ba_config, problem))
     cameras = [rec.cameras[c] for c in sorted(rec.cameras)] if refine_intrinsics else []
-    progress = _Progress(on_iteration, poses.values(), cameras, settle, token)
+    progress = _Progress(on_iteration, poses.values(), cameras, settle, token, skip)
     solver_options.callbacks = [progress]
     solver_options.update_state_every_iteration = True
     summary = pyceres.SolverSummary()
@@ -187,7 +189,8 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     pyceres.solve(solver_options, problem, summary)
     return {"iterations": len(progress.costs), "initial_cost": summary.initial_cost,
             "final_cost": summary.final_cost, "usable": summary.IsSolutionUsable(),
-            "termination": "SETTLED" if progress.settled else str(summary.termination_type).split(".")[-1],
+            "termination": "SETTLED" if progress.settled else ("SKIPPED" if skip is not None and skip.is_set() else
+                                                                str(summary.termination_type).split(".")[-1]),
             "num_abs_priors": n_abs, "num_rel_priors": n_rel, "seconds": round(time.time() - t0, 1)}
 
 

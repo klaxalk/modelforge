@@ -99,10 +99,15 @@ def stage_match(project, report):
     report.set("match", stats)
 
 
-def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None):
+def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
+                 max_iterations=500, skip=None):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done";
     "ba" events carry the live Reconstruction (poses are updated every iteration).
     token (jobs.Token): stop between steps; BA aborts within an iteration.
+    max_iterations: BA iteration cap per round; 0 = no bundle adjustment (poses stay at the priors,
+    intrinsics at their initial values; points are only triangulated).
+    skip (threading.Event): ends the running BA where it is and skips the remaining rounds; the
+    final triangulation and outputs still follow, so the pipeline continues.
 
     model (robust.PriorModel) holds prior sigmas, systematic corrections and rejected
     priors; it is self-calibrated after every round's BA.
@@ -114,7 +119,11 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     rec = refine.init_from_database(db_path, pri)
     results = {"init": refine.evaluate(rec, pri)}
     t_start = time.time()
+    last = rounds[0]  # threshold of the last round that ran (the final triangulation uses it)
     for i, rnd in enumerate(rounds):
+        if max_iterations == 0 or (skip is not None and skip.is_set()):
+            break
+        last = rnd
         t0 = time.time()
         emit({"phase": "triangulate", "round": i, "rounds": len(rounds), "rec": rec})
         jobs.check(token)
@@ -126,7 +135,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         ba = refine.prior_ba(rec, corrected, model, loss_scale_px=rnd.loss_scale_px, relative=i >= model.start_round,
                              on_iteration=lambda s, i=i: emit({"phase": "ba", "round": i, "rounds": len(rounds),
                                                                "iteration": s.iteration, "cost": s.cost, "rec": live}),
-                             token=token)
+                             token=token, max_iterations=max_iterations, skip=skip)
         jobs.check(token)  # an aborted BA leaves no round_N
         out = os.path.join(project, "sparse", f"round_{i}")
         os.makedirs(out, exist_ok=True)
@@ -147,9 +156,15 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
                 f"B {m['boresight_norm_deg']} deg, dt {m['dt_ms']} ms | rejected abs {calib['abs_rejected']} "
                 f"rel {calib['rel_rejected']} | d2 median abs {calib['abs_d2_median']} rel {calib['rel_d2_median']}")
         emit({"phase": "round_done", "round": i, "rounds": len(rounds), "rec": rec, "eval": ev})
-    # final triangulation at the tightest threshold so the exported cloud matches the refined poses
+    if max_iterations == 0:
+        log("refine: no bundle adjustment (0 iterations): poses at the priors, intrinsics at their start values")
+    elif skip is not None and skip.is_set():
+        log(f"refine: skipped by the user after round {i}")
+    results["ba"] = {"max_iterations": max_iterations, "skipped": bool(skip is not None and skip.is_set())}
+    # final triangulation at the last round's threshold (the tightest after a full run) so the
+    # exported cloud matches the refined poses
     jobs.check(token)
-    rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), rounds[-1])
+    rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), last)
     jobs.check(token)  # stopped: sparse/refined is not (over)written
     rec.extract_colors_for_all_images(image_path)
     rec.write(os.path.join(project, "sparse", "refined"))
@@ -213,6 +228,9 @@ def main():
                          "max = COLMAP defaults at full resolution")
     ap.add_argument("--dense-max-image-size", type=int,
                     help="override the preset's image size for PatchMatch/fusion (-1 = full resolution)")
+    ap.add_argument("--ba-iterations", type=int, default=500,
+                    help="bundle-adjustment iteration cap per refine round (default 500; it stops earlier once the "
+                         "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
     ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
@@ -234,7 +252,7 @@ def main():
     if "refine" in stages:
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
                                   estimate_systematic=not args.no_systematic)
-        rec = stage_refine(args.project, report, pri, model=model)
+        rec = stage_refine(args.project, report, pri, model=model, max_iterations=args.ba_iterations)
     if "export" in stages:
         stage_export(args.project, report, rec)
     methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)

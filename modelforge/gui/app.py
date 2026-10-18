@@ -230,6 +230,17 @@ class App:
                                     "About 15-20 min on CPU for 300 images; matching dominates.")
             b.on_click(lambda _: self.run_stage("sfm"))
             self.g_buttons["sfm"] = b
+            self.g_ba_iters = gui.add_number(
+                "BA iterations (max per round)", initial_value=500, min=0, step=50,
+                hint="Cap on bundle-adjustment iterations in each of the 3 refine rounds. BA stops by itself once "
+                     "the cameras settle (seconds on 80 images), so the cap rarely matters. 0 = no BA: poses stay at "
+                     "the priors and the focal length at its start value (2x off), which leaves ~15 px reprojection "
+                     "error instead of ~0.4 px and hurts dense and splat.")
+            self.g_skip = gui.add_button(
+                "Skip refinement", icon=viser.Icon.PLAYER_SKIP_FORWARD, disabled=True,
+                hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
+                     "(final triangulation, then export / splat / dense in the full pipeline).")
+            self.g_skip.on_click(lambda _: self.skip_refine())
             for stage in pipeline.SFM_STAGES:
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
                                    hint=STAGE_HINTS[stage])
@@ -727,7 +738,13 @@ class App:
                 elif st == "match":
                     pipeline.stage_match(project, report)
                 elif st == "refine":
-                    pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token)
+                    self._skip = threading.Event()
+                    self.g_skip.disabled = False
+                    try:
+                        pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token,
+                                              max_iterations=int(self.g_ba_iters.value), skip=self._skip)
+                    finally:
+                        self.g_skip.disabled = True
                 elif st == "export":
                     pipeline.stage_export(project, report)
                 elif st == "splat":
@@ -776,6 +793,15 @@ class App:
         self._on_log("--- stop requested")
         for t in tokens:
             threading.Thread(target=t.cancel, daemon=True).start()
+
+    def skip_refine(self):
+        """Skip button: end the running BA where it is and continue after refine."""
+        skip = getattr(self, "_skip", None)
+        if skip is not None and not skip.is_set():
+            skip.set()
+            self.g_skip.disabled = True
+            self._job["detail"] = "skipping: finishing this round's outputs, then the final triangulation"
+            self._on_log("--- refine skip requested")
 
     def _on_stereo_progress(self, view, views, pass_index):
         passes = ("photometric", "geometric")
