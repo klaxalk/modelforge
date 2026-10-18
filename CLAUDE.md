@@ -968,8 +968,8 @@ export).
 
   The COLMAP row is the 320 px preset, so it is not a like-for-like comparison. The test LiDAR is
   the MVS fused cloud (~8.5 cm spacing), which bounds the medians.
-- GUI: quality, render width, max depth (0 = auto), "Include in Run full pipeline" (on; the
-  pipeline is then sparse → splat → splat mesh → dense), **Build mesh from splat**. The View tab's
+- GUI: quality, render width, max depth (0 = auto), **Build mesh from splat**. The full
+  pipeline always builds it after the splat (it is the pipeline's dense result). The View tab's
   Mesh dropdown gets `splat` (vertex colours) and switches to it; the Export tab exports it
   (glb / obj / ply).
 - Mesh export now rotates with `trimesh.apply_transform`, which keeps the stored vertex normals.
@@ -1217,10 +1217,12 @@ Code layout:
     edges or above / below another panel, so "bottom", as the user asked, is
     a float. It shows the last 200 lines, newest first, because markdown
     cannot auto-scroll.
-  - **Run full pipeline** (stage `all`) runs SfM → splat → dense (the user's
-    order) with the tabs' settings. A project without images is extracted
-    first from its Ingest plan (`IngestPanel.extract_now`). Splat / dense
-    are skipped, with a History note, without nerfstudio / CUDA.
+  - **Run full pipeline** (stage `all`) runs SfM → splat → splat mesh with the
+    tabs' settings: the dense result is the mesh from the splat, as the user asked
+    (2026-10-18). COLMAP's MVS follows only with the Dense tab's "Include in Run full
+    pipeline" (off by default). A project without images is extracted first from
+    its Ingest plan (`IngestPanel.extract_now`). Splat / dense are skipped, with a
+    History note, without nerfstudio / CUDA.
   - **Stop** (`App.stop`, `modelforge/jobs.py`) stops whatever runs: a
     stage, the full pipeline, splat training or an extraction. Every job
     gets a `jobs.Token`:

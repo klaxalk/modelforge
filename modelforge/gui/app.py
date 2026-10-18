@@ -55,7 +55,7 @@ STAGE_HINTS = {
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
-    "all": "Full pipeline: sparse → splat (→ splat mesh) → dense.",
+    "all": "Full pipeline: sparse → splat → splat mesh (→ COLMAP dense if ticked in the Dense tab).",
 }
 NEXT_STEP = {
     "all": "View tab: refined cameras, mesh and splat; Export tab for the files",
@@ -160,7 +160,8 @@ class App:
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_buttons = {}
         b = gui.add_button("Run full pipeline", icon=viser.Icon.PLAYER_TRACK_NEXT_FILLED, color="green",
-                           hint="Sparse → splat → dense in one go, with the settings of the tabs below (and the "
+                           hint="Sparse → splat → mesh from the splat in one go (COLMAP's dense too if ticked in the Dense "
+                                "tab), with the settings of the tabs below (and the "
                                 "Ingest plan: images are extracted first if the project has none yet). Stages that "
                                 "need a GPU are skipped without one.")
         b.on_click(lambda _: self.run_stage("all"))
@@ -373,6 +374,10 @@ class App:
             gui.add_markdown("COLMAP MVS. PatchMatch stereo: " + (
                 "CUDA available" if dense.has_cuda() else
                 "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
+            self.g_dense_in_all = gui.add_checkbox(
+                "Include in Run full pipeline", initial_value=False,
+                hint="Off: the full pipeline's dense result is the mesh from the splat (Splat mesh tab). On: COLMAP's "
+                     "MVS (undistort → stereo → fusion → mesh → texture) runs after it as well.")
             self.g_dense_quality = gui.add_dropdown(
                 "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
                 hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
@@ -471,9 +476,6 @@ class App:
                 "Max depth (m, 0 = auto)", initial_value=0.0, min=0.0, step=5.0,
                 hint="Depth beyond this is not fused, which keeps the far background and sky floaters out of the "
                      "mesh. 0 = 3 x the median rendered depth.")
-            self.g_sm_in_all = gui.add_checkbox(
-                "Include in Run full pipeline", initial_value=True,
-                hint="Build the splat mesh right after the splat when running the full pipeline (it is quick).")
             b = gui.add_button("Build mesh from splat", icon=viser.Icon.CUBE,
                                disabled=splat_mesh.available() is not None,
                                hint="Render depth from splat/splat_enu.ply at every camera, fuse (TSDF), mesh: "
@@ -934,15 +936,14 @@ class App:
             if stage == "all":
                 seq, skipped = list(sfm), []
                 if splat.available() is None:
-                    seq.append("splat")
-                    if self.g_sm_in_all.value:
-                        seq.append("splatmesh")
+                    seq += ["splat", "splatmesh"]  # the dense result is the mesh from the splat
                 else:
-                    skipped.append(f"splat ({splat.available()})")
-                if dense.has_cuda():
-                    seq += list(pipeline.DENSE_STAGES)
-                else:
-                    skipped.append("dense (no CUDA)")
+                    skipped.append(f"splat and splat mesh ({splat.available()})")
+                if self.g_dense_in_all.value:  # COLMAP's MVS only when asked (Dense tab)
+                    if dense.has_cuda():
+                        seq += list(pipeline.DENSE_STAGES)
+                    else:
+                        skipped.append("COLMAP dense (no CUDA)")
                 for sk in skipped:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
