@@ -600,7 +600,7 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
 
 **Live preview** (Splat tab, on by default):
 - The user wanted to watch the splat form in the GUI's 3D view.
-- With **Preview every N steps** (default 1000), `ns-train` gets
+- With **Preview every N steps** (default 500, as the user asked), `ns-train` gets
   `--steps-per-save N`.
 - `splat._watch_checkpoints` polls the run folder. On each new checkpoint it
   runs `export/ckpt_dump.py` in nerfstudio's venv (torch + numpy only),

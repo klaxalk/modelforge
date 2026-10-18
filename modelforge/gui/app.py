@@ -305,7 +305,7 @@ class App:
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
                      "at most 500k Gaussians). The finished splat replaces it at the end.")
             self.g_splat_every = gui.add_number(
-                "Preview every (steps)", initial_value=1000, min=100, step=100,
+                "Preview every (steps)", initial_value=500, min=100, step=100,
                 hint="Checkpoint interval while previewing (nerfstudio's default is 2000). Each checkpoint is "
                      "written to disk (~0.75 GB per million Gaussians), so very small values slow training down.")
             self.g_splat_status = gui.add_markdown("")
