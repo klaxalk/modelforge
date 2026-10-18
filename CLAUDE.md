@@ -611,6 +611,11 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
   subsamples to ≤500k for the browser. The GUI draws it as
   `/dense/splat_live`, replacing the old splat during training; the
   finished splat replaces it at the end.
+- `ns-train` gets `--method-name <method>`. splatfacto-big (and -mcmc) keep
+  nerfstudio's `method_name="splatfacto"`, so their runs landed in
+  `nerfstudio/*/splatfacto/`, where neither the watcher nor `latest_config`
+  (the export) looked: the preview never appeared with splatfacto-big. Each
+  method now has its own run folder.
 - A half-written checkpoint fails the dump and is retried on the next poll. A
   preview error never stops training.
 - The watcher reports to the GUI log and the server console ("waiting for the

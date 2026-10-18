@@ -86,6 +86,8 @@ def test_train_command_cache_and_downscale():
     cmd = splat.train_command("/p", iterations=100)
     assert cmd[cmd.index("--pipeline.datamanager.cache-images") + 1] == "disk"  # default
     assert cmd[-3:] == ["nerfstudio-data", "--downscale-factor", "1"]  # explicit even at 1
+    big = splat.train_command("/p", method="splatfacto-big")
+    assert big[big.index("--method-name") + 1] == "splatfacto-big"  # its own run folder
     cmd = splat.train_command("/p", cache="gpu", downscale=2, extra=["--foo", "1"])
     assert cmd[cmd.index("--pipeline.datamanager.cache-images") + 1] == "gpu"
     assert cmd[-5:] == ["--foo", "1", "nerfstudio-data", "--downscale-factor", "2"]  # dataparser last

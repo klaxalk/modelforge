@@ -84,7 +84,10 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     cmd = [os.path.join(NS_BIN, "ns-train"), method, "--data", project,
            "--output-dir", os.path.join(project, "nerfstudio"),
            "--viewer.quit-on-train-completion", "True", "--viewer.websocket-port", str(VIEWER_PORT),
-           "--pipeline.datamanager.cache-images", cache]
+           "--pipeline.datamanager.cache-images", cache,
+           # splatfacto-big (and -mcmc) keep method_name "splatfacto", so their runs would land in
+           # nerfstudio/*/splatfacto/ where the preview watcher and latest_config don't look
+           "--method-name", method]
     if iterations:
         cmd += ["--max-num-iterations", str(int(iterations))]
     if steps_per_save:
