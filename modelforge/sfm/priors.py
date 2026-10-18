@@ -104,6 +104,12 @@ def load(project):
     meta = json.load(open(os.path.join(project, "poses.json")))
     priors = {}
     for k, r in enumerate(meta["images"]):
+        if "colmap_qvec" not in r:  # kind "video": no metadata, so no pose prior (NaN pose, kept for order / time)
+            priors[r["image"]] = Prior(
+                name=r["image"], frame=r["frame"], pts=r["pts"], params=np.full(7, np.nan),
+                center=np.full(3, np.nan), R_cw=np.full((3, 3), np.nan), velocity=np.zeros(3),
+                source=r.get("source", 0), order=k, time=r.get("time_s", r["pts"]))
+            continue
         qw, qx, qy, qz = r["colmap_qvec"]
         t = np.array(r["colmap_tvec"])
         R_cw = quat_wxyz_to_rot((qw, qx, qy, qz))
@@ -116,6 +122,11 @@ def load(project):
             source=r.get("source", 0), order=k, time=r.get("time_s", r["pts"]),
         )
     return priors, meta
+
+
+def has_poses(priors):
+    """True when the images carry pose priors (DJI), False for videos without metadata."""
+    return bool(priors) and all(np.isfinite(p.center).all() for p in priors.values())
 
 
 def by_order(priors, names=None):

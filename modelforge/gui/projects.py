@@ -8,6 +8,10 @@ import traceback
 import viser
 
 from modelforge import projects
+from modelforge.dji import ingest
+
+KIND_LABELS = {"DJI drone video": "dji", "Video without metadata (phone, ...)": "video"}  # label -> kind
+KIND_LABELS_DEFAULT = "DJI drone video"
 
 
 class ProjectsPanel:
@@ -28,6 +32,11 @@ class ProjectsPanel:
         with gui.add_folder("New project"):
             self.g_name = gui.add_text("Name", initial_value="",
                                        hint="Folder name under the root: letters, digits, '_', '-', '.'.")
+            self.g_kind = gui.add_dropdown(
+                "Kind", options=tuple(KIND_LABELS), initial_value=KIND_LABELS_DEFAULT,
+                hint="DJI drone video: the clip's embedded position and attitude are used as pose priors and "
+                     "refined. Video without metadata (phone, action camera, ...): the poses come from the "
+                     "images alone (incremental SfM), in an arbitrary frame and scale.")
             self.g_copy = gui.add_checkbox("Copy sources from the open project", initial_value=False,
                                            hint="Start from the open project's videos, ranges and sampling settings "
                                                 "(only ingest.json is copied, no images or results).")
@@ -94,7 +103,8 @@ class ProjectsPanel:
             self.g_status.content = f"❌ cannot read `{path}`: `{e}`"
             return
         src = st["sources"]
-        lines = [f"**{st['name']}** · {len(src)} source(s) · {st['images']} images · "
+        lines = [f"**{st['name']}** · {ingest.KINDS[st['kind']].split(' (')[0]} · {len(src)} source(s) · "
+                 f"{st['images']} images · "
                  f"stages: {', '.join(st['stages']) or 'none yet'}"]
         for k, s in enumerate(src):
             end = f"{s.end:g}" if s.end is not None else "end"
@@ -125,7 +135,8 @@ class ProjectsPanel:
     def create(self):
         name = self.g_name.value.strip()
         try:
-            path = projects.create(self.app.root, name, copy_plan_from=self.app.path if self.g_copy.value else None)
+            path = projects.create(self.app.root, name, copy_plan_from=self.app.path if self.g_copy.value else None,
+                                   kind=KIND_LABELS[self.g_kind.value])
             self.app.open_project(path)
             self.g_name.value = ""
             self.g_msg.content = f"✅ created and opened **{name}**: add sources in the Ingest tab"

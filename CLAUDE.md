@@ -195,7 +195,8 @@ modelforge/
 ├── docs/            # architecture.md (design + milestones), djmd_format.md
 ├── modelforge/      # Project Python code (deps: numpy, opencv-python, pillow; ffmpeg on PATH)
 │   ├── dji/            # djmd decoder, SRT parser, per-video extraction, multi-video ingest
-│   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors)
+│   ├── video/          # ingest for videos without metadata (project kind "video"): motion sampling
+│   ├── sfm/            # features, pairs, priors, refine (prior BA), robust (self-calibrating priors), reconstruct (incremental SfM)
 │   ├── export/         # nerfstudio transforms.json, splat_to_enu, products (Export tab), ckpt_dump (live splat)
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
@@ -278,6 +279,58 @@ Key facts (details in `docs/djmd_format.md`):
 - djmd shutter is the exact exposure. The SRT rounds it to nominal stops.
 - Altitude: use `rel_alt` (above takeoff). A local vertical reference is fine
   for this project. `abs_alt` is not plain MSL.
+
+## Project kinds
+
+`ingest.json` holds `"kind"` (`dji.ingest.KINDS`; missing = `dji`). The kind is
+chosen when the project is created (Projects tab "Kind",
+`projects.create(kind=)`) and picks the front end and the sparse method. Dense,
+splat, export and the View tab are shared: they only need images + poses +
+intrinsics in one frame.
+
+| | `dji` | `video` (phone, action cam, …) |
+|---|---|---|
+| Ingest back end | `modelforge/dji/ingest.py` (telemetry, lead) | `modelforge/video/ingest.py` (same interface: `load_clip`, `make_plan`, `preview`, `run`) |
+| Frame spacing | distance + rotation credit, or time | **motion** (cumulative dense optical flow on a 160 px copy, in image widths; cached in the video's folder as `.modelforge_motion.json`), or time |
+| poses.json | priors per image | no poses (`priors.load` gives NaN priors; `has_poses` False) |
+| Features | upright SIFT, OPENCV camera | oriented SIFT (handheld footage rolls), **RADIAL** camera (one focal length) |
+| Pairs | look-at overlap from priors | `pairs.sequential`: exhaustive ≤150 images, else ±10 neighbours + quadratic jumps + a coarse grid between sources |
+| Sparse | `refine` (prior BA) | `reconstruct` (`sfm/reconstruct.py`: pycolmap incremental mapping, largest model) |
+| World | ENU, metric | up-oriented, centred, median scene depth = 10 units (no metric scale) |
+
+Video-kind notes:
+- **Up.** `reconstruct.up_alignment` tries, in order: the plane of the camera
+  path; the dominant RANSAC plane of the points (the ground, if within 60° of
+  the cameras' up, so a facade is not taken for it); the cameras' mean up (−y).
+  - On berlin 105–117 s treated as a phone video (a straight path), the ground
+    cue gave camera pitch −19.9° against the gimbal's −20.1°.
+  - The mean camera up alone would have been ~20° off, since a drone looks
+    down.
+- **RADIAL camera.** OPENCV's separate fx / fy drifted to 1938 / 1262 px on 20
+  frames. RADIAL gives f = 1085.2 px, matching the DJI refinement's 1085.
+  `nerfstudio.opencv_params` converts the simpler models for the export.
+- **Overlap.** SfM without priors needs it.
+  - 20 images over 60 s (spacing 0.46 image widths) registered only 3. Over
+    12 s, all 20 registered.
+  - The Ingest tab warns when the motion spacing exceeds 0.25 image widths.
+  - 120 images over 60 s: 120/120 registered, 0.45 px, 156 s.
+- **Portrait clips.** `extract.video_size` returns the size as decoded:
+  ffmpeg applies the display-matrix rotation, so ±90° swaps w / h. Before,
+  portrait phone video would have been read with the wrong frame size.
+- **Stop.** It works during mapping (pycolmap `CancellationToken`); progress
+  shows registered images.
+- **One camera.** As for DJI, a project is one camera (sources must share a
+  resolution). Per-video intrinsics for different phones are future work.
+- **GUI.**
+  - The Ingest tab hides lead / rotation credit / yaw source / the 3D flight
+    plan and plots the motion curve.
+  - The Sparse tab shows reconstruct instead of refine and the BA controls.
+  - The View tab skips prior frustums, lines and deviations.
+- Tests: `tests/test_video_kind.py`.
+- **Next, the user's plan:** kind 3, ROS 2 bags (images + odometry + LiDAR +
+  TF), reading with the `rosbags` library, priors from odometry × TF, intrinsics
+  from camera_info, and the LiDAR cloud for geometry / splat init. It needs a
+  sample bag.
 
 ## Frame extraction (workstream 1)
 

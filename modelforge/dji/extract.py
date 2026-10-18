@@ -235,11 +235,19 @@ def make_exif(lat, lon, alt):
 # --- frame selection + writing -----------------------------------------------
 
 def video_size(mp4):
+    """Frame size as ffmpeg decodes it: phones store portrait video as landscape plus a rotation
+    (display matrix / rotate tag), which ffmpeg applies, so +-90 deg swaps width and height."""
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height", "-of", "csv=p=0", mp4],
+                          "stream=width,height:stream_tags=rotate:stream_side_data=rotation", "-of", "json", mp4],
                          capture_output=True, text=True, check=True).stdout
-    w, h = out.strip().split("\n")[0].split(",")[:2]
-    return int(w), int(h)
+    st = json.loads(out)["streams"][0]
+    w, h = int(st["width"]), int(st["height"])
+    rot = st.get("tags", {}).get("rotate")
+    for sd in st.get("side_data_list", []):
+        rot = sd.get("rotation", rot)
+    if rot is not None and int(round(float(rot))) % 180 != 0:
+        w, h = h, w
+    return w, h
 
 
 def optical_axis_enu(yaw_deg, pitch_deg):

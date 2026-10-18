@@ -1,5 +1,8 @@
 """GUI Ingest tab: pick videos, cut them into sources (time ranges), plan sampling, extract.
 
+The project kind (ingest.json) picks the back end: modelforge.dji.ingest (DJI clips with telemetry)
+or modelforge.video.ingest (videos without metadata: motion / time sampling, no telemetry views).
+
 The plan lives in PROJECT/ingest.json (saved on every change) and is turned into
 images + poses.json by modelforge.dji.ingest.run. While editing, the 3D view shows
 each source's aligned flight track (bright inside the selected range) and the planned
@@ -20,6 +23,9 @@ from plotly.subplots import make_subplots
 from modelforge import jobs, videos
 from modelforge.dji import extract as ex
 from modelforge.dji import ingest
+from modelforge.video import ingest as video_ingest
+
+SAMPLING = {"dji": ("distance", "time"), "video": video_ingest.SAMPLING}
 
 PALETTE = [(70, 134, 251), (251, 185, 56), (27, 229, 181), (228, 70, 11), (164, 252, 60), (180, 90, 250),
            (250, 110, 180), (120, 200, 255)]
@@ -34,6 +40,7 @@ class IngestPanel:
     def __init__(self, app, gui):
         self.app, self.gui, self.server = app, gui, app.server
         self.path = app.path
+        self._set_kind(ingest.load_kind(self.path))
         self.sources, self.settings = ingest.load_plan(self.path)
         if not self.sources:
             self.sources, self.settings = self._plan_from_poses()
@@ -52,10 +59,24 @@ class IngestPanel:
         threading.Thread(target=self._previewer, daemon=True).start()
         self.request_plan(edited=False)
 
+    def _set_kind(self, kind):
+        """Project kind -> back end with the same plan / extract interface (DJI or video without metadata)."""
+        self.kind = kind
+        self.be = video_ingest if kind == "video" else ingest
+
+    def _apply_kind(self):
+        """Show only the controls the kind uses (videos without metadata have no telemetry)."""
+        dji_only = self.kind != "video"
+        self.g_sampling.options = SAMPLING[self.kind]
+        for h in (self.g_rotw, self.g_yaw, self.g_show):
+            h.visible = dji_only
+        self.g_extract.label = "Extract images + priors" if dji_only else "Extract images"
+
     def set_project(self, path):
         """Show another project's plan (called by App.open_project)."""
         with self._lock:
             self.path = path
+            self._set_kind(ingest.load_kind(path))
             self.sources, self.settings = ingest.load_plan(path)
             if not self.sources:
                 self.sources, self.settings = self._plan_from_poses()
@@ -63,7 +84,8 @@ class IngestPanel:
             self._loading = True
             try:
                 st = self.settings
-                self.g_sampling.value = st.sampling
+                self._apply_kind()
+                self.g_sampling.value = st.sampling if st.sampling in SAMPLING[self.kind] else SAMPLING[self.kind][0]
                 self.g_num.value = st.num_images
                 self.g_spacing.value = st.spacing or 0.0
                 self.g_rotw.value = -1.0 if st.rot_weight is None else st.rot_weight
@@ -82,8 +104,8 @@ class IngestPanel:
     def _plan_from_poses(self):
         """Older single-video projects have no ingest.json: rebuild the plan from poses.json."""
         meta = self.app.project.meta if self.app.project else None
-        if not meta:
-            return [], ingest.Settings()
+        if not meta or self.kind == "video":
+            return [], (video_ingest.default_settings() if self.kind == "video" else ingest.Settings())
         s = meta.get("sampling", {})
         settings = ingest.Settings(sampling=s.get("mode", "distance"), num_images=len(meta["images"]),
                                    rot_weight=s.get("rot_weight_m_per_deg"), window=s.get("window", 0.5),
@@ -128,13 +150,17 @@ class IngestPanel:
             self.g_sources_md = gui.add_markdown("")
         with gui.add_folder("Sampling"):
             st = self.settings
-            self.g_sampling = gui.add_dropdown("Sampling", options=("distance", "time"), initial_value=st.sampling,
-                                               hint="distance: images at equal steps of travelled distance + "
-                                                    "view-rotation credit (none while hovering). time: equal steps "
-                                                    "of video time.")
+            opts = SAMPLING[self.kind]
+            self.g_sampling = gui.add_dropdown("Sampling", options=opts,
+                                               initial_value=st.sampling if st.sampling in opts else opts[0],
+                                               hint="distance (DJI): equal steps of travelled distance + "
+                                                    "view-rotation credit (none while hovering). motion (videos "
+                                                    "without metadata): equal steps of image motion (optical flow), "
+                                                    "none while standing still. time: equal steps of video time.")
             self.g_num = gui.add_number("Images (all sources)", initial_value=st.num_images, min=1, step=1,
-                                        hint="Total images over all sources, spread by distance + rotation "
-                                             "(spacing = total / images).")
+                                        hint="Total images over all sources, spread by the sampling curve "
+                                             "(spacing = total / images). Without metadata SfM needs overlap: "
+                                             "keep consecutive images well within one image width of motion.")
             self.g_spacing = gui.add_number("Spacing (0 = from images)", initial_value=st.spacing or 0.0, min=0.0,
                                             step=0.1, hint="Fixed step between images in m (distance) or s (time) "
                                                            "instead of a total image count. 0 = use Images.")
@@ -180,6 +206,7 @@ class IngestPanel:
         self.g_extract.on_click(lambda _: self.extract())
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_status = gui.add_markdown("")
+        self._apply_kind()
         self.rescan()
         self._rebuild_sources()
 
@@ -254,6 +281,7 @@ class IngestPanel:
                 rng.on_update(lambda _, k=k: self._range_changed(k))
                 en.on_update(lambda _, k=k: self._enabled_changed(k))
                 lead.on_update(lambda _, k=k: self._lead_changed(k))
+                lead.visible = self.kind != "video"
                 btn.on_click(lambda e, k=k: self._source_action(k, e.target.value))
                 self._source_handles.append(f)
                 self._source_widgets.append({"md": md, "range": rng, "enabled": en, "lead": lead, "ready": False})
@@ -330,8 +358,9 @@ class IngestPanel:
                 break
             w = self._source_widgets[k]
             if not w["ready"]:
-                w["md"].content = "⏳ analysing: decoding telemetry, estimating the lead …"
-                c = ingest.load_clip(s.video, s.lead, s.srt)
+                w["md"].content = ("⏳ analysing: decoding telemetry, estimating the lead …" if self.kind != "video"
+                                   else "⏳ analysing: measuring image motion (about a minute once per clip) …")
+                c = self.be.load_clip(s.video, s.lead, s.srt)
                 w["range"].max = round(c.duration, 1)
                 end = c.duration if s.end is None else min(s.end, c.duration)
                 w["range"].value = (min(s.start, end - 0.5), end)
@@ -344,19 +373,23 @@ class IngestPanel:
             self._update_plot()
             self._update_status()
             return
-        plan = ingest.make_plan(self.sources, self.settings)
+        if self.kind == "video":
+            for s in self.sources:  # the motion curve decodes the whole clip once (cached on disk)
+                if s.enabled and self.settings.sampling == "motion":
+                    self.be.load_clip(s.video).motion
+        plan = self.be.make_plan(self.sources, self.settings)
         origin = self.app.project.meta.get("enu_origin_lla") if self.app.project else None
-        self.plan, self.prev = plan, ingest.preview(plan, self.settings.yaw_source, origin=origin)
+        self.plan, self.prev = plan, self.be.preview(plan, self.settings.yaw_source, origin=origin)
         if self.edited:
             ingest.save_plan(self.path, self.sources, self.settings)
         by_source = {id(sp.source): sp for sp in plan.sources}
         for k, s in enumerate(self.sources):
             if k >= len(self._source_widgets):
                 break
-            c = ingest.load_clip(s.video, s.lead, s.srt)
+            c = self.be.load_clip(s.video, s.lead, s.srt)
             sp = by_source.get(id(s))
-            lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps · lead {c.lead:g} frames "
-                     f"({c.align['method']})"]
+            lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + (
+                f" · lead {c.lead:g} frames ({c.align['method']})" if self.kind != "video" else "")]
             if sp:
                 r = sp.report
                 if "path_m" in r:
@@ -369,7 +402,10 @@ class IngestPanel:
             self._source_widgets[k]["md"].content = "  \n".join(lines)
         r = plan.report
         md = [f"**plan: {plan.num_images} images** from {len(plan.sources)} source(s) · spacing "
-              f"{r['spacing']:.2f} {r['unit']}"]
+              f"{r['spacing']:.3g} {r['unit']}"]
+        if self.kind == "video" and r.get("mode") == "motion" and r["spacing"] > 0.25:
+            md.append("⚠️ consecutive images move more than a quarter image width apart: SfM without metadata may "
+                      "not connect them (more images or a shorter range)")
         if r.get("rot_weight_m_per_deg") is not None and r["mode"] == "distance":
             md.append(f"path {r['path_m']:.0f} m + rotation {r['rotation_deg']:.0f}° × "
                       f"{r['rot_weight_m_per_deg']:.2f} m/°")
@@ -425,6 +461,9 @@ class IngestPanel:
         if not self.plan or not self.plan.sources:
             self.g_plot.figure = go.Figure()
             return
+        if self.kind == "video":
+            self._update_plot_video()
+            return
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
                             subplot_titles=("altitude [m] · ● planned images", "speed [m/s]", "gimbal pitch [deg]"))
         for sp in self.plan.sources:
@@ -450,6 +489,29 @@ class IngestPanel:
                           legend=dict(orientation="h", y=-0.12), template=self.app.plot_template())
         self.g_plot.figure = fig
 
+    def _update_plot_video(self):
+        """No telemetry: the sampling curve (cumulative image motion, or time) with the planned images."""
+        fig = go.Figure()
+        for sp in self.plan.sources:
+            c = sp.clip
+            idx = np.arange(0, c.n, 6)
+            t = sp.time_base + c.pts[idx]
+            col = "rgb(%d,%d,%d)" % source_color(sp.index)
+            sel = np.where(sp.valid[idx], 1.0, np.nan)
+            fig.add_trace(go.Scatter(x=t, y=sp.s[idx], mode="lines", line=dict(color="rgb(150,150,150)", width=1),
+                                     showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=t, y=sp.s[idx] * sel, mode="lines", line=dict(color=col, width=2),
+                                     name=f"{sp.index + 1}. {sp.prefix}"))
+            if sp.windows:
+                k = np.array([(w0 + w1) // 2 for w0, w1 in sp.windows])
+                fig.add_trace(go.Scatter(x=sp.time_base + c.pts[k], y=sp.s[k], mode="markers",
+                                         marker=dict(size=5, color=col), showlegend=False))
+        unit = "cumulative image motion [image widths]" if self.settings.sampling == "motion" else "time [s]"
+        fig.update_layout(title=f"{unit} · ● planned images", margin=dict(l=40, r=10, t=40, b=30), height=360,
+                          legend=dict(orientation="h", y=-0.2), template=self.app.plot_template(),
+                          xaxis_title="time [s] (project timeline)")
+        self.g_plot.figure = fig
+
     # ------------------------------------------------------------------ frame preview
     def _preview_index(self):
         opts = self.g_pv_source.options
@@ -462,7 +524,7 @@ class IngestPanel:
         if k is None or k >= len(self._source_widgets) or not self._source_widgets[k]["ready"]:
             return
         s = self.sources[k]
-        c = ingest.load_clip(s.video, s.lead, s.srt)
+        c = self.be.load_clip(s.video, s.lead, s.srt)
         t = self.g_pv_time.value
         self.g_pv_time.max = round(c.duration, 1)
         if not keep_time or t > c.duration:
@@ -493,9 +555,13 @@ class IngestPanel:
 
     def _show_preview(self, k, t):
         s = self.sources[k]
-        c = ingest.load_clip(s.video, s.lead, s.srt)
+        c = self.be.load_clip(s.video, s.lead, s.srt)
         i = int(np.clip(np.searchsorted(c.pts, t), 0, c.n - 1))
         self.g_pv_image.image = c.frame_image(c.pts[i])
+        if self.kind == "video":  # no telemetry: frame and time only
+            inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
+            self.g_pv_md.content = f"frame {i} · t = {c.pts[i]:.2f} s · {'inside' if inside else 'outside'} the range"
+            return
         tel = c.telemetry(self.settings.yaw_source)
         a = tel["a"][i]
         inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
@@ -560,8 +626,8 @@ class IngestPanel:
                 self.g_progress.value = 100.0 * done / max(total, 1)
                 self.g_status.content = f"⏳ **extracting** {done}/{total} images · {msg} · {time.time() - t0:.0f} s"
             self.g_status.content = "⏳ **extracting** … decoding up to the first selected frame"
-            ingest.run(self.path, self.sources, self.settings, progress=progress, overwrite=self.g_overwrite.value,
-                       log=lambda m: print(m, flush=True))
+            self.be.run(self.path, self.sources, self.settings, progress=progress, overwrite=self.g_overwrite.value,
+                        log=lambda m: print(m, flush=True))
             self.g_overwrite.value = False
             self.app.load_project()
             n = len(self.app.project.names)

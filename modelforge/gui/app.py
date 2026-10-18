@@ -19,12 +19,15 @@ import viser
 from plotly.subplots import make_subplots
 
 from modelforge import dense, jobs, pipeline, projects, splat
+from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
+
+SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
 
 DENSE_QUALITY = {"superfast (320 px)": "superfast", "low (640 px, fast)": "low", "medium (1200 px)": "medium",
                  "high (full res)": "high", "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
@@ -39,6 +42,8 @@ STAGE_HINTS = {
              "on CPU (~12 min for 2400 pairs).",
     "refine": "Start every camera at its prior, then 3 rounds of triangulate + bundle adjustment with "
               "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min.",
+    "reconstruct": "Videos without metadata: incremental SfM (COLMAP mapper) from the images alone, then the model "
+                   "is oriented up and scaled (no metric scale). Live count of registered images; Stop works.",
     "export": "Write transforms.json + sparse_pc.ply (nerfstudio dataset, ENU world) from sparse/refined. Seconds.",
     "undistort": "Undistorted images + PINHOLE model into dense/ (COLMAP MVS workspace). Seconds.",
     "stereo": "PatchMatch depth and normal maps for every image. CUDA only; the long one (~10 GB at full res).",
@@ -53,6 +58,7 @@ NEXT_STEP = {
     "sfm": "View tab → snapshot **refined**; next: Dense tab (GPU) or Splat tab",
     "features": "next: **pairs**", "pairs": "next: **match**", "match": "next: **refine**",
     "refine": "View tab shows **refined**; next: **export**",
+    "reconstruct": "View tab shows **refined**; next: **export**",
     "export": "transforms.json written; next: Dense tab (GPU) or Splat tab",
     "dense": "View tab → Dense / splat; Export tab for the mesh",
     "undistort": "next: **stereo**", "stereo": "next: **fusion**", "fusion": "next: **mesh**",
@@ -129,6 +135,8 @@ class App:
         self._token = None  # jobs.Token of the running job (the Stop button cancels it)
         self._orbits = {}  # client id -> threading.Event that stops its orbit
         self._build_gui()
+        self._apply_kind()
+        self._set_aspect()
         if self.project:
             names = self.project.snapshot_names()
             self.load_snapshot("refined" if "refined" in names else names[-1])
@@ -245,8 +253,7 @@ class App:
             self.g_plot = gui.add_plotly(go.Figure(), aspect=0.9)
 
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
-            gui.add_markdown("Pose refinement on the CPU: features → pairs → match → refine → export "
-                             "(nerfstudio dataset).")
+            self.g_sparse_md = gui.add_markdown("")
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
                                hint="Runs features → pairs → match → refine → export in sequence. "
                                     "About 15-20 min on CPU for 300 images; matching dominates.")
@@ -263,7 +270,7 @@ class App:
                 hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
                      "(final triangulation, then export / splat / dense in the full pipeline).")
             self.g_skip.on_click(lambda _: self.skip_refine())
-            for stage in pipeline.SFM_STAGES:
+            for stage in SFM_BUTTONS:  # refine (DJI) or reconstruct (no metadata): _apply_kind shows one
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
                                    hint=STAGE_HINTS[stage])
                 b.on_click(lambda _, s=stage: self.run_stage(s))
@@ -424,11 +431,28 @@ class App:
     def plot_template(self):
         return "plotly_dark" if self.dark else "plotly_white"
 
+    def _kind(self):
+        return ingest.load_kind(self.path)
+
+    def _apply_kind(self):
+        """Sparse tab: refine + BA controls for DJI projects, reconstruct for videos without metadata."""
+        video = self._kind() == "video"
+        for name, show in (("refine", not video), ("reconstruct", video)):
+            self.g_buttons[name].visible = show
+        self.g_ba_iters.visible = self.g_skip.visible = not video
+        self.g_sparse_md.content = (
+            "Incremental SfM from the images alone (video without metadata): features → pairs → match → "
+            "reconstruct → export. Arbitrary frame and scale, oriented up." if video else
+            "Pose refinement from the DJI priors: features → pairs → match → refine → export (nerfstudio dataset).")
+        if video and self.g_color.value in ("position deviation", "rotation deviation"):
+            self.g_color.value = "time"
+
     def _header(self):
+        kind = ingest.KINDS[self._kind()].split(" (")[0]
         if self.project is None:
-            return f"### modelforge\n`{self.path}` · no images yet"
+            return f"### modelforge\n`{self.path}` · {kind} · no images yet"
         n_src = len(set(self.project.source.tolist()))
-        return (f"### modelforge\n`{self.path}` · {len(self.project.names)} images"
+        return (f"### modelforge\n`{self.path}` · {kind} · {len(self.project.names)} images"
                 + (f" from {n_src} sources" if n_src > 1 else ""))
 
     def load_project(self):
@@ -474,8 +498,20 @@ class App:
         self._drawn = {}
         self._dense_lines = {}
 
+    def _set_aspect(self):
+        """Frustum aspect from the project's images (portrait phone videos are taller than wide)."""
+        if self.project is not None and self.project.names:
+            from PIL import Image
+            try:
+                with Image.open(os.path.join(self.path, "images", self.project.names[0])) as im:
+                    self.aspect = im.width / im.height
+            except OSError:
+                pass
+
     def _show_project(self):
         self.g_header.content = self._header()
+        self._apply_kind()
+        self._set_aspect()
         if self.project is None:
             self.g_snapshot.options = ("priors",)
             self.g_stats.content = self.g_legend.content = ""
@@ -555,6 +591,8 @@ class App:
         pts, cols = s.points, s.colors
         if len(pts):
             c = self.project.prior_cams.centers
+            if not self.project.has_priors:  # no metadata: the reconstructed cameras bound the scene
+                c = s.cams.centers[s.cams.valid] if s.cams.valid.any() else np.zeros((1, 3))
             mid, extent = c.mean(0), float(np.linalg.norm(c.max(0) - c.min(0)))
             keep = np.all(np.isfinite(pts), axis=1) & (np.linalg.norm(pts - mid, axis=1) < 2.0 * extent + 200.0)
             pts, cols = pts[keep], cols[keep]
@@ -580,6 +618,8 @@ class App:
                 h.on_click(lambda _, i=i: self.select(i))
                 self.cam_handles[i] = h
                 pc = self.project.prior_cams
+                if not pc.valid[i]:  # video without metadata: no prior pose to show
+                    continue
                 ph = self.server.scene.add_camera_frustum(
                     f"/priors/{i}", fov=self.fov, aspect=self.aspect, scale=scale * 0.8, color=PRIOR_COLOR,
                     wxyz=pc.wxyz(i), position=pc.centers[i], visible=bool(self.g_priors.value))
@@ -588,7 +628,7 @@ class App:
     def _draw_lines(self, cams=None):
         cams = cams or self.snap.cams
         pc = self.project.prior_cams
-        v = cams.valid
+        v = cams.valid & pc.valid  # no priors (video without metadata): no correction lines
         if self.g_corr.value and self.snap.name != "priors" and v.any():
             seg = np.stack([pc.centers[v], cams.centers[v]], axis=1).astype(np.float32)
             self.server.scene.add_line_segments("/corrections", seg, colors=(255, 80, 80), thickness=2.0,
@@ -596,11 +636,11 @@ class App:
         else:
             self.server.scene.add_line_segments("/corrections", np.zeros((0, 2, 3), np.float32), colors=(0, 0, 0))
         if self.g_traj.value:
-            p = pc.centers
-            self.server.scene.add_line_segments("/traj/prior", np.stack([p[:-1], p[1:]], 1).astype(np.float32),
+            p, pv = pc.centers, pc.valid[:-1] & pc.valid[1:]
+            self.server.scene.add_line_segments("/traj/prior", np.stack([p[:-1][pv], p[1:][pv]], 1).astype(np.float32),
                                                 colors=PRIOR_COLOR, thickness=1.5, thickness_units="screen")
-            c = cams.centers
-            ok = v[:-1] & v[1:]
+            c, cv = cams.centers, cams.valid
+            ok = cv[:-1] & cv[1:]
             self.server.scene.add_line_segments("/traj/estimate",
                                                 np.stack([c[:-1][ok], c[1:][ok]], 1).astype(np.float32),
                                                 colors=(70, 134, 251), thickness=2.0, thickness_units="screen")
@@ -613,7 +653,7 @@ class App:
         pos, rot = self.deviations()
         v = s.cams.valid
         lines = [f"**{s.name}** · {int(v.sum())}/{len(v)} cameras · {len(s.points):,} points"]
-        if s.name != "priors" and v.any():
+        if s.name != "priors" and v.any() and self.project.has_priors:
             lines.append(f"prior deviation: pos median {np.median(pos[v]):.2f} m (p90 {np.percentile(pos[v], 90):.2f}),"
                          f" rot median {np.median(rot[v]):.2f}° (p90 {np.percentile(rot[v], 90):.2f})")
         if len(s.point_error):
@@ -675,7 +715,7 @@ class App:
         src = self.project.source_names[self.project.source[i]] if self.project.source[i] < len(
             self.project.source_names) else ""
         md = [f"**{name}** · {src} t = {self.project.pts[i]:.2f} s"]
-        if self.snap.cams.valid[i] and self.snap.name != "priors":
+        if self.snap.cams.valid[i] and self.snap.name != "priors" and self.project.has_priors:
             md.append(f"prior deviation: {pos[i]:.2f} m, {rot[i]:.2f}°")
         if st:
             md.append(f"{st['observations']} / {st['keypoints']} keypoints observed · "
@@ -699,6 +739,8 @@ class App:
         return colors
 
     def _apply_colors(self):
+        if self.snap is None:  # nothing drawn yet (e.g. the kind switched the colouring at startup)
+            return
         colors = self._camera_colors()
         for i, h in self.cam_handles.items():
             h.color = SELECTED_COLOR if i == self.selected else tuple(int(c) for c in colors[i])
@@ -738,8 +780,9 @@ class App:
                 self._history(f"✅ **extract** · {len(self.project.names)} images")
             report = pipeline.Report(project)
             pri = self.project.priors
+            sfm = pipeline.sfm_stages(self._kind())
             if stage == "all":
-                seq, skipped = list(pipeline.SFM_STAGES), []
+                seq, skipped = list(sfm), []
                 if splat.available() is None:
                     seq.append("splat")
                 else:
@@ -750,8 +793,8 @@ class App:
                     skipped.append("dense (no CUDA)")
                 for sk in skipped:
                     self._history(f"⚪ **skipped** {sk}")
-            elif stage == "sfm" or stage in pipeline.SFM_STAGES:
-                seq = pipeline.SFM_STAGES if stage == "sfm" else (stage,)
+            elif stage == "sfm" or stage in SFM_BUTTONS:
+                seq = sfm if stage == "sfm" else (stage,)
             elif stage == "splat":
                 seq = ("splat",)
             else:
@@ -763,7 +806,10 @@ class App:
                 self._begin_stage(st, k, len(seq))
                 ts = time.time()
                 if st == "features":
-                    pipeline.stage_features(project, report)
+                    pipeline.stage_features(project, report, self._kind())
+                elif st == "reconstruct":
+                    pipeline.stage_reconstruct(project, report, progress=self._on_reconstruct_event,
+                                               token=self._token)
                 elif st == "pairs":
                     pipeline.stage_pairs(project, report, pri, self.project.meta)
                 elif st == "match":
@@ -790,7 +836,7 @@ class App:
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
-            self.refresh_snapshot_list(select="refined" if stage in ("refine", "sfm", "all") else None)
+            self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
         except jobs.Cancelled:
@@ -1035,7 +1081,7 @@ class App:
 
     @staticmethod
     def _stage_summary(st, rep):
-        r = rep.get(st, {}) if st in pipeline.SFM_STAGES else rep.get("dense", {}).get(st, {})
+        r = rep.get(st, {}) if st in SFM_BUTTONS else rep.get("dense", {}).get(st, {})
         try:
             if st == "features":
                 return f"{r['images']} images, {r['keypoints']:,} keypoints"
@@ -1048,6 +1094,11 @@ class App:
                 e, d = f["point_error_px"], f["prior_deviation"]["position_m"]
                 return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "
                         f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']})")
+            if st == "reconstruct":
+                e = r["point_error_px"]
+                return (f"{r['reg_images']}/{r['images']} images registered, {r['points3D']:,} points, error median "
+                        f"{e.get('median')} px, f = {r['camera']['params'][0]:.0f} px, up from {r['frame']['up']}"
+                        + (f", **{len(r['models'])} models** (kept the largest)" if len(r["models"]) > 1 else ""))
             if st == "export":
                 return f"{r['frames']} frames → transforms.json"
             if st == "fusion":
@@ -1060,6 +1111,13 @@ class App:
             pass
         text = str(r)
         return text[:160] + ("…" if len(text) > 160 else "")
+
+    def _on_reconstruct_event(self, ev):
+        n = len(self.project.names) if self.project else 0
+        k = ev.get("registered", 0)
+        self._job["detail"] = f"registered {k} / {n} images"
+        if n:
+            self.g_progress.value = 100.0 * min(k, n) / n
 
     def _on_refine_event(self, ev):
         phase, rnd, rounds = ev["phase"], ev.get("round", 0), ev.get("rounds", 1)

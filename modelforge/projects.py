@@ -82,15 +82,22 @@ def _mtime(path):
     return max(times or [os.path.getmtime(path)])
 
 
-def create(root, name, copy_plan_from=None):
-    """New project folder root/name with an ingest.json (empty, or the sources and settings of
-    another project)."""
+def create(root, name, copy_plan_from=None, kind="dji"):
+    """New project folder root/name with an ingest.json of the given kind (ingest.KINDS): empty, or
+    the sources and settings of another project (whose kind it then takes)."""
     _check_name(name)
+    if kind not in ingest.KINDS:
+        raise ValueError(f"project kind must be one of {tuple(ingest.KINDS)}")
     path = os.path.join(root, name)
     if os.path.exists(path):
         raise FileExistsError(f"{path} already exists")
-    sources, settings = ingest.load_plan(copy_plan_from) if copy_plan_from else ([], ingest.Settings())
-    ingest.save_plan(path, sources, settings)
+    if copy_plan_from:
+        sources, settings = ingest.load_plan(copy_plan_from)
+        kind = ingest.load_kind(copy_plan_from)
+    else:
+        from modelforge.video import ingest as video_ingest
+        sources, settings = [], (video_ingest.default_settings() if kind == "video" else ingest.Settings())
+    ingest.save_plan(path, sources, settings, kind=kind)
     return path
 
 
@@ -156,7 +163,8 @@ def status(path):
     stages += [f"dense:{s}" for s in report.get("dense", {})]
     if os.path.exists(os.path.join(path, "splat", "splat_enu.ply")):
         stages.append("splat")
-    return {"name": os.path.basename(os.path.normpath(path)), "path": path, "sources": sources, "settings": settings,
+    return {"name": os.path.basename(os.path.normpath(path)), "path": path, "kind": ingest.load_kind(path),
+            "sources": sources, "settings": settings,
             "images": n_images, "stages": stages, "final": _entries(path, FINAL),
             "intermediate": _entries(path, INTERMEDIATE)}
 

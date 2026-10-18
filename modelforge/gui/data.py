@@ -101,6 +101,7 @@ class Project:
             cams.centers[i] = p.center
             cams.R_wc[i] = p.R_cw.T
         self.prior_cams = cams
+        self.has_priors = priors_mod.has_poses(self.priors)  # False: video without metadata
 
     def report(self):
         path = os.path.join(self.path, "report.json")

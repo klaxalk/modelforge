@@ -31,12 +31,19 @@ import pycolmap
 
 from modelforge import dense, jobs
 from modelforge.export import nerfstudio
-from modelforge.sfm import features, pairs, priors as priors_mod, refine, robust
+from modelforge.dji import ingest
+from modelforge.sfm import features, pairs, priors as priors_mod, reconstruct, refine, robust
 
-SFM_STAGES = ("features", "pairs", "match", "refine", "export")
+SFM_STAGES = ("features", "pairs", "match", "refine", "export")  # DJI: refine from the pose priors
+VIDEO_SFM_STAGES = ("features", "pairs", "match", "reconstruct", "export")  # no metadata: incremental SfM
 DENSE_STAGES = ("undistort", "stereo", "fusion", "mesh", "texture")
-STAGES = SFM_STAGES + DENSE_STAGES
-GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": STAGES}
+STAGES = ("features", "pairs", "match", "refine", "reconstruct", "export") + DENSE_STAGES  # canonical order
+GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": SFM_STAGES + DENSE_STAGES}
+
+
+def sfm_stages(kind):
+    """The sparse stages of a project kind (ingest.json "kind")."""
+    return VIDEO_SFM_STAGES if kind == "video" else SFM_STAGES
 
 
 LISTENERS = []  # callables(msg), e.g. the GUI log panel
@@ -58,13 +65,25 @@ class Report:
         json.dump(self.data, open(self.path, "w"), indent=1)
 
 
-def stage_features(project, report):
-    stats = features.extract(project)
+def stage_features(project, report, kind="dji"):
+    """DJI: upright SIFT (the gimbal keeps the horizon level) and an OPENCV camera refined against the
+    priors. Videos without metadata: oriented SIFT (handheld footage rolls) and a RADIAL camera (one
+    focal length: without priors, separate fx / fy drift apart on short sequences)."""
+    video = kind == "video"
+    stats = features.extract(project, upright=not video, camera_model="RADIAL" if video else "OPENCV")
     log(f"features: {stats}")
     report.set("features", stats)
 
 
 def stage_pairs(project, report, pri, meta):
+    if not priors_mod.has_poses(pri):  # video without metadata: sequential + quadratic (+ exhaustive if small)
+        names = priors_mod.by_order(pri)
+        seqs = [[n for n in names if pri[n].source == s] for s in sorted({pri[n].source for n in names})]
+        pp = pairs.sequential(seqs)
+        pairs.write(project, pp)
+        report.set("pairs", {"num_pairs": len(pp), "method": "sequential"})
+        log(f"pairs: {len(pp)} (sequential)")
+        return
     ground_z = meta.get("ground_z", -meta["enu_origin_lla"][2])
     pp = pairs.select(pri, ground_z)
     pairs.write(project, pp)
@@ -177,10 +196,22 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     return rec
 
 
+def stage_reconstruct(project, report, progress=None, token=None):
+    """Incremental SfM (videos without metadata) -> sparse/refined; see modelforge.sfm.reconstruct."""
+    stats = reconstruct.incremental(project, token=token, progress=progress)
+    report.set("reconstruct", stats)
+    log(f"reconstruct: {stats['reg_images']}/{stats['images']} images registered, {stats['points3D']} points, "
+        f"error median {stats['point_error_px'].get('median')} px, models {stats['models']}, {stats['seconds']} s")
+    if len(stats["models"]) > 1:
+        log(f"reconstruct: the images split into {len(stats['models'])} models; kept the largest")
+    return stats
+
+
 def stage_export(project, report, rec=None):
     if rec is None:
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    path = nerfstudio.export(rec, project, extra={"world": "ENU", "source": "modelforge.pipeline"})
+    world = "ENU" if ingest.load_kind(project) != "video" else "local: up-oriented, arbitrary scale"
+    path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"})
     report.set("export", {"transforms": path, "frames": rec.num_reg_images()})
     log(f"export: {path}")
 
@@ -207,10 +238,10 @@ def stage_dense(project, report, stage, mesh_methods=("delaunay",), quality=dens
     log(f"{stage}: {rep.get(stage)}")
 
 
-def expand_stages(spec):
+def expand_stages(spec, groups=GROUPS):
     out = []
     for s in spec.split(","):
-        for stage in GROUPS.get(s, (s,)):
+        for stage in groups.get(s, (s,)):
             if stage not in out:
                 out.append(stage)
     return [s for s in STAGES if s in out]  # canonical order
@@ -239,13 +270,15 @@ def main():
     unknown = [s for s in args.stages.split(",") if s not in STAGES and s not in GROUPS]
     if unknown:
         ap.error(f"unknown stages {unknown}")
-    stages = expand_stages(args.stages)
+    kind = ingest.load_kind(args.project)
+    sfm = sfm_stages(kind)
+    stages = expand_stages(args.stages, {"sfm": sfm, "dense": DENSE_STAGES, "all": sfm + DENSE_STAGES})
 
     report = Report(args.project)
     pri, meta = priors_mod.load(args.project)
     rec = None
     if "features" in stages:
-        stage_features(args.project, report)
+        stage_features(args.project, report, kind)
     if "pairs" in stages:
         stage_pairs(args.project, report, pri, meta)
     if "match" in stages:
@@ -254,6 +287,8 @@ def main():
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
                                   estimate_systematic=not args.no_systematic)
         rec = stage_refine(args.project, report, pri, model=model, max_iterations=args.ba_iterations)
+    if "reconstruct" in stages:
+        stage_reconstruct(args.project, report)
     if "export" in stages:
         stage_export(args.project, report, rec)
     methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)

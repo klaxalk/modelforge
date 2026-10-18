@@ -1,4 +1,5 @@
-"""Image pair selection from pose priors: time neighbours + overlapping views.
+"""Image pair selection: from pose priors (time neighbours + overlapping views), or without priors
+(sequential(): time neighbours, quadratic jumps, exhaustive for small projects).
 
 View overlap is approximated with look-at points: the optical axis intersected
 with the ground plane at takeoff height (z = -rel_alt of the ENU origin), capped
@@ -42,6 +43,32 @@ def select(priors, ground_z, seq_neighbors=5, spatial_neighbors=15, max_axis_ang
         for j in cand[np.argsort(d[cand])][:spatial_neighbors]:
             pairs.add((min(i, j), max(i, j)))
     return [(names[i], names[j]) for i, j in sorted(pairs)]
+
+
+def sequential(sequences, overlap=10, quadratic=True, exhaustive_below=150, cross_step=5):
+    """Pairs without pose priors (videos without metadata). sequences: image names per source, in time
+    order. Small projects match exhaustively; otherwise time neighbours (+-overlap), quadratic jumps
+    (16, 32, 64, ... frames apart: revisits and loops) within each source, and a coarse grid (every
+    cross_step-th image) between sources so separate videos can join."""
+    names = [n for seq in sequences for n in seq]
+    if len(names) <= exhaustive_below:
+        return [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+    out = set()
+    for seq in sequences:
+        n = len(seq)
+        for i in range(n):
+            for k in range(1, overlap + 1):
+                if i + k < n:
+                    out.add((seq[i], seq[i + k]))
+            j = 1
+            while quadratic and (2 ** j) < n:
+                if 2 ** j > overlap and i + 2 ** j < n:
+                    out.add((seq[i], seq[i + 2 ** j]))
+                j += 1
+    for si, a_seq in enumerate(sequences):
+        for b_seq in sequences[si + 1:]:
+            out.update((a, b) for a in a_seq[::cross_step] for b in b_seq[::cross_step])
+    return sorted(out)
 
 
 def write(project, pairs):

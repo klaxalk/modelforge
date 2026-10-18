@@ -79,9 +79,24 @@ def load_plan(project):
     return [Source(**s) for s in d.get("sources", [])], Settings(**d.get("settings", {}))
 
 
-def save_plan(project, sources, settings):
+KINDS = {"dji": "DJI drone video (embedded position + attitude)",
+         "video": "video without metadata (phone, action camera, ...)"}
+
+
+def load_kind(project):
+    """The project kind from ingest.json ("dji" when missing: projects made before kinds existed)."""
+    path = os.path.join(project, PLAN_FILE)
+    try:
+        return json.load(open(path)).get("kind", "dji")
+    except (OSError, ValueError):
+        return "dji"
+
+
+def save_plan(project, sources, settings, kind=None):
+    """Write ingest.json; kind None keeps the project's current kind."""
     os.makedirs(project, exist_ok=True)
-    json.dump({"sources": [asdict(s) for s in sources], "settings": asdict(settings)},
+    kind = kind or load_kind(project)
+    json.dump({"kind": kind, "sources": [asdict(s) for s in sources], "settings": asdict(settings)},
               open(os.path.join(project, PLAN_FILE), "w"), indent=1)
 
 

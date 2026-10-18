@@ -11,14 +11,26 @@ import os
 import numpy as np
 
 
+def opencv_params(cam):
+    """COLMAP camera -> OPENCV (fx, fy, cx, cy, k1, k2, p1, p2); simpler models fill fy = fx and zeros
+    (videos without metadata use RADIAL: one focal length, as real pixels are square)."""
+    p, m = [float(v) for v in cam.params], cam.model.name
+    if m == "OPENCV":
+        return tuple(p)
+    if m in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL"):
+        f, cx, cy, k = p[0], p[1], p[2], p[3:] + [0.0, 0.0]
+        return f, f, cx, cy, k[0], k[1], 0.0, 0.0
+    if m == "PINHOLE":
+        return p[0], p[1], p[2], p[3], 0.0, 0.0, 0.0, 0.0
+    raise ValueError(f"camera model {m} has no OPENCV equivalent for nerfstudio")
+
+
 def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None):
     cams = list(rec.cameras.values())
     if len(cams) != 1:
         raise ValueError(f"expected one shared camera, got {len(cams)}")
     cam = cams[0]
-    if cam.model.name != "OPENCV":
-        raise ValueError(f"expected OPENCV camera, got {cam.model.name}")
-    fx, fy, cx, cy, k1, k2, p1, p2 = (float(v) for v in cam.params)
+    fx, fy, cx, cy, k1, k2, p1, p2 = opencv_params(cam)
 
     frames = []
     for image_id in sorted(rec.reg_image_ids(), key=lambda i: rec.image(i).name):
