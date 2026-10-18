@@ -230,6 +230,11 @@ def dense_artifacts(path):
         t = os.path.join(ws, f"textured-{method}", "mesh.ply")
         if os.path.exists(t):
             found["textured"][method] = t
+    for name in ("preview.ply", "mesh.ply"):  # the mesh from the splat (vertex colours)
+        p = os.path.join(path, "splatmesh", name)
+        if os.path.exists(p):
+            found["meshes"]["splat"] = p
+            break
     p = os.path.join(path, "splat", "splat_enu.ply")
     if os.path.exists(p):
         found["splat"] = p

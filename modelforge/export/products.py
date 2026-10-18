@@ -43,6 +43,8 @@ def available(project):
         plain = os.path.exists(os.path.join(ws, f"meshed-{m}.ply"))
         if textured or plain:
             meshes[m] = {"textured": textured, "plain": plain}
+    if os.path.exists(_plain_path(project, "splat")):  # the mesh from the splat (modelforge.splat_mesh)
+        meshes["splat"] = {"textured": False, "plain": True}
     return {"meshes": meshes, "splat": os.path.exists(os.path.join(project, "splat", "splat_enu.ply"))}
 
 
@@ -70,15 +72,23 @@ def load_textured(path):
     return mesh
 
 
+def _plain_path(project, method):
+    """The untextured mesh: COLMAP's meshed-<method>.ply, or the splat mesh (vertex colours)."""
+    if method == "splat":
+        return os.path.join(project, "splatmesh", "mesh.ply")
+    return os.path.join(dense.workspace(project), f"meshed-{method}.ply")
+
+
 def load_mesh(project, method="delaunay", textured=True):
     import trimesh
     ws = dense.workspace(project)
     t = os.path.join(ws, f"textured-{method}", "mesh.ply")
-    if textured and os.path.exists(t):
+    if textured and method != "splat" and os.path.exists(t):
         return load_textured(t), True
-    p = os.path.join(ws, f"meshed-{method}.ply")
+    p = _plain_path(project, method)
     if not os.path.exists(p):
-        raise RuntimeError(f"no {method} mesh in {ws}: run the dense stages first")
+        raise RuntimeError(f"no {method} mesh in {os.path.dirname(p)}: run "
+                           + ("the Splat mesh tab" if method == "splat" else "the dense stages") + " first")
     return trimesh.load(p, process=False), False
 
 
@@ -92,21 +102,25 @@ def export_mesh(project, method="delaunay", fmt="glb", textured=True):
     ws = dense.workspace(project)
     if fmt == "ply":  # COLMAP's own files, ENU
         tdir = os.path.join(ws, f"textured-{method}")
-        if textured and os.path.exists(os.path.join(tdir, "mesh.ply")):
+        if textured and method != "splat" and os.path.exists(os.path.join(tdir, "mesh.ply")):
             dst = base + "-textured"
             shutil.rmtree(dst, ignore_errors=True)
             shutil.copytree(tdir, dst)
             paths = [os.path.join(dst, f) for f in sorted(os.listdir(dst), key=lambda f: not f.endswith(".ply"))]
         else:
-            src = os.path.join(ws, f"meshed-{method}.ply")
+            src = _plain_path(project, method)
             if not os.path.exists(src):
-                raise RuntimeError(f"no {method} mesh in {ws}: run the dense stages first")
+                raise RuntimeError(f"no {method} mesh in {os.path.dirname(src)}: run it first")
             shutil.copyfile(src, base + ".ply")
             paths = [base + ".ply"]
         _georef(project, paths[0], "ENU")
         return paths
     mesh, has_tex = load_mesh(project, method, textured)
-    mesh.vertices = mesh.vertices @ ENU_TO_YUP.T
+    T = np.eye(4)
+    T[:3, :3] = ENU_TO_YUP
+    # rotates stored vertex normals too: assigning vertices drops them, and trimesh's recomputation is a
+    # slow Python loop without scipy (105 s for the 173k-face test mesh)
+    mesh.apply_transform(T)
     if fmt == "glb":
         path = base + ".glb"
         mesh.export(path, file_type="glb")
@@ -192,7 +206,8 @@ def _georef(project, path, axes, **extra):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
-    ap.add_argument("--mesh", default="delaunay", choices=dense.MESH_METHODS)
+    ap.add_argument("--mesh", default="delaunay", choices=dense.MESH_METHODS + ("splat",),
+                    help="splat: the mesh from the Gaussian splat (modelforge.splat_mesh)")
     ap.add_argument("--mesh-format", default="glb", choices=MESH_FORMATS)
     ap.add_argument("--untextured", action="store_true", help="export the vertex-coloured mesh, not the textured one")
     ap.add_argument("--splat-format", default="ply", choices=SPLAT_FORMATS)

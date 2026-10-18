@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import dense, jobs, pipeline, projects, splat
+from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import features, reconstruct
@@ -52,7 +52,9 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
-    "all": "Full pipeline: sparse → splat → dense.",
+    "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
+                 "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
+    "all": "Full pipeline: sparse → splat (→ splat mesh) → dense.",
 }
 NEXT_STEP = {
     "all": "View tab: refined cameras, mesh and splat; Export tab for the files",
@@ -65,6 +67,7 @@ NEXT_STEP = {
     "undistort": "next: **stereo**", "stereo": "next: **fusion**", "fusion": "next: **mesh**",
     "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written; Export tab",
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
+    "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
 }
 LOG_LINES = 200
 
@@ -399,6 +402,36 @@ class App:
             gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
                            "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                 lambda _: self._refresh_dense())
+
+        with tabs.add_tab("Splat mesh", viser.Icon.CUBE):
+            gui.add_markdown(
+                "An alternative to the Dense tab's COLMAP mesh: a mesh **from the finished splat**. Depth and "
+                "colour are rendered from the splat at every camera, fused into a truncated signed distance "
+                "field (TSDF) and meshed with marching cubes. Needs a splat (Splat tab) and the GPU; takes "
+                "seconds to a minute. The mesh has vertex colours and lies in the same frame as the cameras, "
+                "the splat and the COLMAP mesh.")
+            self.g_sm_quality = gui.add_dropdown(
+                "Quality", options=tuple(splat_mesh.QUALITY), initial_value="medium",
+                hint="Voxel size as pixels at the median rendered depth: coarse 8, medium 4, fine 2 (at the render "
+                     "width). Finer = more detail, more faces and memory; on the test bag fine gave 3x the faces "
+                     "for about the same accuracy.")
+            self.g_sm_width = gui.add_number(
+                "Render width (px)", initial_value=960, min=160, max=4096, step=160,
+                hint="Width of the depth images rendered from the splat (never larger than the images). Wider = "
+                     "finer automatic voxels and slower fusion.")
+            self.g_sm_depth = gui.add_number(
+                "Max depth (m, 0 = auto)", initial_value=0.0, min=0.0, step=5.0,
+                hint="Depth beyond this is not fused, which keeps the far background and sky floaters out of the "
+                     "mesh. 0 = 3 x the median rendered depth.")
+            self.g_sm_in_all = gui.add_checkbox(
+                "Include in Run full pipeline", initial_value=True,
+                hint="Build the splat mesh right after the splat when running the full pipeline (it is quick).")
+            b = gui.add_button("Build mesh from splat", icon=viser.Icon.CUBE,
+                               disabled=splat_mesh.available() is not None,
+                               hint="Render depth from splat/splat_enu.ply at every camera, fuse (TSDF), mesh: "
+                                    "splatmesh/mesh.ply + a simplified preview for the View tab (Mesh: splat).")
+            b.on_click(lambda _: self.run_stage("splatmesh"))
+            self.g_buttons["splatmesh"] = b
 
         with self.left.add_tab("Export", viser.Icon.DOWNLOAD):
             self.g_export_md = gui.add_markdown("")
@@ -850,6 +883,8 @@ class App:
                 seq, skipped = list(sfm), []
                 if splat.available() is None:
                     seq.append("splat")
+                    if self.g_sm_in_all.value:
+                        seq.append("splatmesh")
                 else:
                     skipped.append(f"splat ({splat.available()})")
                 if dense.has_cuda():
@@ -860,8 +895,8 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage == "splat":
-                seq = ("splat",)
+            elif stage in ("splat", "splatmesh"):
+                seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
             m = self.g_mesh_method.value
@@ -896,6 +931,12 @@ class App:
                     self._run_splat(project)
                     report = pipeline.Report(project)  # splat.run wrote its stats
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
+                elif st == "splatmesh":
+                    self._run_splat_mesh(project)
+                    report = pipeline.Report(project)
+                    self._refresh_dense()
+                    if "splat" in self.g_mesh.options:
+                        self.g_mesh.value = "splat"  # show the new mesh in the View tab
                 else:
                     pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value],
                                          token=self._token, on_progress=self._on_stereo_progress,
@@ -903,7 +944,7 @@ class App:
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat", "all") or stage in pipeline.DENSE_STAGES:
+            if stage in ("dense", "splat", "splatmesh", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
@@ -925,7 +966,8 @@ class App:
                 self.running = False
                 self.g_state.content = final or "❌ **stopped**"
             unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
-                           "splat": splat.available() is not None}
+                           "splat": splat.available() is not None,
+                           "splatmesh": splat_mesh.available() is not None}
             for name, b in self.g_buttons.items():
                 b.disabled = unavailable.get(name, False)
             self.g_progress.visible = False
@@ -1071,6 +1113,16 @@ class App:
         self._job["detail"] = f"PatchMatch {passes[min(pass_index, 1)]} pass: view {view} / {views}"
         self.g_progress.value = 100.0 * (pass_index * views + view) / (2 * views)
 
+    def _run_splat_mesh(self, project):
+        def progress(i, n):
+            self.g_progress.value = 100.0 * i / n
+            self._job["detail"] = f"fusing view {i} / {n}"
+        depth = float(self.g_sm_depth.value)
+        stats = splat_mesh.run(project, self.g_sm_quality.value, int(self.g_sm_width.value),
+                               max_depth=depth if depth > 0 else None, on_line=self._on_log, on_progress=progress,
+                               job=self._token)
+        return stats
+
     def _run_splat(self, project):
         iters = int(self.g_splat_iters.value)
 
@@ -1190,6 +1242,10 @@ class App:
                 return f"{r['frames']} frames → transforms.json"
             if st == "fusion":
                 return f"{r.get('points', r)}"
+            if st == "splatmesh":
+                r = rep["splat_mesh"]
+                return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "
+                        f"({r['quality']}), max depth {r['max_depth_m']:.0f} m")
             if st == "splat":
                 r = rep["splat"]
                 err = (r.get("lidar_depth") or {}).get("error")
@@ -1367,7 +1423,8 @@ class App:
             note = "textured"
             if mesh is None:
                 mesh = gdata.load_mesh(self.dense["meshes"][method])
-                note = ("no texture yet: run the texture stage" if method not in self.dense["textured"] else
+                note = ("from the splat, vertex colours" if method == "splat" else
+                        "no texture yet: run the texture stage" if method not in self.dense["textured"] else
                         "untextured preview" if not self.g_mesh_tex.value else
                         f"textured mesh over {gdata.MAX_TEXTURED_FACES:,} faces: grey preview")
             self.server.scene.add_mesh_trimesh("/dense/mesh", mesh)

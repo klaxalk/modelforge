@@ -198,6 +198,10 @@ def test_quick_bar(app):
     assert state()["Orbit"] == "●"
     app._quick_click("Orbit", c)
     assert state()["Orbit"] == "○"
+    import time
+    t0 = time.time()
+    while not app.ingest.prev and time.time() - t0 < 60:  # Plan is clickable once the planner thread has a plan
+        time.sleep(0.2)
     app._set_plan_visible(True)  # the Ingest flight plan: quick bar, View and Ingest checkboxes in step
     app._quick_click("Plan", None)
     assert not app.ingest.g_show.value and not app.g_plan.value

@@ -202,6 +202,7 @@ modelforge/
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
+│   ├── splat_mesh.py   # mesh from the splat: TSDF fusion of rendered depth (export/splat_tsdf.py in /opt/nerfstudio)
 │   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss)
 │   ├── projects.py     # project folders: list / create / status / clean
 │   ├── jobs.py         # stopping jobs: Token (check / cancel / run killable subprocesses)
@@ -857,6 +858,49 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
 - Each checkpoint is ~0.75 GB per million Gaussians (it includes optimizer
   state), so very small intervals slow training.
 
+**Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
+`python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):
+an alternative to COLMAP's dense mesh, asked for by the user (who suggested an ESDF over the splat;
+a TSDF fused from rendered depth is the standard form of that idea, as in 2DGS and nerfstudio's TSDF
+export).
+- **How.** `export/splat_tsdf.py` runs in nerfstudio's venv (gsplat + Open3D, GPU).
+  - Inputs: `splat/splat_enu.ply` and the transforms.json cameras, at a virtual pinhole of each
+    camera's intrinsics (render width 960 by default).
+  - Per view it renders RGB + expected depth + alpha and keeps pixels with alpha ≥ 0.7 whose depth
+    differs from each 4-neighbour by < 5%. This drops the blended depths at silhouettes, which would
+    fuse into "curtains".
+  - Depth beyond 3 × the median depth is not fused (background, sky floaters).
+  - Fusion: Open3D `VoxelBlockGrid` on CUDA, truncation 4 voxels. Marching cubes over voxels seen
+    by ≥ 2 views. Connected pieces under 0.2% of the faces are dropped.
+  - Output `PROJECT/splatmesh/`: `mesh.ply` (vertex colours, ENU), `preview.ply` (≤ 300k faces,
+    quadric decimation), `stats.json`; stats also in `report.json["splat_mesh"]`.
+  - Quality = the voxel as pixels at the median depth: coarse 8, medium 4 (default), fine 2.
+- **Open3D gotcha:** the legacy `ScalableTSDFVolume` (Open3D 0.20 in the nerfstudio venv)
+  returns no surface at all, even for a synthetic wall integrated 5 times. The tensor
+  `VoxelBlockGrid` works; its `extract_triangle_mesh` defaults to weight ≥ 3 (views).
+- **Depth bias:** gsplat's expected depth blends Gaussian *centre* depths, so oblique views pull
+  depth toward the camera by about the Gaussian size (synthetic 9 cm discs at ~50°: 6.8 cm,
+  1.1%). Ray–Gaussian intersection depth (2DGS, RaDe-GS) would remove it; gsplat 1.4 lacks it.
+- **Measured on `data/rosbag_exp`** (40 views, the LiDAR-supervised splat), against the LiDAR cloud:
+
+  | | faces | mesh → LiDAR median / p90 | LiDAR covered (< 30 cm) | time |
+  |---|---|---|---|---|
+  | splat mesh medium (13.8 cm voxel) | 610k | 14.5 / 51 cm (100% within 2 m) | 77% | 9 s |
+  | splat mesh fine (6.9 cm) | 2.04M | 13.8 / 38 cm | 73% | 24 s |
+  | COLMAP Delaunay, superfast 320 px | 76k | 26.8 / 121 cm (10% within 2 m) | 37% | |
+
+  The COLMAP row is the 320 px preset, so it is not a like-for-like comparison. The test LiDAR is
+  the MVS fused cloud (~8.5 cm spacing), which bounds the medians.
+- GUI: quality, render width, max depth (0 = auto), "Include in Run full pipeline" (on; the
+  pipeline is then sparse → splat → splat mesh → dense), **Build mesh from splat**. The View tab's
+  Mesh dropdown gets `splat` (vertex colours) and switches to it; the Export tab exports it
+  (glb / obj / ply).
+- Mesh export now rotates with `trimesh.apply_transform`, which keeps the stored vertex normals.
+  Assigning vertices dropped them, and trimesh recomputes normals in a slow Python loop without
+  scipy: 105 s for a 173k-face mesh, now < 1 s.
+- Tests: `tests/test_splat_mesh.py` (a synthetic splat of ground + box: geometry within 1.5
+  voxels, colours, View / Export wiring).
+
 **Export** (`modelforge/export/products.py`, Export tab, or
 `python -m modelforge.export.products PROJECT [--mesh-format glb|obj|ply] [--splat-format ply|splat]`):
 - Writes to `PROJECT/export/` (a final result).
@@ -1178,6 +1222,7 @@ Code layout:
     run is in a background thread.
   - **Splat**: method, iterations, disk cache, downsample factor, LiDAR start +
     LiDAR depth weight (rosbag), train, Stop.
+  - **Splat mesh**: the mesh from the splat (see "Mesh from the splat").
   - **Export**: mesh and splat exports (see "Export" above), with
     `export/` status.
 
