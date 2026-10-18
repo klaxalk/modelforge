@@ -159,3 +159,40 @@ def test_refresh_does_not_resend_unchanged_layers(app, project, monkeypatch):
     os.utime(p, (time.time() + 5, time.time() + 5))  # a new splat file
     app._refresh_dense()
     assert len(calls) == 3
+
+
+def test_quick_bar(app):
+    import contextlib
+
+    class Camera:
+        position, look_at = (10.0, 0.0, 5.0), (0.0, 0.0, 0.0)
+
+    class Client:
+        client_id, camera = 11, Camera()
+
+        def atomic(self):
+            return contextlib.nullcontext()
+
+    app._refresh_dense()
+    state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
+    app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
+    app._sync_quickbar()
+    assert state() == {"Splat": "●", "Mesh": "○", "Points": state()["Points"], "Dense": "○", "Orbit": "○"}
+    app._quick_click("Splat", None)
+    assert not app.g_splat.value and state()["Splat"] == "○"
+    app._quick_click("Mesh", None)
+    assert app.g_mesh.value == "delaunay" and state()["Mesh"] == "●"
+    app._quick_click("Mesh", None)
+    assert app.g_mesh.value == "off"
+    app._quick_click("Mesh", None)
+    assert app.g_mesh.value == "delaunay"  # back to the last mesh
+    before = app.g_points.value
+    app._quick_click("Points", None)
+    assert app.g_points.value is (not before)
+    app._quick_click("Dense", None)
+    assert app.g_dense_pts.value and state()["Dense"] == "●"
+    c = Client()
+    app._quick_click("Orbit", c)
+    assert state()["Orbit"] == "●"
+    app._quick_click("Orbit", c)
+    assert state()["Orbit"] == "○"

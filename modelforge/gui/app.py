@@ -208,6 +208,8 @@ class App:
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
                 self.g_mesh_tex.on_update(lambda _: self._draw_mesh())
+                for h in (self.g_dense_pts, self.g_mesh, self.g_splat):  # keep the quick bar in step
+                    h.on_update(lambda _: self._sync_quickbar())
                 self.g_splat.on_update(lambda _: self._draw_splat())
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
                                            hint="Deviation from the prior, mean reprojection error, capture "
@@ -225,6 +227,7 @@ class App:
                                                     hint="Orbit speed; can be changed while orbiting.")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
+            self.g_points.on_update(lambda _: self._sync_quickbar())
             for h in (self.g_cams, self.g_thumbs, self.g_priors, self.g_scale):
                 h.on_update(lambda _: self._draw_cameras())
             self.g_color.on_update(lambda _: self._apply_colors())
@@ -372,10 +375,14 @@ class App:
                                            hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
                                                 "for every open browser. Remembered across restarts.")
             self.g_dark.on_update(lambda _: self.set_dark(self.g_dark.value))
-        with gui.add_folder("History"):
+        with gui.add_folder("History", expand_by_default=False):
             self.g_history = gui.add_markdown("_nothing run in this session_")
         # third window: the log, floating at the bottom of the 3D view (viser docks panels only to
         # the left / right edges or above / below another panel, so "bottom" is a float)
+        # quick bar: the View tab's visibility toggles + orbit, floating at the top of the 3D view
+        self.quick = gui.add_panel()
+        self._quick_tab = self.quick.add_tab("Quick view", viser.Icon.EYE)
+        self._quick_group, self._quick_labels = None, None
         self.log_panel = gui.add_panel()
         with self.log_panel.add_tab("Log", viser.Icon.TERMINAL_2):
             gui.add_markdown(f"_last {LOG_LINES} lines of the running job, newest first_")
@@ -387,6 +394,8 @@ class App:
         self.left.set_width(420)
         self.server.gui.main_panel.dock_right()
         self.log_panel.float(x=8, y=-8, width=900, height=260)  # negative y: measured from the bottom
+        self.log_panel.minimize()  # folded by default; one click opens it
+        self.quick.float(x=8, y=8, width=470, height=96)
 
     # ------------------------------------------------------------- settings
     def _settings_path(self):
@@ -819,6 +828,55 @@ class App:
         for t in tokens:
             threading.Thread(target=t.cancel, daemon=True).start()
 
+    # ------------------------------------------------------------ quick bar
+    def _quick_items(self):
+        """(name, available, on) for the quick bar, mirroring the View tab."""
+        d = getattr(self, "dense", None) or {"splat": None, "meshes": {}, "fused": None}
+        return (("Splat", d["splat"] is not None or getattr(self, "_splat_live_on", False), self.g_splat.value),
+                ("Mesh", bool(d["meshes"]), self.g_mesh.value != "off"),
+                ("Points", self.project is not None, self.g_points.value),
+                ("Dense", d["fused"] is not None, self.g_dense_pts.value),
+                ("Orbit", True, bool(self._orbits)))
+
+    def _sync_quickbar(self):
+        """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
+        ● on, ○ off, · nothing to show yet."""
+        labels = tuple(f"{'●' if on and avail else '○' if avail else '·'} {name}"
+                       for name, avail, on in self._quick_items())
+        if labels == self._quick_labels:
+            return
+        self._quick_labels = labels
+        if self._quick_group is not None:
+            self._quick_group.remove()
+        with self._quick_tab:
+            g = self.server.gui.add_button_group(
+                "", options=labels, order=1.0,
+                hint="Show / hide the splat, the mesh, the sparse points and the dense points, and start / stop "
+                     "the orbit (● on, ○ off, · nothing yet). Same as the View tab.")
+        g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
+        self._quick_group = g
+
+    def _quick_click(self, name, client):
+        avail = {n: a for n, a, _ in self._quick_items()}
+        if not avail.get(name):
+            return
+        if name == "Splat":
+            self.g_splat.value = not self.g_splat.value
+        elif name == "Mesh":
+            meshes = tuple(self.dense["meshes"])
+            if self.g_mesh.value != "off":
+                self._last_mesh, self.g_mesh.value = self.g_mesh.value, "off"
+            else:
+                last = getattr(self, "_last_mesh", None)
+                self.g_mesh.value = last if last in meshes else meshes[0]
+        elif name == "Points":
+            self.g_points.value = not self.g_points.value
+        elif name == "Dense":
+            self.g_dense_pts.value = not self.g_dense_pts.value
+        elif name == "Orbit":
+            self.toggle_orbit(client)
+        self._sync_quickbar()
+
     def toggle_orbit(self, client):
         """Start / stop orbiting this client's camera around its current look-at point (about +z)."""
         if client is None:
@@ -831,6 +889,7 @@ class App:
             self._orbits[client.client_id] = stop
             threading.Thread(target=self._orbit, args=(client, stop), daemon=True).start()
         self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        self._sync_quickbar()
 
     def _orbit(self, client, stop, rate_hz=30.0, hold_s=0.6):
         """Each tick rotates the browser's *current* camera about its look-at point (+z axis), so mouse
@@ -869,6 +928,7 @@ class App:
             if self._orbits.get(client.client_id) is stop:
                 self._orbits.pop(client.client_id, None)
                 self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+                self._sync_quickbar()
 
     def skip_refine(self):
         """Skip button: end the running BA where it is and continue after refine."""
@@ -1050,6 +1110,7 @@ class App:
         self._draw_mesh()
         self._draw_splat()
         self._refresh_export()
+        self._sync_quickbar()
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):
