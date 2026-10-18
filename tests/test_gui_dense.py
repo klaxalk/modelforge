@@ -91,6 +91,7 @@ def test_run_mesh_stage_from_gui(app, project):
 
 
 def test_tab_defaults(app):
+    assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)
     assert app.g_splat_disk.value is True and app.g_splat_down.value == 1
 

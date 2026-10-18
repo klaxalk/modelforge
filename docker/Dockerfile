@@ -90,6 +90,12 @@ print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gsplat', gsplat._
     fi
 ENV NERFSTUDIO_BIN=/opt/nerfstudio/bin
 
+# Browser tab title of the GUI: viser's page hardcodes <title>Viser</title> and never changes it.
+RUN sed -i 's|<title>Viser</title>|<title>ModelForge</title>|' \
+        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" && \
+    grep -q "<title>ModelForge</title>" \
+        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
+
 # Run as the host user so files written to the bind-mounted repo are not root-owned.
 RUN (getent passwd ${UID} | cut -d: -f1 | xargs -r userdel -r) 2>/dev/null; \
     groupadd -o -g ${GID} dev 2>/dev/null || true; \

@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 
 import pycolmap
@@ -65,30 +66,44 @@ class Report:
         json.dump(self.data, open(self.path, "w"), indent=1)
 
 
-def stage_features(project, report, kind="dji"):
+def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None):
     """DJI: upright SIFT (the gimbal keeps the horizon level) and an OPENCV camera refined against the
     priors. Videos without metadata: oriented SIFT (handheld footage rolls) and a RADIAL camera (one
-    focal length: without priors, separate fx / fy drift apart on short sequences)."""
+    focal length: without priors, separate fx / fy drift apart on short sequences). upright None = by kind."""
     video = kind == "video"
-    stats = features.extract(project, upright=not video, camera_model="RADIAL" if video else "OPENCV")
+    upright = (not video) if upright is None else upright
+    stats = features.extract(project, max_num_features=max_features, upright=upright, extractor=extractor,
+                             camera_model="RADIAL" if video else "OPENCV")
     log(f"features: {stats}")
     report.set("features", stats)
 
 
-def stage_pairs(project, report, pri, meta):
-    if not priors_mod.has_poses(pri):  # video without metadata: sequential + quadratic (+ exhaustive if small)
-        names = priors_mod.by_order(pri)
-        seqs = [[n for n in names if pri[n].source == s] for s in sorted({pri[n].source for n in names})]
-        pp = pairs.sequential(seqs)
-        pairs.write(project, pp)
-        report.set("pairs", {"num_pairs": len(pp), "method": "sequential"})
-        log(f"pairs: {len(pp)} (sequential)")
-        return
-    ground_z = meta.get("ground_z", -meta["enu_origin_lla"][2])
-    pp = pairs.select(pri, ground_z)
+PAIR_MODES = {
+    "auto": "DJI: time neighbours + view overlap from the priors; no metadata: exhaustive up to 150 images, "
+            "else sequential",
+    "sequential": "time neighbours (Neighbours) + quadratic jumps within each source, a coarse grid between sources",
+    "exhaustive": "every pair: the most thorough, cost grows with the square of the image count",
+}
+
+
+def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
+    """pairs.txt for the match stage; mode: PAIR_MODES."""
+    if mode not in PAIR_MODES:
+        raise ValueError(f"pairs mode must be one of {tuple(PAIR_MODES)}")
+    names = priors_mod.by_order(pri)
+    seqs = [[n for n in names if pri[n].source == s] for s in sorted({pri[n].source for n in names})]
+    rep = {"mode": mode}
+    if mode == "auto" and priors_mod.has_poses(pri):  # DJI: look-at overlap from the priors
+        rep["ground_z"] = meta.get("ground_z", -meta["enu_origin_lla"][2])
+        pp = pairs.select(pri, rep["ground_z"])
+    elif mode == "exhaustive":
+        pp = pairs.sequential(seqs, exhaustive_below=len(names))
+    else:  # sequential, or auto without priors (exhaustive when small)
+        pp = pairs.sequential(seqs, overlap=neighbors, exhaustive_below=150 if mode == "auto" else 0)
+        rep["neighbors"] = neighbors
     pairs.write(project, pp)
-    report.set("pairs", {"num_pairs": len(pp), "ground_z": ground_z})
-    log(f"pairs: {len(pp)}")
+    report.set("pairs", {"num_pairs": len(pp), **rep})
+    log(f"pairs: {len(pp)} ({mode})")
 
 
 def copy_db(src, dst):
@@ -106,14 +121,32 @@ def match_stats(db_path, seconds):
     return s
 
 
-def stage_match(project, report):
+def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, token=None):
+    """Match the pairs in pairs.txt and verify them geometrically (two-view geometry, RANSAC).
+    max_ratio: Lowe's ratio test; guided: re-match along the estimated geometry (more inliers, slower);
+    min_inliers: a verified pair needs this many. token: Stop through pycolmap's cancellation token."""
     db_path = os.path.join(project, "database.db")
     copy_db(os.path.join(project, "features.db"), db_path)
     opts = pycolmap.ImportedPairingOptions()
     opts.match_list_path = os.path.join(project, "pairs.txt")
+    m = pycolmap.FeatureMatchingOptions()
+    m.sift.max_ratio, m.guided_matching = float(max_ratio), bool(guided)
+    v = pycolmap.TwoViewGeometryOptions()
+    v.min_num_inliers = int(min_inliers)
+    ct, done = pycolmap.CancellationToken(), threading.Event()
+    if token is not None:
+        threading.Thread(target=reconstruct._cancel_on, args=(token, ct, done), daemon=True).start()
     t0 = time.time()
-    pycolmap.match_image_pairs(db_path, pairing_options=opts)
-    stats = match_stats(db_path, time.time() - t0)
+    try:
+        pycolmap.match_image_pairs(db_path, matching_options=m, pairing_options=opts, verification_options=v,
+                                   cancellation_token=ct)
+    except InterruptedError:  # pycolmap's way of reporting the cancellation
+        raise jobs.Cancelled("stopped")
+    finally:
+        done.set()
+    jobs.check(token)
+    stats = {**match_stats(db_path, time.time() - t0), "max_ratio": float(max_ratio), "guided": bool(guided),
+             "min_inliers": int(min_inliers)}
     log(f"match: {stats}")
     report.set("match", stats)
 
@@ -196,11 +229,12 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     return rec
 
 
-def stage_reconstruct(project, report, progress=None, token=None):
-    """Incremental SfM (videos without metadata) -> sparse/refined; see modelforge.sfm.reconstruct."""
-    stats = reconstruct.incremental(project, token=token, progress=progress)
+def stage_reconstruct(project, report, progress=None, token=None, mapper="incremental"):
+    """SfM without priors (videos without metadata) -> sparse/refined; see modelforge.sfm.reconstruct."""
+    stats = reconstruct.run(project, mapper=mapper, token=token, progress=progress)
     report.set("reconstruct", stats)
-    log(f"reconstruct: {stats['reg_images']}/{stats['images']} images registered, {stats['points3D']} points, "
+    log(f"reconstruct ({mapper}): {stats['reg_images']}/{stats['images']} images registered, "
+        f"{stats['points3D']} points, "
         f"error median {stats['point_error_px'].get('median')} px, models {stats['models']}, {stats['seconds']} s")
     if len(stats["models"]) > 1:
         log(f"reconstruct: the images split into {len(stats['models'])} models; kept the largest")
@@ -263,6 +297,19 @@ def main():
     ap.add_argument("--ba-iterations", type=int, default=500,
                     help="bundle-adjustment iteration cap per refine round (default 500; it stops earlier once the "
                          "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
+    ap.add_argument("--features", default="sift", choices=tuple(features.EXTRACTORS),
+                    help="feature extractor (default sift on the GPU; sift-robust: DSP + affine shape, CPU)")
+    ap.add_argument("--max-features", type=int, default=8192, help="max SIFT features per image (default 8192)")
+    ap.add_argument("--upright", action=argparse.BooleanOptionalAction, default=None,
+                    help="one keypoint orientation (default: on for DJI, off for videos without metadata)")
+    ap.add_argument("--pairs", default="auto", choices=tuple(PAIR_MODES),
+                    help="which images get matched (default auto: priors for DJI, exhaustive / sequential otherwise)")
+    ap.add_argument("--neighbors", type=int, default=10, help="time neighbours per image for --pairs sequential")
+    ap.add_argument("--ratio", type=float, default=0.8, help="Lowe's ratio test for matching (default 0.8)")
+    ap.add_argument("--guided", action="store_true", help="guided matching: more inliers, slower")
+    ap.add_argument("--min-inliers", type=int, default=15, help="inliers a verified pair needs (default 15)")
+    ap.add_argument("--mapper", default="incremental", choices=tuple(reconstruct.MAPPERS),
+                    help="SfM mapper for videos without metadata (default incremental; global: faster on large sets)")
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
     ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
@@ -278,17 +325,17 @@ def main():
     pri, meta = priors_mod.load(args.project)
     rec = None
     if "features" in stages:
-        stage_features(args.project, report, kind)
+        stage_features(args.project, report, kind, args.features, args.max_features, args.upright)
     if "pairs" in stages:
-        stage_pairs(args.project, report, pri, meta)
+        stage_pairs(args.project, report, pri, meta, args.pairs, args.neighbors)
     if "match" in stages:
-        stage_match(args.project, report)
+        stage_match(args.project, report, args.ratio, args.guided, args.min_inliers)
     if "refine" in stages:
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
                                   estimate_systematic=not args.no_systematic)
         rec = stage_refine(args.project, report, pri, model=model, max_iterations=args.ba_iterations)
     if "reconstruct" in stages:
-        stage_reconstruct(args.project, report)
+        stage_reconstruct(args.project, report, mapper=args.mapper)
     if "export" in stages:
         stage_export(args.project, report, rec)
     methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)

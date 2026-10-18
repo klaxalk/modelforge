@@ -1,8 +1,9 @@
-"""Incremental SfM for videos without position metadata (project kind "video").
+"""SfM for videos without position metadata (project kind "video").
 
-COLMAP's incremental mapper (pycolmap.incremental_mapping, unmodified) recovers the poses from the
-images alone, starting from an initial pair and registering the rest one by one. Its world frame is
-arbitrary, so the largest model is then
+COLMAP recovers the poses from the images alone with one of three mappers (MAPPERS, unmodified):
+incremental (default; pycolmap, Stop via its cancellation token), global (GLOMAP in COLMAP) or
+hierarchical (both through the colmap CLI, so Stop kills them). The world frame is arbitrary, so
+the largest model is then
   oriented  up from the plane through the camera centres (a walking or flying path), else the
             dominant plane of the points (the ground, if it agrees with the cameras' up within 60 deg),
             else the cameras' mean "up" (-y of the OpenCV camera); see up_alignment
@@ -12,6 +13,7 @@ and written to sparse/refined, which the export, dense and splat stages read as 
 """
 
 import os
+import shutil
 import threading
 import time
 
@@ -19,6 +21,7 @@ import numpy as np
 import pycolmap
 
 from modelforge import jobs
+from modelforge.dense import COLMAP_BIN
 
 DEPTH_UNITS = 10.0
 
@@ -112,12 +115,19 @@ def stats(rec):
             "camera": {"model": cam.model.name, "params": [round(float(x), 4) for x in cam.params]}}
 
 
-def incremental(project, token=None, progress=None):
-    """Incremental SfM on PROJECT/database.db -> sparse/refined (normalized). progress(event) gets
-    {"phase": "register", "registered": k}. Returns stats for report.json."""
-    db, images = os.path.join(project, "database.db"), os.path.join(project, "images")
-    out = os.path.join(project, "sparse", "models")
-    os.makedirs(out, exist_ok=True)
+MAPPERS = {
+    "incremental": "registers images one by one with repeated BA: the most robust, best up to ~1000 images",
+    "global": "all rotations, then all positions, then one BA (GLOMAP in COLMAP): much faster on large sets, "
+              "needs well-connected images",
+    "hierarchical": "clusters mapped incrementally in parallel, then merged: for very large scenes (thousands)",
+}
+_CLI = {"global": "global_mapper", "hierarchical": "hierarchical_mapper"}
+_PROGRESS_WORDS = ("Registering", "Rotation", "Global", "positioning", "Bundle", "Retriangulat", "Merging",
+                   "Track", "Filter", "Cluster", "Reconstructing")
+
+
+def _incremental_models(db, images, out, token, progress):
+    """pycolmap incremental mapping: Stop through its cancellation token, a callback per registered image."""
     opts = pycolmap.IncrementalPipelineOptions()
     opts.extract_colors = True
     ct, done, count = pycolmap.CancellationToken(), threading.Event(), [0]
@@ -128,22 +138,58 @@ def incremental(project, token=None, progress=None):
         count[0] += 1
         if progress:
             progress({"phase": "register", "registered": count[0]})
-    t0 = time.time()
     try:
-        models = pycolmap.incremental_mapping(db, images, out, options=opts, next_image_callback=next_image,
-                                              cancellation_token=ct)
+        return pycolmap.incremental_mapping(db, images, out, options=opts, next_image_callback=next_image,
+                                            cancellation_token=ct)
+    except InterruptedError:  # pycolmap's way of reporting the cancellation
+        raise jobs.Cancelled("stopped")
     finally:
         done.set()
+
+
+def _cli_models(mapper, db, images, out, token, progress):
+    """Global / hierarchical mapping through the colmap CLI (pycolmap offers them without a Stop hook):
+    killable by Stop, and its log lines are the progress."""
+    def line(text):
+        msg = text.split("] ", 1)[-1].strip()
+        if progress and any(w in msg for w in _PROGRESS_WORDS):
+            progress({"phase": "log", "line": msg[:120]})
+    (token or jobs.Token()).run([COLMAP_BIN, _CLI[mapper], "--database_path", db, "--image_path", images,
+                                 "--output_path", out], line)
+    models = {}
+    for d in sorted(os.listdir(out)):
+        if os.path.exists(os.path.join(out, d, "images.bin")):
+            models[int(d) if d.isdigit() else len(models)] = pycolmap.Reconstruction(os.path.join(out, d))
+    return models
+
+
+def run(project, mapper="incremental", token=None, progress=None):
+    """SfM without priors on PROJECT/database.db with the chosen mapper (MAPPERS) -> sparse/refined
+    (largest model, normalized). progress(event): {"phase": "register", "registered": k} (incremental)
+    or {"phase": "log", "line": ...}. Returns stats for report.json."""
+    if mapper not in MAPPERS:
+        raise ValueError(f"mapper must be one of {tuple(MAPPERS)}")
+    db, images = os.path.join(project, "database.db"), os.path.join(project, "images")
+    out = os.path.join(project, "sparse", "models")
+    shutil.rmtree(out, ignore_errors=True)  # no stale models from an earlier run
+    os.makedirs(out)
+    t0 = time.time()
+    if mapper == "incremental":
+        models = _incremental_models(db, images, out, token, progress)
+    else:
+        models = _cli_models(mapper, db, images, out, token, progress)
     jobs.check(token)
     if not models:
         raise RuntimeError("SfM found no model: too few matches between the images (more overlap, sharper or "
                            "more textured frames help)")
     sizes = sorted((m.num_reg_images() for m in models.values()), reverse=True)
     rec = max(models.values(), key=lambda m: m.num_reg_images())
+    if mapper != "incremental":
+        rec.extract_colors_for_all_images(images)
     frame = normalize(rec)
     refined = os.path.join(project, "sparse", "refined")
     os.makedirs(refined, exist_ok=True)
     rec.write(refined)
     n_images = pycolmap.Database.open(db).num_images()
-    return {**stats(rec), "images": n_images, "models": sizes, "frame": frame,
+    return {**stats(rec), "mapper": mapper, "images": n_images, "models": sizes, "frame": frame,
             "seconds": round(time.time() - t0, 1)}

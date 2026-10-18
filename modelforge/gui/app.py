@@ -21,6 +21,7 @@ from plotly.subplots import make_subplots
 from modelforge import dense, jobs, pipeline, projects, splat
 from modelforge.dji import ingest
 from modelforge.export import products
+from modelforge.sfm import features, reconstruct
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.videos import VideosPanel, upload_progress
@@ -119,7 +120,7 @@ class App:
         self.path = project_path
         self.root = root or os.path.dirname(os.path.abspath(project_path))
         self.project = Project(project_path) if os.path.exists(os.path.join(project_path, "poses.json")) else None
-        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+        self.server = viser.ViserServer(host="0.0.0.0", port=port, label="ModelForge")
         self.server.scene.set_up_direction("+z")
         self.dark = self._load_settings().get("dark_mode", False)
         self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
@@ -270,6 +271,40 @@ class App:
                 hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
                      "(final triangulation, then export / splat / dense in the full pipeline).")
             self.g_skip.on_click(lambda _: self.skip_refine())
+            with gui.add_folder("Features", expand_by_default=False):
+                self.g_extractor = gui.add_dropdown(
+                    "Extractor", options=tuple(features.EXTRACTORS), initial_value="sift",
+                    hint=" ".join(f"{k}: {v}." for k, v in features.EXTRACTORS.items())
+                    + " Learned features (ALIKED, LightGlue) need COLMAP built with ONNX, which this image is not.")
+                self.g_max_features = gui.add_number(
+                    "Max features", initial_value=8192, min=500, max=65536, step=500,
+                    hint="Per image. More helps high-resolution or detailed scenes; fewer is faster.")
+                self.g_upright = gui.add_checkbox(
+                    "Upright", initial_value=True,
+                    hint="One keypoint orientation: right when the horizon stays level (DJI gimbal; default on), "
+                         "wrong for handheld footage that rolls (videos without metadata; default off).")
+            with gui.add_folder("Matching", expand_by_default=False):
+                self.g_pairs = gui.add_dropdown(
+                    "Pairs", options=tuple(pipeline.PAIR_MODES), initial_value="auto",
+                    hint="Which images are matched. " + " ".join(f"{k}: {v}." for k, v in pipeline.PAIR_MODES.items()))
+                self.g_neighbors = gui.add_number(
+                    "Neighbours", initial_value=10, min=1, max=100, step=1,
+                    hint="For sequential pairs: how many following images each one is matched with.")
+                self.g_ratio = gui.add_slider(
+                    "Ratio test", min=0.5, max=0.95, step=0.01, initial_value=0.8,
+                    hint="Lowe's ratio: lower is stricter (fewer, cleaner matches); higher keeps more on repetitive "
+                         "or low-texture scenes. COLMAP's default is 0.8.")
+                self.g_guided = gui.add_checkbox(
+                    "Guided matching", initial_value=False,
+                    hint="A second pass that re-matches along the estimated two-view geometry: more inliers, slower.")
+                self.g_min_inliers = gui.add_number(
+                    "Min inliers", initial_value=15, min=5, max=500, step=5,
+                    hint="Geometric verification: consistent matches a pair needs to count (COLMAP's default 15).")
+            self.g_mapper = gui.add_dropdown(
+                "Mapper", options=tuple(reconstruct.MAPPERS), initial_value="incremental",
+                hint="SfM for videos without metadata. "
+                     + " ".join(f"{k}: {v}." for k, v in reconstruct.MAPPERS.items())
+                     + " Incremental shows each registered image; global and hierarchical show their stages.")
             for stage in SFM_BUTTONS:  # refine (DJI) or reconstruct (no metadata): _apply_kind shows one
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
                                    hint=STAGE_HINTS[stage])
@@ -440,6 +475,8 @@ class App:
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = not video
+        self.g_mapper.visible = video
+        self.g_upright.value = not video  # the kind's default
         self.g_sparse_md.content = (
             "Incremental SfM from the images alone (video without metadata): features → pairs → match → "
             "reconstruct → export. Arbitrary frame and scale, oriented up." if video else
@@ -806,14 +843,17 @@ class App:
                 self._begin_stage(st, k, len(seq))
                 ts = time.time()
                 if st == "features":
-                    pipeline.stage_features(project, report, self._kind())
+                    pipeline.stage_features(project, report, self._kind(), self.g_extractor.value,
+                                            int(self.g_max_features.value), bool(self.g_upright.value))
                 elif st == "reconstruct":
                     pipeline.stage_reconstruct(project, report, progress=self._on_reconstruct_event,
-                                               token=self._token)
+                                               token=self._token, mapper=self.g_mapper.value)
                 elif st == "pairs":
-                    pipeline.stage_pairs(project, report, pri, self.project.meta)
+                    pipeline.stage_pairs(project, report, pri, self.project.meta, self.g_pairs.value,
+                                         int(self.g_neighbors.value))
                 elif st == "match":
-                    pipeline.stage_match(project, report)
+                    pipeline.stage_match(project, report, float(self.g_ratio.value), bool(self.g_guided.value),
+                                         int(self.g_min_inliers.value), token=self._token)
                 elif st == "refine":
                     self._skip = threading.Event()
                     self.g_skip.disabled = False
@@ -1084,9 +1124,10 @@ class App:
         r = rep.get(st, {}) if st in SFM_BUTTONS else rep.get("dense", {}).get(st, {})
         try:
             if st == "features":
-                return f"{r['images']} images, {r['keypoints']:,} keypoints"
+                return (f"{r['images']} images, {r['keypoints']:,} keypoints"
+                        + (f" ({r['extractor']}{', upright' if r.get('upright') else ''})" if "extractor" in r else ""))
             if st == "pairs":
-                return f"{r['num_pairs']:,} pairs"
+                return f"{r['num_pairs']:,} pairs ({r.get('mode', 'auto')})"
             if st == "match":
                 return f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
             if st == "refine":
@@ -1096,7 +1137,8 @@ class App:
                         f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']})")
             if st == "reconstruct":
                 e = r["point_error_px"]
-                return (f"{r['reg_images']}/{r['images']} images registered, {r['points3D']:,} points, error median "
+                return (f"{r.get('mapper', 'incremental')}: "
+                        f"{r['reg_images']}/{r['images']} images registered, {r['points3D']:,} points, error median "
                         f"{e.get('median')} px, f = {r['camera']['params'][0]:.0f} px, up from {r['frame']['up']}"
                         + (f", **{len(r['models'])} models** (kept the largest)" if len(r["models"]) > 1 else ""))
             if st == "export":
@@ -1113,6 +1155,9 @@ class App:
         return text[:160] + ("…" if len(text) > 160 else "")
 
     def _on_reconstruct_event(self, ev):
+        if ev.get("phase") == "log":  # global / hierarchical: their current step
+            self._job["detail"] = f"{self.g_mapper.value} mapper: {ev['line']}"
+            return
         n = len(self.project.names) if self.project else 0
         k = ev.get("registered", 0)
         self._job["detail"] = f"registered {k} / {n} images"

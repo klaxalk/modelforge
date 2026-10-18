@@ -295,7 +295,7 @@ intrinsics in one frame.
 | poses.json | priors per image | no poses (`priors.load` gives NaN priors; `has_poses` False) |
 | Features | upright SIFT, OPENCV camera | oriented SIFT (handheld footage rolls), **RADIAL** camera (one focal length) |
 | Pairs | look-at overlap from priors | `pairs.sequential`: exhaustive ≤150 images, else ±10 neighbours + quadratic jumps + a coarse grid between sources |
-| Sparse | `refine` (prior BA) | `reconstruct` (`sfm/reconstruct.py`: pycolmap incremental mapping, largest model) |
+| Sparse | `refine` (prior BA) | `reconstruct` (`sfm/reconstruct.py`: incremental / global / hierarchical mapper, largest model) |
 | World | ENU, metric | up-oriented, centred, median scene depth = 10 units (no metric scale) |
 
 Video-kind notes:
@@ -317,8 +317,42 @@ Video-kind notes:
 - **Portrait clips.** `extract.video_size` returns the size as decoded:
   ffmpeg applies the display-matrix rotation, so ±90° swaps w / h. Before,
   portrait phone video would have been read with the wrong frame size.
-- **Stop.** It works during mapping (pycolmap `CancellationToken`); progress
-  shows registered images.
+- **Mapper** (Sparse tab "Mapper", CLI `--mapper`; `reconstruct.MAPPERS`):
+  - **incremental** (default) runs in pycolmap: Stop through its
+    `CancellationToken`, and progress shows each registered image.
+  - **global** (GLOMAP in COLMAP) and **hierarchical** run the `colmap`
+    CLI (`global_mapper` / `hierarchical_mapper`) through `jobs.Token.run`:
+    pycolmap offers them without a Stop hook. Their log lines are the
+    progress detail.
+  - On 20 images (berlin 105–117 s):
+
+    | Mapper | Registered | Error median | f | Time |
+    |---|---|---|---|---|
+    | incremental | 20/20 | 0.419 px | 1085.4 | 17.6 s |
+    | global | 20/20 | 0.419 px | 1085.0 | 6.4 s |
+    | hierarchical | 17/20 (split into clusters) | 0.388 px | 1087.4 | 19.7 s |
+
+  - Hierarchical is for thousands of images.
+- **Features and Matching options** (Sparse tab folders, for both kinds;
+  CLI `--features --max-features --upright/--no-upright --pairs --neighbors
+  --ratio --guided --min-inliers`):
+  - Extractor: `sift` (GPU) or `sift-robust` (DSP-SIFT + affine shape, CPU).
+    On 20 images it gave +32% inlier matches and +33% points at 24×
+    the extraction time (1.0 → 23.9 s).
+  - Max features (8192). Upright (default: on for DJI, off for video).
+  - Pairs: `auto` (DJI priors / video exhaustive ≤150 else sequential),
+    `sequential` (with Neighbours) or `exhaustive`.
+  - Ratio test (0.8), Guided matching, Min inliers (15).
+  - Matching now gets Stop through pycolmap's `CancellationToken`.
+    pycolmap reports a cancel as `InterruptedError`, which matching and
+    incremental mapping turn into `jobs.Cancelled`; before, Stop would have
+    shown as a failure.
+  - Learned features / matching (ALIKED, LoMa, LightGlue) exist in this
+    COLMAP but need `ONNX_ENABLED=ON`. Selecting ALIKED in the current image
+    **aborts the process**, so they are not offered.
+  - COLMAP also has `pose_prior_mapper` (incremental with GPS priors).
+    Relevant for phones with per-frame GPS or the ROS 2 kind, not for
+    videos without metadata.
 - **One camera.** As for DJI, a project is one camera (sources must share a
   resolution). Per-video intrinsics for different phones are future work.
 - **GUI.**
@@ -867,6 +901,9 @@ Code layout:
   - The **right (main) panel** (`main_panel.dock_right()`) only runs the
     methods: header, run state + progress, **Run full pipeline**, tabs
     Sparse / Dense / Splat, then History.
+  - Browser tab title "ModelForge": viser hardcodes `<title>Viser</title>` in
+    its built `index.html`, so the Dockerfile patches it (a late layer, so the
+    rebuild takes seconds). The panel label is `ViserServer(label=...)`.
   - **Settings** tab (left panel): **Dark mode**.
     - `App.set_dark` calls `configure_theme(dark_mode=...)` for every client
       (the default `control_layout` sends no dock command, so the panel

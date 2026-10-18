@@ -60,7 +60,9 @@ def test_motion_sampling_and_extraction(tmp_path):
     assert not priors.has_poses(pri) and len(pri) == 8
     report = pipeline.Report(proj)
     pipeline.stage_pairs(proj, report, pri, meta)
-    assert report.data["pairs"] == {"num_pairs": 28, "method": "sequential"}  # 8 images: exhaustive
+    assert report.data["pairs"] == {"num_pairs": 28, "mode": "auto", "neighbors": 10}  # 8 images: exhaustive
+    pipeline.stage_pairs(proj, report, pri, meta, mode="sequential", neighbors=2)
+    assert report.data["pairs"]["num_pairs"] == 7 + 6 + 4  # +-1 and +-2 neighbours, then jumps of 4 frames
     assert pipeline.sfm_stages("video") == ("features", "pairs", "match", "reconstruct", "export")
 
 
@@ -113,6 +115,7 @@ def test_video_project_through_the_gui(tmp_path):
         assert not ing.g_rotw.visible and not ing.g_yaw.visible and ing.g_extract.label == "Extract images"
         assert app.g_buttons["reconstruct"].visible and not app.g_buttons["refine"].visible
         assert not app.g_ba_iters.visible
+        assert not app.g_upright.value and app.g_extractor.value == "sift"  # handheld: oriented SIFT
         ing.sources = [dji.Source(os.path.relpath(VIDEO), 105.0, 117.0)]
         ing.settings = dji.Settings(sampling="motion", num_images=20)
         ing._rebuild_sources()
@@ -129,10 +132,39 @@ def test_video_project_through_the_gui(tmp_path):
         while app.running and time.time() - t0 < 900:
             time.sleep(0.5)
         assert "sfm finished" in app.g_state.content, app.g_state.content
+        f = pipeline.Report(path).data["features"]
+        assert f["extractor"] == "sift" and f["upright"] is False and f["max_num_features"] == 8192
         r = pipeline.Report(path).data["reconstruct"]
         assert r["reg_images"] == 20 and r["camera"]["model"] == "RADIAL"
         assert abs(r["camera"]["params"][0] - 1085) < 60  # the DJI refinement found f = 1085 px
         assert app.snap.name == "refined" and app.snap.cams.valid.sum() == 20
         assert os.path.exists(os.path.join(path, "transforms.json"))
+        assert app.g_mapper.visible and app.g_mapper.value == "incremental"
+        app.g_mapper.value = "global"  # the global mapper (colmap CLI) from the Sparse tab
+        app.run_stage("reconstruct")
+        while app.running and time.time() - t0 < 1200:
+            time.sleep(0.5)
+        assert "reconstruct finished" in app.g_state.content, app.g_state.content
+        r = pipeline.Report(path).data["reconstruct"]
+        assert r["mapper"] == "global" and r["reg_images"] == 20 and abs(r["camera"]["params"][0] - 1085) < 60
+        # Matching options from the Sparse tab reach the stages
+        app.g_pairs.value, app.g_neighbors.value, app.g_guided.value, app.g_ratio.value = "sequential", 5, True, 0.7
+        for stage in ("pairs", "match"):
+            app.run_stage(stage)
+            while app.running and time.time() - t0 < 1500:
+                time.sleep(0.2)
+            assert f"{stage} finished" in app.g_state.content, app.g_state.content
+        d = pipeline.Report(path).data
+        assert d["pairs"]["mode"] == "sequential" and d["pairs"]["num_pairs"] < 190
+        assert d["match"]["guided"] is True and d["match"]["max_ratio"] == 0.7 and d["match"]["verified_pairs"] > 0
+        # Stop during matching / mapping ends as "stopped" (pycolmap reports it as InterruptedError)
+        from modelforge import jobs
+        from modelforge.sfm import reconstruct
+        for fn in (lambda t: pipeline.stage_match(path, pipeline.Report(path), token=t),
+                   lambda t: reconstruct.run(path, token=t)):
+            tok = jobs.Token()
+            tok.event.set()
+            with pytest.raises(jobs.Cancelled):
+                fn(tok)
     finally:
         app.server.stop()
