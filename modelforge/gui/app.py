@@ -55,6 +55,8 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
+    "analyze": "Overlap analysis of all extracted images (features + sequential matches) for the keyframe "
+               "selection in Images used.",
     "splat-resume": "Continue the paused or stopped splat training from its last checkpoint, with its own "
                     "settings (method, steps, schedule): optimizer state and learning-rate schedules carry on.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
@@ -73,6 +75,7 @@ NEXT_STEP = {
     "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written; Export tab",
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
+    "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
 }
 LOG_LINES = 200
@@ -313,6 +316,7 @@ class App:
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
+            self.g_buttons["analyze"] = self.subset.g_analyze
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
                                hint="Runs features → pairs → match → refine → export in sequence. "
                                     "About 15-20 min on CPU for 300 images; matching dominates.")
@@ -1029,7 +1033,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume"):
+            elif stage in ("splat", "splatmesh", "splat-resume", "analyze"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1065,6 +1069,10 @@ class App:
                         self.g_skip.disabled = True
                 elif st == "export":
                     pipeline.stage_export(project, report)
+                elif st == "analyze":
+                    from modelforge.sfm import overlap
+                    overlap.analyze(project, kind=self._kind(), token=self._token, log=self._on_log)
+                    self.subset.refresh()
                 elif st in ("splat", "splat-resume"):
                     self._run_splat(project, resume=st == "splat-resume")
                     report = pipeline.Report(project)  # splat.run wrote its stats

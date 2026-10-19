@@ -47,7 +47,8 @@ PLAN_FILE = "ingest.json"
 OUTPUTS = ("images", "poses.json", "poses.csv", "features.db", "database.db", "database.db-wal", "database.db-shm",
            "pairs.txt", "sparse", "dense", "transforms.json", "sparse_pc.ply", "report.json", "splat", "nerfstudio",
            "export", "images_*", "splatmesh",  # images_N: downscaled frames for splat training
-           "extracted")  # all extracted frames while a subset is in use (projects.apply_subsample)
+           "extracted",  # all extracted frames while a subset is in use (projects.apply_subsample)
+           "analysis")  # their overlap analysis (sfm/overlap.py)
 VIDEO_EXTS = (".mp4", ".mov")
 
 

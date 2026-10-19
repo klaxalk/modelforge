@@ -203,6 +203,8 @@ modelforge/
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── splat_plan.py   # splat training plan from the cameras (area, GSD, image count) and GPU memory
+│   ├── evaluate.py     # splat quality on held-out images (PnP pose + export/splat_eval.py)
+│   ├── subset_sweep.py # calibration sweep of image subsets (every N, keyframes) against held-out quality
 │   ├── splat_mesh.py   # mesh from the splat: TSDF fusion of rendered depth (export/splat_tsdf.py in /opt/nerfstudio)
 │   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss), mf_train (checkpoint on Stop, resume fix)
 │   ├── projects.py     # project folders: list / create / status / clean
@@ -622,6 +624,46 @@ extract once, then run the pipeline on subsets of it, in the same project):
   Disk sizes in the Projects status count the hard-linked frames in both folders.
 - A first version made a new project per subset; the user wanted it inside the project, so it was
   replaced.
+- **Keyframes from measured overlap** (the user asked for an automatic, non-uniform choice, DJI / ROS;
+  `modelforge/sfm/overlap.py`):
+  - **Analyze extracted images** (optional job, stage `analyze`): features of all extracted images +
+    matches of each with the next 16 of its source, in `PROJECT/analysis/` (kept when a subset is
+    applied, archived on re-extraction, deleted by Clean). `analysis/overlap.json` = inliers per pair,
+    keypoints per image. Overlap(a, b) = inliers / min(keypoints): no scene geometry needed.
+  - `select_keyframes`: per source, jump to the farthest of the next 16 images with overlap ≥
+    min_overlap to the current keyframe and ≥ ½ of that to the keyframe before (≈ 3 views per point);
+    none → the next image. Levels dense / normal / sparse = 0.20 / 0.12 / 0.06, default **dense**.
+  - GUI: Selection "every N-th image" / "keyframes", Keyframe density; the preview shows the
+    neighbours' overlap (weakest / 5% / median) for either selection once the analysis exists.
+- **Calibration sweep** (`modelforge/subset_sweep.py`, `modelforge/evaluate.py`,
+  `export/splat_eval.py`): a copy of a project with every 10th image held out; per configuration
+  SfM → splat (fixed 30000 steps, ×2, no camera optimizer) → held-out evaluation. The held-out
+  images are located in each subset's model by PnP (SIFT to the 6 nearest model images in time,
+  2D-3D from their tracks, `pycolmap.estimate_and_refine_absolute_pose`), so they do not help the
+  SfM; splat_eval renders them (pinhole, photo undistorted) and scores PSNR / SSIM / LPIPS, plus
+  `*_view<i>.jpg` side by sides. Smoke run on fullrun_test (1500 steps, ×4): 8/8 located, poses
+  visibly aligned; keyframes-normal (58 images) 21.07 dB vs every 2nd (36) 20.56 dB.
+  - **Calibration on kladno_dopravnik** (2026-10-19; 80 extracted 4K images over 20 s, 8 held out,
+    72 in the pool, 6000 steps at full resolution; the user rated 80 images good, 40 OK, 20 not
+    converging):
+
+    | run | images | PSNR | PSNR p10 | SSIM | LPIPS | neighbour overlap p5 | SfM |
+    |---|---|---|---|---|---|---|---|
+    | every 1st | 72 | 25.45 | 24.44 | 0.772 | 0.250 | 0.33 | 76 s |
+    | keyframes dense | 57 | 25.50 | 24.47 | 0.774 | 0.252 | 0.28 | 49 s |
+    | keyframes normal | 43 | 24.44 | 23.50 | 0.741 | 0.273 | 0.15 | 28 s |
+    | every 2nd | 36 | 23.55 | 22.11 | 0.708 | 0.284 | 0.12 | 22 s |
+    | keyframes sparse | 32 | 22.83 | 20.87 | 0.686 | 0.294 | 0.07 | 15 s |
+    | every 3rd | 24 | 20.51 | 19.13 | 0.572 | 0.339 | 0.06 | 10 s |
+    | every 4th | 18 | 17.75 | 16.72 | 0.403 | 0.409 | 0.02 | 6 s |
+
+    The scores reproduce the user's judgement. Keyframes beat every-N at equal image count (normal
+    +0.5 dB, sparse +0.3 dB over the every-N curve), and dense equals all images with 21% fewer. The
+    weakest 5% neighbour overlap predicts quality: ≥ ~0.25 full, ~0.12–0.15 "OK", < 0.06 broken.
+    Training time was the same for all (fixed steps, 265–280 s); fewer images saved SfM time. With
+    the plan's 20 steps per image (min 30000), image count saves training time only above ~1500
+    images. One site and 8 held-out photos (±0.3 dB); a karlak sweep (800 images) was started and
+    stopped by the user.
 - Too sparse a subset breaks SfM: kladno_dopravnik at every 8th image (10 of 80) matched 1,074
   inliers over 37 pairs and refine ended with **0 points** (focal drifted to 4940 px vs ~3200), and
   splatfacto then died with an `IndexError` on the empty sparse_pc.ply. Now `splat.run` refuses an

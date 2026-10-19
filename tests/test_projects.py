@@ -206,6 +206,8 @@ def test_subsample(tmp_path):
     assert "extracted" in projects.KEEP_ON_CLEAN and "extracted" in ingest.OUTPUTS  # re-extraction archives it
 
 
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "images")), reason="needs a project with images "
+                    "(data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
 def test_gui_subsample(tmp_path):
     from modelforge.gui.app import App
     root = str(tmp_path)

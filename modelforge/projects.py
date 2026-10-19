@@ -51,6 +51,7 @@ INTERMEDIATE = (
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("previous", "archived earlier extractions"),
     ("extracted", "all extracted frames (a subset of them is in images/)"),
+    ("analysis", "overlap analysis of the extracted frames (features + matches)"),
 )
 # Never deleted by clean: the extracted frames are an input of every stage.
 KEEP_ON_CLEAN = ("images", "extracted")
@@ -146,13 +147,14 @@ def extracted_images(path):
     return json.load(open(src))["images"]
 
 
-def apply_subsample(path, every=1, offset=0, start=None, end=None):
+def apply_subsample(path, every=1, offset=0, start=None, end=None, names=None, setting=None):
     """Use a subset of the project's extracted images (subsample_selection) from now on: images/,
     poses.json and poses.csv become that subset, so every stage runs on it unchanged. The first time,
     the full extraction moves to PROJECT/extracted/ (the pool); images/ then holds hard links into it.
     Results computed from the previous image set (features, matches, sparse, dense, splat, ...) are
     moved to previous/<time>/, as on re-extraction. every=1 over the whole timeline uses all images
-    again. Returns (images used, images extracted, archive folder or None)."""
+    again. names: an explicit list of extracted images instead (keyframes, sfm/overlap.py), recorded
+    with `setting`. Returns (images used, images extracted, archive folder or None)."""
     import csv
     path = os.path.abspath(path)
     if not os.path.exists(os.path.join(path, "poses.json")):
@@ -165,10 +167,14 @@ def apply_subsample(path, every=1, offset=0, start=None, end=None):
             if os.path.exists(os.path.join(path, f)):
                 shutil.copy2(os.path.join(path, f), os.path.join(pool, f))
     poses = json.load(open(os.path.join(pool, "poses.json")))
-    keep = subsample_selection(poses["images"], every, offset, start, end)
+    if names is not None:
+        wanted = set(names)
+        keep = [k for k, im in enumerate(poses["images"]) if im["image"] in wanted]
+    else:
+        keep = subsample_selection(poses["images"], every, offset, start, end)
     if not keep:
         raise ValueError("no images left with these settings")
-    stale = [n for n in ingest.OUTPUTS if n not in ("images", "poses.json", "poses.csv", POOL)]
+    stale = [n for n in ingest.OUTPUTS if n not in ("images", "poses.json", "poses.csv", POOL, "analysis")]
     archived = ingest.archive_outputs(path, stale)
     images = os.path.join(path, "images")
     shutil.rmtree(images, ignore_errors=True)  # hard links only: the pool keeps the files
@@ -183,8 +189,10 @@ def apply_subsample(path, every=1, offset=0, start=None, end=None):
     full = len(keep) == len(poses["images"])
     out = dict(poses, images=kept)
     if not full:
-        out["subsample"] = {"every": max(1, int(every)), "offset": max(0, int(offset)), "start": start, "end": end,
-                            "images_extracted": len(poses["images"])}
+        out["subsample"] = (dict(setting or {"method": "list"}, images_extracted=len(poses["images"]))
+                            if names is not None else
+                            {"every": max(1, int(every)), "offset": max(0, int(offset)), "start": start, "end": end,
+                             "images_extracted": len(poses["images"])})
     json.dump(out, open(os.path.join(path, "poses.json"), "w"), indent=1)
     names = {im["image"] for im in kept}
     if os.path.exists(os.path.join(pool, "poses.csv")):
