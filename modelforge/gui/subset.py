@@ -142,6 +142,30 @@ class SubsetPanel:
         self.g_preview.content = (f"→ **{n}** of {len(self._images)} images{extra}  \n"
                                   "applying moves the current results to previous/")
 
+    def keyframes_selected(self):
+        """Selection = keyframes: the full pipeline then analyzes and selects first."""
+        return bool(self._images) and self._mode() == "keyframes"
+
+    def apply_keyframes(self):
+        """In a running job (full pipeline, after the analysis): use the keyframes at the chosen density
+        unless they are in use already. Returns (images used, images extracted)."""
+        self.refresh_overlap()
+        args = self._args()
+        names = set(args["names"])
+        current = set(self.app.project.names) if self.app.project else set()
+        if names != current:
+            projects.apply_subsample(self.app.path, **args)
+            self.app.load_project()
+            self.app.refresh_after_images_changed()
+        self.refresh()
+        return len(names), len(self._images)
+
+    def refresh_overlap(self):
+        self._images = projects.extracted_images(self.app.path)
+        self._overlap = overlap.load(self.app.path)
+        if not self._overlap:
+            raise RuntimeError("no overlap analysis: run Analyze extracted images first")
+
     def apply(self):
         app = self.app
         if app.running or app.ingest.running:

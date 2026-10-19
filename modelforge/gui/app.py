@@ -1041,6 +1041,8 @@ class App:
             sfm = pipeline.sfm_stages(self._kind())
             if stage == "all":
                 seq, skipped = list(sfm), []
+                if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
+                    seq = ["analyze", "keyframes"] + seq
                 if splat.available() is None:
                     seq += ["splat", "splatmesh"]  # the dense result is the mesh from the splat
                 else:
@@ -1076,7 +1078,8 @@ class App:
                                          int(self.g_neighbors.value))
                 elif st == "match":
                     pipeline.stage_match(project, report, float(self.g_ratio.value), bool(self.g_guided.value),
-                                         int(self.g_min_inliers.value), token=self._token)
+                                         int(self.g_min_inliers.value), token=self._token,
+                                         progress=lambda k, n: self._on_count_progress("match", "pair", k, n))
                 elif st == "refine":
                     self._skip = threading.Event()
                     self.g_skip.disabled = False
@@ -1093,8 +1096,17 @@ class App:
                     pipeline.stage_export(project, report)
                 elif st == "analyze":
                     from modelforge.sfm import overlap
-                    overlap.analyze(project, kind=self._kind(), token=self._token, log=self._on_log)
+                    if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
+                        self._history("⚪ **analyze** · the overlap analysis of these images exists: reused")
+                        continue
+                    overlap.analyze(project, kind=self._kind(), token=self._token, log=self._on_log,
+                                    progress=self._on_analysis_progress)
                     self.subset.refresh()
+                elif st == "keyframes":  # the full pipeline with Images used = keyframes
+                    n, total = self.subset.apply_keyframes()
+                    report, pri = pipeline.Report(project), self.project.priors  # the new image set
+                    self._history(f"✅ **keyframes** ({self.subset.g_level.value}) · {n} of {total} images")
+                    continue
                 elif st in ("splat", "splat-resume"):
                     self._run_splat(project, resume=st == "splat-resume")
                     report = pipeline.Report(project)  # splat.run wrote its stats
@@ -1611,6 +1623,16 @@ class App:
                                                   opacities=op)
         else:
             self.server.scene.remove_by_name("/dense/splat_live")
+
+    def _on_count_progress(self, stage, unit, done, total, name=""):
+        """'<unit> k / n' (+ name) on the state line; the bar too when the stage runs alone."""
+        self._job["detail"] = f"{unit} {done:,} / {total:,}" + (f" · `{name}`" if name else "")
+        if self._job.get("label") == stage:
+            self.g_progress.value = 100.0 * done / max(total, 1)
+
+    def _on_analysis_progress(self, phase, done, total, name):
+        self._on_count_progress("analyze", "features: image" if phase == "features" else "matching: pair",
+                                done, total, name)
 
     def _on_features_progress(self, done, total, name):
         """Feature extraction: image k / n and the image just finished, on the state line and the bar."""

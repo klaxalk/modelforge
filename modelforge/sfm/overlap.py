@@ -62,8 +62,21 @@ def sequential_pairs(images, window=WINDOW):
     return pairs
 
 
-def analyze(project, kind="dji", window=WINDOW, token=None, log=print):
-    """Features + sequential matches of all extracted images → analysis/overlap.json. Returns its dict."""
+def is_current(project):
+    """overlap.json exists and covers exactly the extracted images (else analyze again)."""
+    data = load(project)
+    if not data:
+        return False
+    try:
+        images = json.load(open(pool(project)[1]))["images"]
+    except (OSError, ValueError, KeyError):
+        return False
+    return set(data["keypoints"]) == {im["image"] for im in images}
+
+
+def analyze(project, kind="dji", window=WINDOW, token=None, log=print, progress=None):
+    """Features + sequential matches of all extracted images → analysis/overlap.json. Returns its dict.
+    progress(phase, done, total, name): phase "features" (images) or "matching" (pairs)."""
     from modelforge import pipeline
     img_dir, poses_path = pool(project)
     poses = json.load(open(poses_path))
@@ -82,17 +95,20 @@ def analyze(project, kind="dji", window=WINDOW, token=None, log=print):
     log(f"analysis: features of {len(poses['images'])} images")
     step = [0]
 
-    def progress(k, n, name):  # a log line every ~10 %
+    def feat(k, n, name):  # a log line every ~10 %
+        if progress:
+            progress("features", k, n, name)
         if k >= step[0] or k == n:
             log(f"analysis: features {k} / {n}")
             step[0] = k + max(1, n // 10)
-    pipeline.stage_features(ws, report, kind=kind, progress=progress)
+    pipeline.stage_features(ws, report, kind=kind, progress=feat)
     jobs.check(token)
     pairs = sequential_pairs(poses["images"], window)
     with open(os.path.join(ws, "pairs.txt"), "w") as f:
         f.writelines(f"{a} {b}\n" for a, b in pairs)
     log(f"analysis: matching {len(pairs)} pairs (each image with the next {window})")
-    pipeline.stage_match(ws, report, token=token)
+    pipeline.stage_match(ws, report, token=token,
+                         progress=(lambda k, n: progress("matching", k, n, "")) if progress else None)
     out = read_overlap(os.path.join(ws, "database.db"))
     out.update(window=window, images_total=len(poses["images"]), seconds=round(time.time() - t0, 1))
     json.dump(out, open(path(project), "w"))

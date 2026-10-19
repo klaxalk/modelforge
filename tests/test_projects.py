@@ -213,6 +213,43 @@ def test_subsample(tmp_path):
 
 @pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "images")), reason="needs a project with images "
                     "(data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
+def test_gui_analysis_progress_and_keyframes(tmp_path):
+    """Analyze reports features (images) and matching (pairs) progress; with Selection = keyframes the full
+    pipeline starts with analyze + keyframes, and the keyframe step switches the project to them."""
+    from modelforge.gui.app import App
+    from modelforge.sfm import overlap
+    root = str(tmp_path)
+    real = os.path.join(root, "real")
+    os.makedirs(real)
+    shutil.copytree(os.path.join(REAL, "images"), os.path.join(real, "images"))
+    shutil.copy2(os.path.join(REAL, "poses.json"), os.path.join(real, "poses.json"))
+    app = App(real, port=free_port(), root=root)
+    try:
+        details = []
+        real_cb = app._on_count_progress
+        app._on_count_progress = lambda *a, **k: (real_cb(*a, **k), details.append(app._job["detail"]))
+        app.run_stage("analyze")
+        t0 = time.time()
+        while app.running and time.time() - t0 < 300:
+            time.sleep(0.1)
+        assert "finished" in app.g_state.content, app.g_state.content
+        assert any(d.startswith("features: image") for d in details) and any(d.startswith("matching: pair")
+                                                                           for d in details)
+        assert overlap.is_current(real)
+        s = app.subset
+        s.g_mode.value = "keyframes (from the analysis)"
+        s.g_level.value = "sparse"
+        assert s.keyframes_selected()
+        n, total = s.apply_keyframes()
+        assert n < total == len(os.listdir(os.path.join(real, "extracted", "images")))
+        assert len(app.project.names) == n and overlap.is_current(real)  # the pool is unchanged
+        assert s.apply_keyframes() == (n, total)  # already in use: nothing changes
+    finally:
+        app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "images")), reason="needs a project with images "
+                    "(data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
 def test_gui_subsample(tmp_path):
     from modelforge.gui.app import App
     root = str(tmp_path)

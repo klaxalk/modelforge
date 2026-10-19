@@ -133,10 +133,30 @@ def match_stats(db_path, seconds):
     return s
 
 
-def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, token=None):
+def _watch_matches(db_path, total, progress, done, every=0.25):
+    """progress(pairs done, total) while COLMAP matches: match_image_pairs has no callback, but each block
+    of pairs is committed to the database as it finishes."""
+    import sqlite3
+    last = -1
+    while not done.wait(every):
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.1)
+            try:
+                n = con.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+        if n != last:
+            last = n
+            progress(min(n, total), total)
+
+
+def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, token=None, progress=None):
     """Match the pairs in pairs.txt and verify them geometrically (two-view geometry, RANSAC).
     max_ratio: Lowe's ratio test; guided: re-match along the estimated geometry (more inliers, slower);
-    min_inliers: a verified pair needs this many. token: Stop through pycolmap's cancellation token."""
+    min_inliers: a verified pair needs this many. token: Stop through pycolmap's cancellation token.
+    progress(pairs done, total): polled from the database a few times a second."""
     db_path = os.path.join(project, "database.db")
     copy_db(os.path.join(project, "features.db"), db_path)
     opts = pycolmap.ImportedPairingOptions()
@@ -148,6 +168,9 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
     ct, done = pycolmap.CancellationToken(), threading.Event()
     if token is not None:
         threading.Thread(target=reconstruct._cancel_on, args=(token, ct, done), daemon=True).start()
+    if progress:
+        total = sum(1 for line in open(opts.match_list_path) if line.strip())
+        threading.Thread(target=_watch_matches, args=(db_path, total, progress, done), daemon=True).start()
     t0 = time.time()
     try:
         pycolmap.match_image_pairs(db_path, matching_options=m, pairing_options=opts, verification_options=v,

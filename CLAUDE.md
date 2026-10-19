@@ -650,6 +650,13 @@ extract once, then run the pipeline on subsets of it, in the same project):
     none → the next image. Levels dense / normal / sparse = 0.20 / 0.12 / 0.06, default **dense**.
   - GUI: Selection "every N-th image" / "keyframes", Keyframe density; the preview shows the
     neighbours' overlap (weakest / 5% / median) for either selection once the analysis exists.
+  - Progress: "features: image k / n · name", then "matching: pair k / n" (the match stage shows
+    "pair k / n" too: `pipeline._watch_matches` polls database.db's matches table, as features.db is
+    polled for features).
+  - **Run full pipeline with Selection = keyframes** starts with `analyze` (reused when
+    `overlap.is_current`: overlap.json covers exactly the extracted images) and `keyframes`
+    (`SubsetPanel.apply_keyframes`: applies the chosen density unless those images are in use; the
+    report and priors are reloaded for the new set), then SfM → splat → splat mesh.
 - **Calibration sweep** (`modelforge/subset_sweep.py`, `modelforge/evaluate.py`,
   `export/splat_eval.py`): a copy of a project with every 10th image held out; per configuration
   SfM → splat (fixed 30000 steps, ×2, no camera optimizer) → held-out evaluation. The held-out
