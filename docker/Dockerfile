@@ -93,6 +93,16 @@ ENV NERFSTUDIO_BIN=/opt/nerfstudio/bin
 # ROS 2 bags (project kind "rosbag"): pure-Python reader for sqlite3 / MCAP bags, no ROS install needed.
 RUN pip install --no-cache-dir "rosbags==0.11.8"
 
+# C-RADIOv3 for semantic search (modelforge/semantic.py), CUDA image only: RADIO needs einops, timm >= 1.0
+# and transformers, which clash with nerfstudio's pins (timm 0.6.7), so they go to their own folder that
+# only the semantic subprocesses put first on PYTHONPATH; torch and numpy stay nerfstudio's (--no-deps).
+# Model weights are downloaded on first use into build/ (MODELFORGE_MODEL_CACHE).
+RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
+      /opt/nerfstudio/bin/python -m pip install --no-cache-dir --no-deps --target /opt/radio-pkgs \
+        einops==0.8.2 timm==1.0.30 transformers==4.57.6 tokenizers==0.22.2 safetensors==0.8.0 \
+        huggingface_hub==0.36.2 hf-xet==1.7.0 regex==2026.9.29 sentencepiece==0.2.2 plyfile==1.1.5; \
+    fi
+
 # Browser tab title of the GUI: viser's page hardcodes <title>Viser</title> and never changes it.
 RUN sed -i 's|<title>Viser</title>|<title>ModelForge</title>|' \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" && \

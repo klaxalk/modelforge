@@ -560,11 +560,16 @@ def load_live_splat(npz_path, transforms_path, max_gaussians=LIVE_SPLAT_SHOWN, s
     return int(d["step"]), n, splat_arrays(splat_to_enu.transform_vertices(v, R, t, s), max_gaussians, seed)
 
 
+def splat_subset(n, max_gaussians=SPLAT_SHOWN, seed=0):
+    """Indices of the Gaussians shown (all, or a reproducible random subset of max_gaussians)."""
+    if max_gaussians and n > max_gaussians:
+        return np.sort(np.random.default_rng(seed).choice(n, max_gaussians, replace=False))
+    return np.arange(n)
+
+
 def splat_arrays(v, max_gaussians=SPLAT_SHOWN, seed=0):
     """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities (None: all)."""
-    idx = np.arange(len(v))
-    if max_gaussians and len(v) > max_gaussians:
-        idx = np.sort(np.random.default_rng(seed).choice(len(v), max_gaussians, replace=False))
+    idx = splat_subset(len(v), max_gaussians, seed)
     v = v[idx]
     centers = np.stack([v["x"], v["y"], v["z"]], -1).astype(np.float32)
     q = np.stack([v[f"rot_{i}"] for i in range(4)], -1).astype(np.float64)

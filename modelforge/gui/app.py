@@ -16,7 +16,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh, splat_plan
+from modelforge import dense, jobs, pipeline, projects, semantic, splat, splat_mesh, splat_plan
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -26,6 +26,7 @@ from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
+from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.subset import SubsetPanel
 
 SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
@@ -54,6 +55,8 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
+    "semantic": "C-RADIOv3 features of the photos projected onto the splat's Gaussians (View → Semantic "
+                "search).",
     "analyze": "Overlap analysis of all extracted images (features + sequential matches) for the keyframe "
                "selection in Images used.",
     "splat-resume": "Continue the paused or stopped splat training from its last checkpoint, with its own "
@@ -75,6 +78,7 @@ NEXT_STEP = {
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
+    "semantic": "View tab → Semantic search: type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
 }
 LOG_LINES = 200
@@ -252,6 +256,7 @@ class App:
                 for h in (self.g_dense_pts, self.g_mesh, self.g_splat):  # keep the quick bar in step
                     h.on_update(lambda _: self._sync_quickbar())
                 self.g_splat.on_update(lambda _: self._draw_splat())
+            self.semantic = SemanticPanel(self, gui)
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
@@ -1062,7 +1067,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume", "analyze"):
+            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1108,6 +1113,11 @@ class App:
                     overlap.analyze(project, kind=self._sparse_kind(), token=self._token, log=self._on_log,
                                     progress=self._on_analysis_progress)
                     self.subset.refresh()
+                elif st == "semantic":
+                    semantic.run(project, on_line=self._on_log, job=self._token,
+                                 on_progress=lambda ph, k, n: self._on_count_progress(
+                                     "semantic", "PCA sample: photo" if ph == "pca" else "photo", k, n))
+                    self.semantic.refresh()
                 elif st == "keyframes":  # the full pipeline with Images used = keyframes
                     n, total = self.subset.apply_keyframes()
                     report, pri = pipeline.Report(project), self.project.priors  # the new image set
@@ -1828,6 +1838,7 @@ class App:
         self._sync_quickbar()
         self._refresh_splat_plan()
         self._sync_resume()
+        self.semantic.refresh()
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):
@@ -1963,13 +1974,23 @@ class App:
             return
         if key is not None:
             c, cov, rgb, op = gdata.load_splat(self.dense["splat"], self._splat_limit(gdata.SPLAT_SHOWN))
-            self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
             total = gdata.splat_count(self.dense["splat"])
+            self._splat_shown = (c, cov, rgb, op, gdata.splat_subset(total, self._splat_limit(gdata.SPLAT_SHOWN)))
+            self.redraw_splat_decorated()
             self._dense_status("splat", f"splat: {total:,} gaussians" + (
                 f" ({len(c):,} shown; View → All gaussians for all)" if len(c) < total else ""))
         else:
+            self._splat_shown = None
             self.server.scene.remove_by_name("/dense/splat")
             self._dense_status("splat", None)
+
+    def redraw_splat_decorated(self):
+        """Send the loaded splat again with the semantic search applied (no file reload)."""
+        shown = getattr(self, "_splat_shown", None)
+        if shown is None or not self.g_splat.value or getattr(self, "_splat_live_on", False):
+            return
+        c, cov, rgb, op = self.semantic.decorate(*shown)
+        self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
 
     def serve_forever(self):
         while True:

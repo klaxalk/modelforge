@@ -204,6 +204,7 @@ modelforge/
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── splat_plan.py   # splat training plan from the cameras (area, GSD, image count) and GPU memory
 │   ├── evaluate.py     # splat quality on held-out images (PnP pose + export/splat_eval.py)
+│   ├── semantic.py     # semantic search: C-RADIOv3 features per Gaussian (sidecar) + text queries
 │   ├── subset_sweep.py # calibration sweep of image subsets (every N, keyframes) against held-out quality
 │   ├── splat_mesh.py   # mesh from the splat: TSDF fusion of rendered depth (export/splat_tsdf.py in /opt/nerfstudio)
 │   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss), mf_train (checkpoint on Stop, resume fix)
@@ -1167,6 +1168,39 @@ export).
   scipy: 105 s for a 173k-face mesh, now < 1 s.
 - Tests: `tests/test_splat_mesh.py` (a synthetic splat of ground + box: geometry within 1.5
   voxels, colours, View / Export wiring).
+
+**Semantic search** (View tab → "Semantic search"; `modelforge/semantic.py`, `gui/semantic.py`,
+`export/semantic_features.py`, `export/semantic_text.py`; the user asked, 2026-10-19: C-RADIOv3, option A,
+fine detail, a sidecar so the normal splat export stays unchanged):
+- **Features** (job stage `semantic`, "photo k / n"): C-RADIOv3-L in nerfstudio's venv on every photo,
+  undistorted, at 2048 px (128 × 72 patches for 16:9). The SigLIP2 adaptor's patch features are **not**
+  text-aligned as they are (they mimic SigLIP2's patch tokens: "a machine" was low on the machine); applying
+  SigLIP2's attention-pooling head per patch without its attention (v_proj → out_proj → + MLP(LayerNorm), the
+  MaskCLIP trick; head weights from google/siglip2-so400m-patch16-naflex) makes "a machine", "gravel" and
+  "dirt road" light up where they belong. PCA (64 of 1152 dims, ~91 % of the variance) on patches of 24
+  photos. Per photo: the splat's depth rendered (gsplat, input / 4), every Gaussian centre projected and kept
+  when in frame and within 3 % of the rendered depth (occlusion), the reduced feature sampled bilinearly,
+  accumulated weighted by opacity. Output `splat/semantic/features.npz` (feats float16, weight, PCA mean +
+  basis) + `meta.json` with the splat's fingerprint (size + mtime): a new / resumed splat → "stale".
+- **Query**: `semantic.TextEncoder` keeps a worker with the SigLIP2 text model (the first search loads it,
+  ~17 s once the weights are cached; later ones ~0.3 s). `Features.relevance`: cosine in the full space
+  (reduced features mapped back through the basis, norms precomputed), LERF-style relevance against
+  "object / things / stuff / texture": min over negatives of sigmoid(10 (cos_q − cos_n)).
+- **GUI**: Compute semantic features, Query + Search, Threshold (0.5–0.95, default 0.6), Show (highlight
+  in red / matches only), Clear. Only the colours / selection sent to the browser change
+  (`App.redraw_splat_decorated` + `SemanticPanel.decorate`; scores follow `gdata.splat_subset`, so a shown
+  subset maps correctly).
+- **Measured on kladno_dopravnik** (56 photos 4K, 1.02M Gaussians): 38 s, 900k Gaussians seen. "a car" →
+  exactly the car (366 Gaussians); "gravel pile" → the piles; "dirt road" → the tracks; "a machine" → the
+  crusher clearly, but at 0.6 also much of the ground around it (raise the threshold).
+- **Packages**: RADIO needs einops, timm ≥ 1.0, transformers, which clash with nerfstudio's pins; they live in
+  `/opt/radio-pkgs` (Dockerfile layer, CUDA image; not yet rebuilt) or `build/radio_pkgs` (installed by hand
+  with the same `pip --no-deps --target` list), first on PYTHONPATH only for these subprocesses. Weights cache
+  in `build/hf_cache` + `build/torch_hub` (`MODELFORGE_MODEL_CACHE`): C-RADIOv3-L 1 GB, SigLIP2-so400m
+  4.3 GB. License: NVIDIA Open Model License.
+- Not yet: object instances / bounding boxes / camera jump (the follow-up the user asked for), tiling above
+  2048 px, distillation (option B).
+- Tests: `tests/test_semantic.py` (scoring, staleness, the panel's decoration; synthetic features).
 
 **Export** (`modelforge/export/products.py`, Export tab, or
 `python -m modelforge.export.products PROJECT [--mesh-format glb|obj|ply] [--splat-format ply|splat]`):
