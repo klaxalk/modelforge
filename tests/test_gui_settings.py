@@ -159,8 +159,8 @@ def test_orbit_never_steps_back_with_lagging_echoes(tmp_path):
 
 
 def test_flight_path_interpolation():
-    """Through every camera at its time (position and orientation), smooth in between, skipping
-    unregistered cameras, shortening long pauses, one image per second without usable times."""
+    """Through every camera (position and orientation), smooth in between, skipping unregistered
+    cameras; parametrized by distance, turns counted by angle, jumps at long pauses shortened."""
     import numpy as np
 
     from modelforge.gui import data as gdata
@@ -174,7 +174,10 @@ def test_flight_path_interpolation():
         cams.R_wc[i] = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]) @ np.diag([1.0, -1.0, -1.0])  # looking down
     cams.centers[2] = np.nan  # not registered
     p = gdata.FlightPath(cams, times)
-    assert list(p.index) == [0, 1, 3, 4, 5, 6, 7] and np.allclose(p.t, [0, 1, 3, 4, 5, 6, 7])  # pause -> 1 s
+    c = cams.centers[p.index]
+    seg = np.linalg.norm(np.diff(c, axis=0), axis=1)
+    seg[2] = min(seg[2], 2.0)  # the jump at the 7 s pause: at most 2 m
+    assert list(p.index) == [0, 1, 3, 4, 5, 6, 7] and np.allclose(p.t, np.concatenate([[0], np.cumsum(seg)]))
     for k, i in enumerate(p.index):
         pos, R, at = p.pose(p.t[k])
         assert np.allclose(pos, cams.centers[i]) and np.allclose(R, cams.R_wc[i], atol=1e-9) and at == i
@@ -184,5 +187,9 @@ def test_flight_path_interpolation():
     _, R, _ = p.pose(0.5)
     assert np.allclose(R @ R.T, np.eye(3), atol=1e-9) and np.isclose(np.linalg.det(R), 1)
     assert np.allclose(p.pose(-5)[0], cams.centers[0]) and np.allclose(p.pose(99)[0], cams.centers[7])
-    q = gdata.FlightPath(cams, np.full(n, np.nan))  # no times: one image per second
-    assert np.allclose(q.t, np.arange(7))
+    q = gdata.FlightPath(cams, np.full(n, np.nan))  # no times: no pause shortening
+    assert np.isclose(q.duration, np.linalg.norm(np.diff(c, axis=0), axis=1).sum())
+    spin = gdata.Cameras.empty(2)  # a turn on the spot: 90 deg = 1.8 m of path
+    spin.centers[:] = 0.0
+    spin.R_wc[0], spin.R_wc[1] = np.eye(3), np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.0]])
+    assert np.isclose(gdata.FlightPath(spin, [0, 1]).duration, 90 * gdata.ROT_M_PER_DEG)

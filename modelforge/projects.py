@@ -102,6 +102,77 @@ def create(root, name, copy_plan_from=None, kind="dji"):
     return path
 
 
+def subsample_selection(images, every=1, offset=0, start=None, end=None):
+    """Indices (into poses.json "images") kept by `subsample`: inside [start, end] on the project timeline
+    (time_s), then every `every`-th image of each source from its `offset`-th, in capture order."""
+    every, offset = max(1, int(every)), max(0, int(offset))
+    by_source = {}
+    for k, im in enumerate(images):
+        t = im.get("time_s")
+        if t is not None and ((start is not None and t < start) or (end is not None and t > end)):
+            continue
+        by_source.setdefault(im.get("source", 0), []).append(k)
+    keep = []
+    for ks in by_source.values():
+        ks.sort(key=lambda k: (images[k].get("time_s", 0.0), k))
+        keep += ks[offset::every]
+    return sorted(keep)
+
+
+def subsample(root, src, name, every=1, offset=0, start=None, end=None):
+    """New project root/name with a subset of src's extracted images (see subsample_selection): the
+    images are hard-linked (no copy, no decoding), poses.json / poses.csv keep their entries, ingest.json,
+    camera.json and lidar/ are copied. So a large extraction is paid once and subsets of it (every 2nd,
+    every 3rd, a time window) are new projects in seconds. Returns (path, images kept)."""
+    import csv
+    _check_name(name)
+    src = os.path.abspath(src)
+    dst = os.path.join(os.path.abspath(root), name)
+    if os.path.exists(dst):
+        raise FileExistsError(f"{dst} already exists")
+    poses_path = os.path.join(src, "poses.json")
+    if not os.path.exists(poses_path):
+        raise ValueError(f"{os.path.basename(src)} has no extracted images (poses.json) to subsample")
+    poses = json.load(open(poses_path))
+    keep = subsample_selection(poses["images"], every, offset, start, end)
+    if not keep:
+        raise ValueError("no images left with these settings")
+    os.makedirs(os.path.join(dst, "images"))
+    try:
+        for k in keep:
+            name_k = poses["images"][k]["image"]
+            a, b = os.path.join(src, "images", name_k), os.path.join(dst, "images", name_k)
+            try:
+                os.link(a, b)
+            except OSError:  # another file system
+                shutil.copy2(a, b)
+        kept = [poses["images"][k] for k in keep]
+        out = dict(poses, images=kept,
+                   subsampled_from={"project": os.path.basename(src), "every": max(1, int(every)),
+                                    "offset": max(0, int(offset)), "start": start, "end": end,
+                                    "images_in_source": len(poses["images"])})
+        json.dump(out, open(os.path.join(dst, "poses.json"), "w"), indent=1)
+        names = {im["image"] for im in kept}
+        csv_src = os.path.join(src, "poses.csv")
+        if os.path.exists(csv_src):
+            with open(csv_src, newline="") as f, open(os.path.join(dst, "poses.csv"), "w", newline="") as g:
+                rows = csv.reader(f)
+                w = csv.writer(g)
+                header = next(rows)
+                w.writerow(header)
+                col = header.index("image") if "image" in header else 0
+                w.writerows(r for r in rows if r and r[col] in names)
+        for f in (ingest.PLAN_FILE, "camera.json"):
+            if os.path.exists(os.path.join(src, f)):
+                shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
+        if os.path.isdir(os.path.join(src, "lidar")):
+            shutil.copytree(os.path.join(src, "lidar"), os.path.join(dst, "lidar"))
+    except BaseException:
+        shutil.rmtree(dst, ignore_errors=True)
+        raise
+    return dst, len(keep)
+
+
 def _check_project(root, path):
     """Absolute path of a project folder directly under root; ValueError otherwise."""
     p = os.path.abspath(path)

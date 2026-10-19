@@ -1,6 +1,8 @@
 """GUI Projects tab: list, open and create projects under the root folder, show each one's
 sources, progress and final / intermediate results, and clean intermediates."""
 
+import json
+import math
 import os
 import threading
 import traceback
@@ -46,6 +48,30 @@ class ProjectsPanel:
                                hint="Create the folder with an ingest.json and switch to it; then add sources in "
                                     "the Ingest tab.")
             b.on_click(lambda _: self.create())
+        with gui.add_folder("Subsample the open project", expand_by_default=False):
+            gui.add_markdown("A new project from a subset of the open project's extracted images: hard links, no "
+                             "copying or video decoding. Extract a large set once, then try every 2nd, every 3rd "
+                             "or a time window as separate projects.")
+            self.g_sub_every = gui.add_number(
+                "Keep every", initial_value=2, min=1, step=1,
+                hint="1 = all images (in the time range), 2 = every other image, 3 = one in three, ... "
+                     "Counted per source in capture order.")
+            self.g_sub_offset = gui.add_number(
+                "Starting at", initial_value=0, min=0, step=1,
+                hint="Which image of each source to start from (0 = the first): with Keep every 2, starting at 1 "
+                     "gives the other half.")
+            self.g_sub_range = gui.add_multi_slider(
+                "Time range [s]", min=0.0, max=1.0, step=0.5, initial_value=(0.0, 1.0),
+                hint="Keep only images inside this window of the project timeline (all sources).")
+            self.g_sub_name = gui.add_text("Name", initial_value="",
+                                           hint="Name of the new project (empty: <project>_every<N>).")
+            self.g_sub_md = gui.add_markdown("")
+            b = gui.add_button("Create subsampled project and open it", icon=viser.Icon.FOLDER_PLUS,
+                               hint="Creates the project with images/, poses.json, poses.csv and ingest.json (plus "
+                                    "camera.json / lidar/ for ROS 2 bags) and switches to it; then run SfM.")
+            b.on_click(lambda _: self.subsample())
+            for g in (self.g_sub_every, self.g_sub_offset, self.g_sub_range):
+                g.on_update(lambda _: self._sub_preview())
         with gui.add_folder("Rename / delete", expand_by_default=False):
             self.g_new_name = gui.add_text("New name", initial_value="",
                                            hint="New folder name for the project selected above: letters, digits, "
@@ -86,6 +112,48 @@ class ProjectsPanel:
             self.g_list.value = name
         self.g_current.content = f"open: **{name}**"
         self.show_status()
+        self._sub_load()
+
+    # ------------------------------------------------------------ subsample
+    def _sub_load(self):
+        """The open project's images for the Subsample folder; resets the time range to all of them."""
+        try:
+            self._sub_images = json.load(open(os.path.join(self.app.path, "poses.json")))["images"]
+        except (OSError, ValueError, KeyError):
+            self._sub_images = []
+        times = [im["time_s"] for im in self._sub_images if im.get("time_s") is not None]
+        lo, hi = (math.floor(min(times)), math.ceil(max(times))) if times else (0.0, 1.0)
+        hi = max(hi, lo + 1)
+        self.g_sub_range.min, self.g_sub_range.max = float(lo), float(hi)
+        self.g_sub_range.value = (float(lo), float(hi))
+        self._sub_preview()
+
+    def _sub_args(self):
+        lo, hi = self.g_sub_range.value
+        full = lo <= self.g_sub_range.min and hi >= self.g_sub_range.max
+        return dict(every=int(self.g_sub_every.value), offset=int(self.g_sub_offset.value),
+                    start=None if full else float(lo), end=None if full else float(hi))
+
+    def _sub_name(self):
+        base = os.path.basename(os.path.normpath(self.app.path))
+        return self.g_sub_name.value.strip() or f"{base}_every{int(self.g_sub_every.value)}"
+
+    def _sub_preview(self):
+        if not self._sub_images:
+            self.g_sub_md.content = "_the open project has no extracted images yet_"
+            return
+        n = len(projects.subsample_selection(self._sub_images, **self._sub_args()))
+        self.g_sub_md.content = f"→ **{n}** of {len(self._sub_images)} images · new project `{self._sub_name()}`"
+
+    def subsample(self):
+        name = self._sub_name()
+        try:
+            path, n = projects.subsample(self.app.root, self.app.path, name, **self._sub_args())
+            self.app.open_project(path)
+            self.g_sub_name.value = ""
+            self.g_msg.content = f"✅ created and opened **{name}** with {n} images: run SfM (Sparse tab)"
+        except (ValueError, FileExistsError, RuntimeError, OSError) as e:
+            self.g_msg.content = f"❌ {e}"
 
     def selected_path(self):
         return self._paths.get(self.g_list.value)

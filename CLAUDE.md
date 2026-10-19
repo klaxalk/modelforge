@@ -1149,6 +1149,14 @@ Code layout:
     - Paths inside a project are relative, so a rename breaks nothing; only
       old nerfstudio run configs keep the old absolute path, and they are
       not reused.
+  - **Subsample the open project** (the user asked, 2026-10-19: extraction of a large video is
+    expensive, so extract once, then take subsets): `projects.subsample(root, src, name, every,
+    offset, start, end)` makes a new project from every `every`-th image of each source (from the
+    `offset`-th, in capture order) inside a window of the project timeline. Images are **hard
+    links** (copied only across file systems), poses.json / poses.csv keep the selected entries
+    (poses.json records `subsampled_from`), ingest.json, camera.json and lidar/ are copied. Seconds
+    instead of a re-extraction; the new project runs SfM etc. on its own. Disk sizes in the status
+    count hard-linked images in both projects. Tests: `test_subsample`, `test_gui_subsample`.
   - **Clean intermediates** needs a confirmation box. It deletes the
     databases, `sparse/round_*`, the dense workspace (depth maps),
     `nerfstudio/` runs, `splat/splat.ply` and `previous/`. It keeps the
@@ -1382,15 +1390,17 @@ Code layout:
       echoes don't count as a drag (a 0.6 s stutter).
     - Tested with a stand-in browser that lags 3 updates.
   - **Fly** (View tab folder + quick bar, the user asked): replays the camera path.
-    - `gdata.FlightPath`: the shown snapshot's registered cameras in capture order, on the project
-      timeline. Without usable times it uses one image per second. Pauses over 3 s (between videos)
-      are shortened to 1 s.
+    - `gdata.FlightPath`: the shown snapshot's registered cameras in capture order, parametrized by
+      **distance** (the user asked for 0.5 m/s by default, loop on): segment = max(distance, 0.02 m ×
+      rotation in degrees), so turns on the spot take time (25°/s at 0.5 m/s); where the project
+      timeline pauses over 3 s (between videos) the jump is shortened to at most 2 m. Scene units
+      for videos without metadata.
     - Positions follow a cubic Hermite curve (finite-difference tangents); orientations are slerped.
       The curve passes exactly through every camera.
     - `App._fly` sets position, look-at (ahead by the median depth of the sparse points, so the
       mouse pivot afterwards lies in the scene) and up = −y of the OpenCV camera (roll reproduced)
       at 30 Hz.
-    - Controls: speed × real time (default 4), Loop, and "Camera's field of view" (on: the real
+    - Controls: speed in m/s (default 0.5), Loop (default on), and "Camera's field of view" (on: the real
       camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
     - The **Position** slider shows progress; dragging it jumps there, also when not flying.
     - Mouse drags pause the flight for 1 s (detected as in Orbit), then it resumes on the path.

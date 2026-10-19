@@ -270,10 +270,10 @@ class App:
                          "a second later. Only moves the view of the browser that pressed it.")
                 self.g_fly.on_click(lambda e: self.toggle_fly(e.client))
                 self.g_fly_speed = gui.add_slider(
-                    "Speed (× real time)", min=0.25, max=20.0, step=0.25, initial_value=4.0,
-                    hint="Playback speed relative to the capture (project timeline; one image per second when "
-                         "there are no times). Pauses over 3 s, e.g. between videos, are shortened to 1 s. Can be "
-                         "changed while flying.")
+                    "Speed (m/s)", min=0.1, max=20.0, step=0.1, initial_value=0.5,
+                    hint="Speed along the camera path (scene units per second for videos without metadata). "
+                         "Turns on the spot count 0.02 m per degree, so they take time too; jumps between videos "
+                         "are shortened to 2 m. Can be changed while flying.")
                 self.g_fly_pos = gui.add_slider(
                     "Position (%)", min=0.0, max=100.0, step=0.1, initial_value=0.0,
                     hint="Where on the path the flight is. Drag it to jump there (also while not flying: the view "
@@ -283,7 +283,7 @@ class App:
                     "Camera's field of view", initial_value=True,
                     hint="Use the real camera's field of view while flying, so the view matches the images; your "
                          "own field of view comes back when the flight stops.")
-                self.g_fly_loop = gui.add_checkbox("Loop", initial_value=False,
+                self.g_fly_loop = gui.add_checkbox("Loop", initial_value=True,
                                                    hint="Start over at the end instead of stopping.")
                 self.g_fly_md = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
@@ -1348,12 +1348,12 @@ class App:
             return
         try:
             _, i = self._fly_set(client, path, t, self._look_distance(path))
-            self.g_fly_md.content = f"at {t:.1f} / {path.duration:.1f} s · `{self.project.names[i]}`"
+            self.g_fly_md.content = f"at {t:.1f} / {path.duration:.1f} m · `{self.project.names[i]}`"
         except Exception:  # the browser went away
             pass
 
     def _fly(self, client, state, path, rate_hz=30.0, hold_s=1.0):
-        """Advance along the path at speed × real time. A camera that is none of the last poses sent (the
+        """Advance along the path at the set speed (m/s). A camera that is none of the last poses sent (the
         browser echoes them late) means the user is dragging: the flight pauses until hold_s after that."""
         cam, stop = client.camera, state["stop"]
         saved_fov, saved_up, set_fov = None, None, False
@@ -1391,7 +1391,7 @@ class App:
                             self.g_fly_pos.value = round(100.0 * t / path.duration, 1)
                         finally:
                             self._fly_guard = False
-                        self.g_fly_md.content = (f"flying · {t:.1f} / {path.duration:.1f} s path time · "
+                        self.g_fly_md.content = (f"flying · {t:.1f} / {path.duration:.1f} m · "
                                                  f"`{self.project.names[i]}`")
                 stop.wait(1.0 / rate_hz)
         except Exception:  # the browser went away

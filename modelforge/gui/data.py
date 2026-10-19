@@ -72,32 +72,38 @@ def _slerp(q0, q1, u):
     return (np.sin((1 - u) * th) * q0 + np.sin(u * th) * q1) / np.sin(th)
 
 
+ROT_M_PER_DEG = 0.02  # Fly: a turn on the spot counts as this much path per degree (25 deg/s at 0.5 m/s)
+
+
 class FlightPath:
     """The cameras' flight in capture order, for replaying it in the 3D view (View tab → Fly).
 
-    Times are the project timeline (Project.time); without usable times (not increasing) one image per
-    second. Pauses longer than max_gap_s (e.g. between sources) are shortened to gap_s. Positions follow a
-    cubic Hermite curve through the camera centres (finite-difference tangents), so speed changes
-    smoothly; orientations are slerped between neighbouring cameras."""
+    The path is parametrized by distance (m; scene units for videos without metadata), so Fly moves at
+    a set speed: segment length = max(distance, rot_m_per_deg × rotation in degrees), so a turn on the
+    spot still takes time. Where the project timeline (Project.time) pauses longer than max_gap_s (e.g.
+    between sources), the segment is shortened to at most gap_m. Positions follow a cubic Hermite curve
+    through the camera centres (finite-difference tangents); orientations are slerped between
+    neighbouring cameras. `t` is the distance along the path, `duration` its length."""
 
-    def __init__(self, cams, times, max_gap_s=3.0, gap_s=1.0):
+    def __init__(self, cams, times, max_gap_s=3.0, gap_m=2.0, rot_m_per_deg=ROT_M_PER_DEG):
         ok = cams.valid
         if ok.sum() < 2:
             raise ValueError("fewer than 2 registered cameras: nothing to fly")
         idx = np.flatnonzero(ok)
-        t = np.asarray(times, float)[idx]
-        if not np.all(np.isfinite(t)) or np.any(np.diff(t) <= 0):
-            t = np.arange(len(idx), dtype=float)
-        dt = np.diff(t)
-        dt = np.where(dt > max_gap_s, gap_s, dt)
         self.index = idx  # Project.names indices of the path's cameras
-        self.t = np.concatenate([[0.0], np.cumsum(dt)])
         self.centers = cams.centers[idx]
         q = np.array([rot_to_wxyz(cams.R_wc[i]) for i in idx])
         for k in range(1, len(q)):  # one hemisphere, so neighbours interpolate the short way
             if np.dot(q[k], q[k - 1]) < 0:
                 q[k] = -q[k]
         self.quats = q
+        dist = np.linalg.norm(np.diff(self.centers, axis=0), axis=1)
+        turn = np.degrees(2 * np.arccos(np.clip(np.abs(np.sum(q[1:] * q[:-1], axis=1)), 0.0, 1.0)))
+        seg = np.maximum(np.maximum(dist, rot_m_per_deg * turn), 1e-6)
+        t = np.asarray(times, float)[idx]
+        if np.all(np.isfinite(t)):
+            seg = np.where(np.diff(t) > max_gap_s, np.minimum(seg, gap_m), seg)
+        self.t = np.concatenate([[0.0], np.cumsum(seg)])
         p, tt = self.centers, self.t
         m = np.zeros_like(p)
         m[1:-1] = (p[2:] - p[:-2]) / (tt[2:] - tt[:-2])[:, None]

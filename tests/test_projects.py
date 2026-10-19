@@ -157,3 +157,63 @@ def test_gui_rename_and_delete(tmp_path):
         assert p.g_list.options == ("uno",)
     finally:
         app.server.stop()
+
+
+def test_subsample(tmp_path):
+    """Every N-th image per source in a time window, hard-linked into a new project."""
+    root = str(tmp_path)
+    src = projects.create(root, "big")
+    images = []
+    for source, (t0, n) in enumerate(((0.0, 10), (100.0, 6))):
+        for i in range(n):
+            name = f"v{source}_{i:05d}.jpg"
+            touch(os.path.join(src, "images", name))
+            images.append({"image": name, "source": source, "time_s": t0 + i, "enu_x": float(i)})
+    json.dump({"sources": [{}, {}], "ground_z": -5.0, "images": images}, open(os.path.join(src, "poses.json"), "w"))
+    with open(os.path.join(src, "poses.csv"), "w") as f:
+        f.write("image,source,time_s\n" + "".join(f"{im['image']},{im['source']},{im['time_s']}\n" for im in images))
+    json.dump({"fx": 1}, open(os.path.join(src, "camera.json"), "w"))
+
+    keep = projects.subsample_selection(images, every=3)
+    assert [images[k]["image"] for k in keep] == ["v0_00000.jpg", "v0_00003.jpg", "v0_00006.jpg", "v0_00009.jpg",
+                                                  "v1_00000.jpg", "v1_00003.jpg"]  # per source
+    assert len(projects.subsample_selection(images, every=2, offset=1)) == 5 + 3
+    assert [images[k]["time_s"] for k in projects.subsample_selection(images, every=2, start=3, end=7)] == [3, 5, 7]
+
+    dst, n = projects.subsample(root, src, "small", every=2, offset=1)
+    assert n == 8 and projects.is_project(dst)
+    poses = json.load(open(os.path.join(dst, "poses.json")))
+    assert [im["image"] for im in poses["images"]][:2] == ["v0_00001.jpg", "v0_00003.jpg"]
+    assert poses["ground_z"] == -5.0 and poses["subsampled_from"]["every"] == 2
+    assert poses["subsampled_from"]["images_in_source"] == 16
+    assert sorted(os.listdir(os.path.join(dst, "images"))) == sorted(im["image"] for im in poses["images"])
+    a, b = os.path.join(src, "images", "v0_00001.jpg"), os.path.join(dst, "images", "v0_00001.jpg")
+    assert os.stat(a).st_ino == os.stat(b).st_ino  # hard link, no copy
+    rows = open(os.path.join(dst, "poses.csv")).read().splitlines()
+    assert rows[0] == "image,source,time_s" and len(rows) == 1 + 8
+    assert os.path.exists(os.path.join(dst, "camera.json")) and os.path.exists(os.path.join(dst, "ingest.json"))
+    with pytest.raises(FileExistsError):
+        projects.subsample(root, src, "small")
+    with pytest.raises(ValueError):
+        projects.subsample(root, src, "none", start=50, end=60)  # nothing in that window
+    assert not os.path.exists(os.path.join(root, "none"))
+
+
+def test_gui_subsample(tmp_path):
+    from modelforge.gui.app import App
+    root = str(tmp_path)
+    real = os.path.join(root, "real")
+    os.makedirs(real)
+    for name in ("poses.json", "images", "sparse"):
+        os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(real, name))
+    app = App(real, port=free_port(), root=root)
+    try:
+        n = len(app.project.names)
+        p = app.projects
+        p.g_sub_every.value = 4
+        assert f"of {n} images" in p.g_sub_md.content and "real_every4" in p.g_sub_md.content
+        p.subsample()
+        assert app.path.endswith("real_every4") and len(app.project.names) == len(range(0, n, 4))
+        assert "✅" in p.g_msg.content
+    finally:
+        app.server.stop()
