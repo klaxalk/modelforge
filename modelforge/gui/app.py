@@ -55,8 +55,7 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
-    "semantic": "C-RADIOv3 features of the photos projected onto the splat's Gaussians (View → Semantic "
-                "search).",
+    "semantic": "C-RADIOv3 features of the photos projected onto the splat's Gaussians (the Search tab).",
     "analyze": "Overlap analysis of all extracted images (features + sequential matches) for the keyframe "
                "selection in Images used.",
     "splat-resume": "Continue the paused or stopped splat training from its last checkpoint, with its own "
@@ -78,7 +77,7 @@ NEXT_STEP = {
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
-    "semantic": "View tab → Semantic search: type a query, **Search**",
+    "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
 }
 LOG_LINES = 200
@@ -256,7 +255,6 @@ class App:
                 for h in (self.g_dense_pts, self.g_mesh, self.g_splat):  # keep the quick bar in step
                     h.on_update(lambda _: self._sync_quickbar())
                 self.g_splat.on_update(lambda _: self._draw_splat())
-            self.semantic = SemanticPanel(self, gui)
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
@@ -311,6 +309,9 @@ class App:
                 h.on_update(lambda _: self._draw_lines())
             self.g_plan.on_update(lambda _: self._set_plan_visible(self.g_plan.value))
             self.ingest.g_show.on_update(lambda _: self._set_plan_visible(self.ingest.g_show.value))
+
+        with self.left.add_tab("Search", viser.Icon.SEARCH):  # semantic search, its own tab after View
+            self.semantic = SemanticPanel(self, gui)
 
         with self.left.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
@@ -2056,6 +2057,7 @@ def main():
         path = last_project(root)
     app = App(path, args.port, root=root)
     app._remember_project()  # here, not in App(): tests open projects too
+    app.semantic.preload()  # the text model loads in the background, ready for the first search
     print(f"modelforge GUI on http://localhost:{args.port}", flush=True)
     app.serve_forever()
 

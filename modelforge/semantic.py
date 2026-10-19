@@ -1,5 +1,5 @@
 """Semantic search over a splat: C-RADIOv3 features per Gaussian (a sidecar of splat/splat_enu.ply) and text
-queries scored against them (View tab → Semantic search).
+queries scored against them (the Search tab on the left).
 
 compute (`run`): export/semantic_features.py in nerfstudio's venv back-projects RADIO's text-aligned patch
 features from every photo onto the Gaussians (visibility-checked; option A, no training) and stores them

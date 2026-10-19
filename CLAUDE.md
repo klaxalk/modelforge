@@ -1169,7 +1169,7 @@ export).
 - Tests: `tests/test_splat_mesh.py` (a synthetic splat of ground + box: geometry within 1.5
   voxels, colours, View / Export wiring).
 
-**Semantic search** (View tab → "Semantic search"; `modelforge/semantic.py`, `gui/semantic.py`,
+**Semantic search** (its own **Search** tab on the left, after View; `modelforge/semantic.py`, `gui/semantic.py`,
 `export/semantic_features.py`, `export/semantic_text.py`; the user asked, 2026-10-19: C-RADIOv3, option A,
 fine detail, a sidecar so the normal splat export stays unchanged):
 - **Features** (job stage `semantic`, "photo k / n"): C-RADIOv3-L in nerfstudio's venv on every photo,
@@ -1209,6 +1209,11 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   else an elevated view fitting it.
   - kladno_dopravnik: "a car" → 1 object (5.5 m); "a machine" at 0.66 → the crusher (16 m, its
     conveyors) + 2 specks; "gravel pile" at 0.65 → 20 piles (neighbouring piles can merge: one 56 m).
+- A new search **goes to the best object at once** (in the browser that pressed Search).
+- **Preloading**: `main` calls `SemanticPanel.preload()`, which starts the text worker in the background when
+  the GUI starts (~13 s; "text model: ready" in the tab); a search meanwhile waits for it. Opening a project
+  with ready features also loads them and the splat positions in the background (`_warm`), so the first
+  search takes ~0.4 s instead of ~6 s. Not done in `App()` itself: tests create apps.
 - Not yet: tiling above 2048 px, distillation (option B).
 - Tests: `tests/test_semantic.py` (scoring, staleness, the panel's decoration; synthetic features).
 

@@ -1,11 +1,14 @@
-"""GUI View tab → "Semantic search": compute C-RADIOv3 features for the splat (a job), then type a text and
+"""GUI Search tab (left, after View): compute C-RADIOv3 features for the splat (a job), then type a text and
 see where it is in the splat: matching Gaussians tinted red, or only the matches shown (modelforge.semantic).
 The splat file is never changed; only the colours / selection sent to the browser.
 
 Objects: the matches grouped into instances (semantic.objects), each marked by a bright cylinder (rings +
 struts, slowly turning about the vertical) with a label, listed in a dropdown; Go glides the camera to the
-photo viewpoint that saw the object best (looking at it), else to an elevated view that fits it."""
+photo viewpoint that saw the object best (looking at it), else to an elevated view that fits it. A new
+search goes to the best object at once. `preload` (called when the GUI starts) loads the text model in the
+background, so the first search does not wait for it."""
 
+import contextlib
 import threading
 import time
 import traceback
@@ -26,8 +29,9 @@ class SemanticPanel:
         self.app = app
         self.feats, self.encoder, self.rel, self.query = None, semantic.TextEncoder(), None, ""
         self.means, self.objs, self._markers, self._frames, self._spin = None, [], [], [], None
-        with gui.add_folder("Semantic search", expand_by_default=False):
+        with contextlib.nullcontext():  # the panel fills its own tab
             self.g_md = gui.add_markdown("")
+            self.g_text_md = gui.add_markdown("")
             self.g_compute = gui.add_button(
                 "Compute semantic features", icon=viser.Icon.BRAIN,
                 hint="C-RADIOv3 features of every photo (2048 px, text-aligned through SigLIP2), projected onto the "
@@ -39,7 +43,7 @@ class SemanticPanel:
             self.g_search = gui.add_button("Search", icon=viser.Icon.SEARCH,
                                            hint="Score every Gaussian against the query. The first search loads "
                                                 "the text model (~1 min); later ones take a moment.")
-            self.g_search.on_click(lambda _: self.search())
+            self.g_search.on_click(lambda e: self.search(e.client))
             self.g_thr = gui.add_slider(
                 "Threshold", min=0.5, max=0.95, step=0.01, initial_value=0.6,
                 hint="Relevance (0.5 = no better than generic words like 'object' or 'stuff', 1 = clearly the "
@@ -85,6 +89,17 @@ class SemanticPanel:
                                  "stale": "⚠️ the splat changed since the features were computed: compute again",
                                  "ready": "features ready: type a query and **Search**"}[st]
         self.g_result.content = ""
+        if st == "ready" and why is None:  # load features + splat positions now, not at the first search
+            path = self.app.path
+            threading.Thread(target=self._warm, args=(path,), daemon=True).start()
+
+    def _warm(self, path):
+        try:
+            if path == self.app.path:
+                self._features()
+                self._splat_means()
+        except Exception:  # noqa: BLE001 - the search loads them again and reports errors
+            traceback.print_exc()
 
     def _features(self):
         if self.feats is None:
@@ -92,7 +107,21 @@ class SemanticPanel:
         return self.feats
 
     # ------------------------------------------------------------ search
-    def search(self):
+    def preload(self):
+        """Load the text model in the background (GUI start), so the first search is quick."""
+        if semantic.available() is not None:
+            return
+
+        def work():
+            self.g_text_md.content = "text model: ⏳ loading in the background …"
+            try:
+                self.encoder.encode(["warm-up"])
+                self.g_text_md.content = "text model: ✅ ready"
+            except Exception as e:  # noqa: BLE001 - shown in the GUI; a search retries
+                self.g_text_md.content = f"text model: ❌ {e}"
+        threading.Thread(target=work, daemon=True).start()
+
+    def search(self, client=None):
         q = self.g_query.value.strip()
         if not q:
             self.g_result.content = "type a query first"
@@ -102,14 +131,18 @@ class SemanticPanel:
         def work():
             t0 = time.time()
             try:
-                if self.encoder.proc is None:
-                    self.g_result.content = "⏳ loading the text model (first search, about a minute) …"
+                if self.encoder.proc is None or self.encoder.lock.locked():
+                    self.g_result.content = "⏳ waiting for the text model to load …"
                 emb = self.encoder.encode([q] + list(semantic.NEGATIVES))
                 self.g_result.content = "⏳ scoring …"
                 self.rel, self.query = self._features().relevance(emb[0], emb[1:]), q
                 self._redraw()
                 self._update_objects()
                 self.g_result.content += f" · {time.time() - t0:.1f} s"
+                self.g_text_md.content = "text model: ✅ ready"
+                if self.objs and client is not None:  # a new search: go to the best object at once
+                    self.g_objects.value = self.g_objects.options[0]
+                    self.go(0, client)
             except Exception as e:  # noqa: BLE001 - shown in the GUI
                 traceback.print_exc()
                 self.g_result.content = f"❌ {e}"
