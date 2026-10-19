@@ -179,7 +179,7 @@ def test_quick_bar(app):
     state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
-    assert state() == {"Splat": "●", "Mesh": "○", "Points": "○", "Cameras": "○", "Thumbs": "·", "Dense": "○",
+    assert state() == {"Splat": "●", "Mesh": "○", "Points": "○", "Cameras": "○", "Thumbs": "·", "Residuals": state()["Residuals"], "Dense": "○",
                        "Plan": state()["Plan"], "Orbit": "○", "Fly": "○"}  # points, cameras, thumbnails off
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
@@ -198,6 +198,9 @@ def test_quick_bar(app):
     assert app.g_cams.value and state()["Cameras"] == "●" and state()["Thumbs"] == "○"
     app._quick_click("Thumbs", None)
     assert app.g_thumbs.value and state()["Thumbs"] == "●"
+    before = app.g_corr.value
+    app._quick_click("Residuals", None)
+    assert app.g_corr.value is (not before) and state()["Residuals"] == ("●" if not before else "○")
     app._quick_click("Dense", None)
     assert app.g_dense_pts.value and state()["Dense"] == "●"
     c = Client()

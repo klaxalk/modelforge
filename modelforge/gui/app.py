@@ -276,7 +276,7 @@ class App:
                 self.g_fly_md = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
-            for h in (self.g_points, self.g_cams, self.g_thumbs):
+            for h in (self.g_points, self.g_cams, self.g_thumbs, self.g_corr):
                 h.on_update(lambda _: self._sync_quickbar())
             for h in (self.g_cams, self.g_thumbs, self.g_priors, self.g_scale):
                 h.on_update(lambda _: self._draw_cameras())
@@ -554,9 +554,9 @@ class App:
         self.hw_panel.float(x=776, y=-8, width=480, height=260)
         self.hw_panel.minimize()
         # one row: viser gives every button of a group the same width and wraps when they do not fit (the
-        # 7th, Fly, wrapped at 470 px and was stretched across a row of its own); ~86 px per button
-        # ("● Cameras" is the longest label)
-        self.quick.float(x=8, y=8, width=24 + 86 * len(self._quick_items()), height=96)
+        # 7th, Fly, wrapped at 470 px and was stretched across a row of its own);
+        # ("● Residuals" is the longest label: ~94 px per button)
+        self.quick.float(x=8, y=8, width=24 + 94 * len(self._quick_items()), height=96)
 
     # ------------------------------------------------------------- settings
     def _settings_path(self):
@@ -1074,6 +1074,7 @@ class App:
                 ("Points", self.project is not None, self.g_points.value),
                 ("Cameras", self.project is not None, self.g_cams.value),
                 ("Thumbs", self.project is not None and self.g_cams.value, self.g_thumbs.value),
+                ("Residuals", self.project is not None, self.g_corr.value),  # View: Prior → refined
                 ("Dense", d["fused"] is not None, self.g_dense_pts.value),
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
                 ("Orbit", True, bool(self._orbits)),
@@ -1093,7 +1094,7 @@ class App:
             g = self.server.gui.add_button_group(
                 "", options=labels, order=1.0,
                 hint="Show / hide the splat, the mesh, the sparse points, the cameras, their thumbnails (with "
-                     "the cameras on), the dense points and the Ingest flight plan (tracks + planned image dots); "
+                     "the cameras on), the residuals (red prior → refined segments), the dense points and the Ingest flight plan (tracks + planned image dots); "
                      "start / stop the orbit, or fly the camera path (● on, ○ off, · nothing yet). Same as the "
                      "View tab.")
         g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
@@ -1118,6 +1119,8 @@ class App:
             self.g_cams.value = not self.g_cams.value
         elif name == "Thumbs":
             self.g_thumbs.value = not self.g_thumbs.value
+        elif name == "Residuals":
+            self.g_corr.value = not self.g_corr.value
         elif name == "Dense":
             self.g_dense_pts.value = not self.g_dense_pts.value
         elif name == "Plan":
