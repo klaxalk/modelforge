@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import viser
 from plotly.subplots import make_subplots
 
-from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh
+from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh, splat_plan
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -422,18 +422,41 @@ class App:
                 "Method", options=splat.METHODS, initial_value="splatfacto",
                 hint="splatfacto: default. splatfacto-big: more Gaussians and detail, more GPU memory and time.")
             self.g_splat_iters = gui.add_number(
-                "Iterations", initial_value=splat.DEFAULT_ITERATIONS, min=100, step=1000,
-                hint="Training steps. 30000 is splatfacto's default (~20-40 min on a recent GPU); "
-                     "use a few thousand for a quick check.")
+                "Iterations", initial_value=0, min=0, step=1000,
+                hint="Training steps; 0 = auto: ~20 views per training image, at least 30000 (splatfacto's "
+                     "default) and at most 300000. The learning-rate decay and the densification schedule "
+                     "follow the value. Use a few thousand for a quick check.")
             self.g_splat_disk = gui.add_checkbox(
                 "Cache images on disk", initial_value=True,
                 hint="On: images stay on disk and are streamed by worker processes, so large datasets fit in "
                      "memory. Off: all images are preloaded into GPU memory (nerfstudio's default; it falls back "
                      "to CPU memory above 500 images), a little faster for small projects.")
             self.g_splat_down = gui.add_dropdown(
-                "Downsample factor", options=tuple(str(f) for f in splat.DOWNSCALES), initial_value="1",
+                "Downsample factor", options=("auto",) + tuple(str(f) for f in splat.DOWNSCALES),
+                initial_value="auto",
                 hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
-                     "less detail. The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+                     "less detail. auto: the smallest factor at which the ground area (from the cameras' "
+                     "footprints and ground sampling distance) needs no more Gaussians than fit in GPU memory. "
+                     "The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+            self.g_splat_strategy = gui.add_dropdown(
+                "Densification", options=("auto",) + splat.STRATEGIES, initial_value="auto",
+                hint="How Gaussians are added. default: split / clone / prune by gradient, with the opacity reset "
+                     "period scaled to the image count (splatfacto's fixed 3000 steps blocks densification "
+                     "entirely from ~2900 training images). mcmc: a fixed budget of Gaussians relocated where "
+                     "needed, for large areas. auto: mcmc when the area at full resolution needs more Gaussians "
+                     "than fit in GPU memory.")
+            self.g_splat_maxg = gui.add_number(
+                "Max gaussians (M)", initial_value=0.0, min=0.0, step=0.5,
+                hint="mcmc budget in millions; 0 = auto: what the ground area needs at the downsample factor, "
+                     "within the GPU memory estimate (~0.35M per GB above 4 GB).")
+            self.g_splat_camopt = gui.add_dropdown(
+                "Camera pose refinement", options=("auto",) + splat.CAMERA_OPT, initial_value="auto",
+                hint="splatfacto's camera optimizer: corrects small pose errors while training (rotation + "
+                     "translation per image). auto = SO3xR3. off = keep the refined poses as they are.")
+            self.g_splat_plan = gui.add_markdown("")
+            for g in (self.g_splat_iters, self.g_splat_down, self.g_splat_strategy, self.g_splat_maxg,
+                      self.g_splat_camopt):
+                g.on_update(lambda _: self._refresh_splat_plan())
             self.g_splat_lidar = gui.add_checkbox(
                 "Start from LiDAR points", initial_value=True,
                 hint="ROS 2 bag projects: the splat's initial cloud (sparse_pc.ply) gets the LiDAR points, coloured "
@@ -1034,6 +1057,7 @@ class App:
             if stage in ("dense", "splat", "splatmesh", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
+            self._refresh_splat_plan()  # new cameras: new suggestion
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
         except jobs.Cancelled:
@@ -1362,8 +1386,43 @@ class App:
                                job=self._token)
         return stats
 
+    def _splat_survey(self, project):
+        """splat_plan.survey of the project, cached by its camera files' times."""
+        key = (project,) + tuple(os.path.getmtime(os.path.join(project, f)) if os.path.exists(os.path.join(project, f))
+                                 else 0 for f in ("transforms.json", "poses.json", "sparse_pc.ply"))
+        if getattr(self, "_survey", (None, None))[0] != key:
+            self._survey = (key, splat_plan.survey(project))
+        return self._survey[1]
+
+    def _splat_settings(self, project):
+        """Splat tab values with the auto ones filled in from the flight (splat_plan.suggest)."""
+        return splat_plan.suggest(self._splat_survey(project), iterations=int(self.g_splat_iters.value),
+                                  downscale=self.g_splat_down.value, strategy=self.g_splat_strategy.value,
+                                  max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
+                                  camera_opt=self.g_splat_camopt.value)
+
+    def _refresh_splat_plan(self):
+        """The Splat tab's plan line, computed in the background (the survey reads every camera)."""
+        project = self.path
+
+        def work():
+            try:
+                p = self._splat_settings(project)
+            except (OSError, ValueError, KeyError) as e:
+                text = f"plan: not available yet ({e})"
+            else:
+                text = ("**Plan** (auto values from the flight): ×" + str(p["downscale"]) + ", "
+                        f"{p['iterations']:,} steps, {p['strategy']}"
+                        + (f" ≤{p['max_gaussians'] / 1e6:.1f}M" if p["max_gaussians"] else "")
+                        + f", camera {p['camera_opt']}  \n" + "  \n".join("· " + n for n in p["notes"]))
+            if project == self.path:
+                self.g_splat_plan.content = text
+        threading.Thread(target=work, daemon=True).start()
+
     def _run_splat(self, project):
-        iters = int(self.g_splat_iters.value)
+        plan = self._splat_settings(project)
+        iters, down = plan["iterations"], plan["downscale"]
+        self._on_log("splat plan: " + "; ".join(plan["notes"]))
 
         self._live_msg = ""
 
@@ -1379,7 +1438,7 @@ class App:
 
         def prepare(done, total):  # images_<factor>/ before training (thousands of images: minutes)
             self.g_progress.value = 100.0 * done / total
-            self._job["detail"] = f"downscaling images ×{self.g_splat_down.value}: {done:,} / {total:,}"
+            self._job["detail"] = f"downscaling images ×{down}: {done:,} / {total:,}"
         try:
             if self._kind() == "rosbag":  # the initial cloud with or without the LiDAR points
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
@@ -1395,9 +1454,9 @@ class App:
                                                f"{int(self.g_splat_every.value):,}, then in the View tab")
             splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
                       job=self._token, cache="disk" if self.g_splat_disk.value else "gpu",
-                      downscale=int(self.g_splat_down.value), preview_every=int(self.g_splat_every.value),
+                      downscale=down, preview_every=int(self.g_splat_every.value),
                       on_snapshot=self._on_splat_snapshot if live else None, lidar_depth=lidar_depth,
-                      on_prepare=prepare)
+                      on_prepare=prepare, schedule=plan)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         finally:
             self._splat_live_on = False
@@ -1585,6 +1644,7 @@ class App:
         self._draw_splat()
         self._refresh_export()
         self._sync_quickbar()
+        self._refresh_splat_plan()
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):

@@ -18,9 +18,15 @@ LiDAR depth supervision (lidar_depth=weight, projects with lidar/cloud.ply): tra
 splatfacto-big-lidar from modelforge/nsplugin (registered through nerfstudio's environment variables,
 nothing installed) with the lidar-data dataparser; its "[lidar] ..." depth error lines go to the report.
 
+Training plan (modelforge/splat_plan.py): iterations, downsample factor, densification strategy (default
+with a reset period scaled to the image count, or MCMC with a Gaussian budget), learning-rate decay length
+and camera pose refinement come from the project's cameras (count, ground area, GSD) and the GPU memory,
+unless given; splatfacto's fixed schedule never densifies from ~2900 training images on.
+
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
-        [--cache disk|cpu|gpu] [--downscale 2] [--lidar-depth 0.2] [extra ns-train args]
+        [--cache disk|cpu|gpu] [--downscale 2] [--strategy default|mcmc] [--max-gaussians N]
+        [--camera-opt off|SO3xR3|SE3] [--no-plan] [--lidar-depth 0.2] [extra ns-train args]
 """
 
 import argparse
@@ -99,10 +105,41 @@ def has_lidar(project):
 DOWNSCALES = (1, 2, 4, 8)  # image downsample factors offered (GUI, CLI)
 
 
+STRATEGIES = ("default", "mcmc")  # gsplat densification: split/clone/prune, or MCMC with a fixed budget
+CAMERA_OPT = ("off", "SO3xR3", "SE3")  # splatfacto's camera optimizer (pose refinement while training)
+
+
+def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split_at=None, reset_alpha_every=None,
+                  camera_opt=None):
+    """ns-train flags for the densification and learning-rate schedule (see modelforge/splat_plan.py)."""
+    args = []
+    if iterations:  # nerfstudio's method config decays these over a fixed 30000 steps
+        for group in ("means", "camera-opt", "bilateral-grid"):
+            args += [f"--optimizers.{group}.scheduler.max-steps", str(int(iterations))]
+    if strategy:
+        if strategy not in STRATEGIES:
+            raise ValueError(f"strategy must be one of {STRATEGIES}")
+        args += ["--pipeline.model.strategy", strategy]
+        if strategy == "mcmc":  # as nerfstudio's splatfacto-mcmc
+            args += ["--pipeline.model.cull-alpha-thresh", "0.005"]
+            if max_gaussians:
+                args += ["--pipeline.model.max-gs-num", str(int(max_gaussians))]
+    if stop_split_at:
+        args += ["--pipeline.model.stop-split-at", str(int(stop_split_at))]
+    if reset_alpha_every:
+        args += ["--pipeline.model.reset-alpha-every", str(int(reset_alpha_every))]
+    if camera_opt:
+        if camera_opt not in CAMERA_OPT:
+            raise ValueError(f"camera_opt must be one of {CAMERA_OPT}")
+        args += ["--pipeline.model.camera-optimizer.mode", camera_opt]
+    return args
+
+
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
-                  steps_per_save=None, lidar_depth=None):
+                  steps_per_save=None, lidar_depth=None, schedule=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
-    method of modelforge/nsplugin with the lidar-data dataparser."""
+    method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
+    (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt)."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -113,9 +150,15 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
            "--pipeline.datamanager.cache-images", cache,
            # splatfacto-big (and -mcmc) keep method_name "splatfacto", so their runs would land in
            # nerfstudio/*/splatfacto/ where the preview watcher and latest_config don't look
-           "--method-name", ns_method(method, lidar_depth)]
+           "--method-name", ns_method(method, lidar_depth),
+           # rendering every eval image every 1000 steps: minutes per pass with hundreds of eval images
+           "--steps-per-eval-all-images", "0"]
     if iterations:
         cmd += ["--max-num-iterations", str(int(iterations))]
+    if schedule:
+        cmd += schedule_args(iterations, **{k: schedule.get(k) for k in
+                                            ("strategy", "max_gaussians", "stop_split_at", "reset_alpha_every",
+                                             "camera_opt")})
     if steps_per_save:
         cmd += ["--steps-per-save", str(int(steps_per_save))]
     if lidar_depth is not None:
@@ -231,8 +274,10 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
-        cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None):
+        cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None,
+        schedule=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
+    schedule: densification / learning-rate settings from splat_plan.suggest (or None: splatfacto's).
     lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1)."""
     from modelforge.export import splat_to_enu
@@ -261,7 +306,12 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
 
     prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
     on_line(f"splat: training {method_dir}, cache {cache}, downscale {downscale}"
-            + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "") + " "
+            + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "")
+            + (f", {iterations or DEFAULT_ITERATIONS:,} steps" if schedule else "")
+            + (f", {schedule['strategy']} densification" if schedule and schedule.get("strategy") else "")
+            + (f" (≤{schedule['max_gaussians']:,} gaussians)" if schedule and schedule.get("max_gaussians") else "")
+            + (f", camera optimizer {schedule['camera_opt']}" if schedule and schedule.get("camera_opt") else "")
+            + " "
             f"(viewer on http://localhost:{VIEWER_PORT})")
     stop = threading.Event()
     if on_snapshot:
@@ -269,7 +319,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
                          daemon=True).start()
     try:
         _stream(train_command(project, method, iterations, extra, cache, downscale,
-                              preview_every if on_snapshot else None, lidar_depth), line, job)
+                              preview_every if on_snapshot else None, lidar_depth, schedule), line, job)
     finally:
         stop.set()
     t_train = time.time() - t0
@@ -286,6 +336,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
              "downscale": int(downscale), "config": config, "splat": enu,
              "num_gaussians": _num_vertices(enu), "train_seconds": round(t_train, 1),
              "seconds": round(time.time() - t0, 1)}
+    if schedule:
+        stats["schedule"] = {k: schedule.get(k) for k in ("strategy", "max_gaussians", "stop_split_at",
+                                                          "reset_alpha_every", "camera_opt") if schedule.get(k)}
     if lidar_depth is not None:
         stats["lidar_depth"] = {"weight": float(lidar_depth), "error": lidar_log[-1] if lidar_log else None,
                                 "history": lidar_log}
@@ -304,18 +357,33 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
     ap.add_argument("--method", choices=METHODS, default="splatfacto")
-    ap.add_argument("--iterations", type=int, help=f"training steps (default {DEFAULT_ITERATIONS})")
+    ap.add_argument("--iterations", type=int, help="training steps (default: from the project's size)")
     ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
                     help="where training images are kept (default disk: low memory, for large datasets)")
-    ap.add_argument("--downscale", type=int, default=1, choices=DOWNSCALES,
-                    help="train on images downscaled by this factor (default 1)")
+    ap.add_argument("--downscale", type=int, choices=DOWNSCALES,
+                    help="train on images downscaled by this factor (default: from the GSD and GPU memory)")
+    ap.add_argument("--strategy", choices=STRATEGIES, help="densification (default: mcmc when the area needs "
+                    "more Gaussians than fit, else default with a reset period scaled to the image count)")
+    ap.add_argument("--max-gaussians", type=int, help="MCMC budget (default: from the area and GPU memory)")
+    ap.add_argument("--camera-opt", choices=CAMERA_OPT, help="pose refinement while training (default SO3xR3)")
+    ap.add_argument("--no-plan", action="store_true",
+                    help="splatfacto's own defaults (30000 steps, no schedule) instead of the flight-based plan")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()
+    project = os.path.abspath(args.project)
     try:
-        run(os.path.abspath(args.project), args.method, args.iterations, extra,
-            on_line=lambda m: print(m, flush=True), cache=args.cache, downscale=args.downscale,
-            lidar_depth=args.lidar_depth)
+        if args.no_plan:
+            iterations, downscale, schedule = args.iterations, args.downscale or 1, None
+        else:
+            from modelforge import splat_plan
+            schedule = splat_plan.suggest(splat_plan.survey(project), iterations=args.iterations,
+                                          downscale=args.downscale, strategy=args.strategy,
+                                          max_gaussians=args.max_gaussians, camera_opt=args.camera_opt)
+            print("splat plan: " + "; ".join(schedule["notes"]), flush=True)
+            iterations, downscale = schedule["iterations"], schedule["downscale"]
+        run(project, args.method, iterations, extra, on_line=lambda m: print(m, flush=True), cache=args.cache,
+            downscale=downscale, lidar_depth=args.lidar_depth, schedule=schedule)
     except (RuntimeError, ValueError, Stopped) as e:
         sys.exit(f"error: {e}")
 

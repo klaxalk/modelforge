@@ -202,6 +202,7 @@ modelforge/
 │   ├── gui/            # viser app; tabs: projects.py, ingest.py; data.py (numpy layer)
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
+│   ├── splat_plan.py   # splat training plan from the cameras (area, GSD, image count) and GPU memory
 │   ├── splat_mesh.py   # mesh from the splat: TSDF fusion of rendered depth (export/splat_tsdf.py in /opt/nerfstudio)
 │   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss)
 │   ├── projects.py     # project folders: list / create / status / clean
@@ -888,11 +889,37 @@ Why PatchMatch was slow:
 **Splat**: there are two ways to run it. Both call `modelforge.splat.run`
 inside the CUDA dev container, where nerfstudio sits in its own venv at
 `/opt/nerfstudio`:
-- GUI: Splat tab → method, iterations, **Cache images on disk** (default on),
-  **Downsample factor** (1 / 2 / 4 / 8, default 1), then **Train + export splat**. The
-  progress bar shows the training step, there is a Stop button, and the
-  result is reloaded into the View tab.
-- Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [--cache disk|cpu|gpu] [--downscale N] [ns-train args]`.
+- GUI: Splat tab → method, iterations (0 = auto), **Cache images on disk** (default on),
+  **Downsample factor** (auto / 1 / 2 / 4 / 8), **Densification** (auto / default / mcmc),
+  **Max gaussians** (0 = auto), **Camera pose refinement** (auto / off / SO3xR3 / SE3), then
+  **Train + export splat**. The progress bar shows the training step, there is a Stop button,
+  and the result is reloaded into the View tab.
+- Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [--cache disk|cpu|gpu] [--downscale N] [--strategy default|mcmc] [--max-gaussians N] [--camera-opt MODE] [--no-plan] [ns-train args]`.
+- **Training plan** (`modelforge/splat_plan.py`; the user asked, 2026-10-19, after a bad splat of a
+  500 × 500 m world whose small parts trained fine). Auto values come from the cameras and the GPU:
+  - **Why:** splatfacto pauses refinement for (training images + 100) steps after each opacity
+    reset and resets every 3000 steps; gsplat refines only while `step % 3000 >= pause`. From ~2900
+    training images on, **nothing is ever densified or pruned**. The 8000-image kladno_dira run
+    showed it: 8,026,112 Gaussians at step 17,500 = its sparse cloud. Also, the means / camera
+    learning rates decay over a fixed 30000 steps in nerfstudio's method config, and every eval
+    image was rendered every 1000 steps.
+  - `survey`: cameras from transforms.json (or, before SfM, the poses.json priors with camera.json or
+    an assumed 80° HFOV); each camera's footprint on the ground (poses.json `ground_z`, else the
+    sparse points' 5th percentile z; rays end at 5× the camera height) → union area, overlap, median
+    GSD.
+  - `suggest`: iterations = 20 × training images in [30k, 300k]; Gaussians needed = area /
+    (2 px × GSD × factor)²; GPU fits ~0.35M per GB above 4 GB; downscale = the smallest factor that
+    fits (width ≥ 800 px); **mcmc** (budget = need at that factor, within the GPU estimate, ≥ the
+    sparse points) when full resolution does not fit, else default with the reset period
+    max(3000, 2 × (training images + 100)); splitting stops at 1/2 (mcmc 5/6); camera optimizer
+    SO3xR3. Explicit values win and the dependent ones follow.
+  - `train_command(schedule=)` adds `--pipeline.model.strategy / max-gs-num / stop-split-at /
+    reset-alpha-every / camera-optimizer.mode`, `--optimizers.{means,camera-opt,bilateral-grid}.scheduler.max-steps`;
+    `--steps-per-eval-all-images 0` always. All flags checked against nerfstudio's own parser.
+  - The Splat tab shows the plan and why (images, ha, overlap, GSD, Gaussians needed vs. GPU,
+    steps); stats get `report.json["splat"]["schedule"]`. Heuristics, **not yet validated by a
+    training run** on a large project.
+  - Tests: `tests/test_splat_plan.py`.
 - Disk cache = nerfstudio `--pipeline.datamanager.cache-images disk`: images
   stay on disk and are streamed by worker processes, for large datasets. Off
   means `gpu` (nerfstudio's default, which falls back to CPU above 500 images).
