@@ -59,6 +59,8 @@ def fake_ns(tmp_path, monkeypatch):
     os.makedirs(project)  # no splat/ yet, as in a fresh project
     os.makedirs(bin_dir)
     open(project / "transforms.json", "w").write(json.dumps({"frames": []}))
+    open(project / "sparse_pc.ply", "w").write("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\n"
+                                               "property float y\nproperty float z\nend_header\n0 0 0\n")
     v, _ = make_splat(np.random.default_rng(0), n=50)
     src = str(tmp_path / "src.ply")
     plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex")]).write(src)
@@ -167,3 +169,18 @@ def test_mf_train_imports_in_nerfstudio_venv():
                         "assert t.Trainer._load_checkpoint is mf_train.load_checkpoint"],
                        env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_empty_sparse_cloud_is_a_clear_error(fake_ns):
+    """SfM without 3D points (too little overlap) used to surface as nerfstudio's IndexError."""
+    project, _ = fake_ns
+    open(os.path.join(project, "sparse_pc.ply"), "w").write(
+        "ply\nformat ascii 1.0\nelement vertex 0\nproperty float x\nproperty float y\nproperty float z\nend_header\n")
+    with pytest.raises(RuntimeError, match="no 3D points"):
+        splat.run(project, "splatfacto", 30, on_line=lambda m: None)
+
+
+def test_failure_names_the_module(tmp_path):
+    with pytest.raises(RuntimeError, match="exited with code") as e:
+        jobs.Token().run([sys.executable, "-m", "json.tool", str(tmp_path / "missing.json")])
+    assert str(e.value).startswith("json.tool ")  # not "python -m"

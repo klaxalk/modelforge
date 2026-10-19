@@ -1616,6 +1616,9 @@ class App:
                 return f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
             if st == "refine":
                 f = r["final"]
+                if f["points3D"] < 100:  # nothing for dense / splat to start from
+                    return (f"⚠️ {f['reg_images']} cameras but only **{f['points3D']} 3D points**: too little overlap "
+                            "between the images (Images used: keep more of them?); dense and splat need points")
                 e, d = f["point_error_px"], f["prior_deviation"]["position_m"]
                 mode = " (chunked)" if r.get("ba", {}).get("mode") == "chunked" else ""
                 return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "

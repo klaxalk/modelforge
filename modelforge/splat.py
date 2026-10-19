@@ -309,6 +309,10 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         raise RuntimeError(reason)
     if not os.path.exists(os.path.join(project, "transforms.json")):
         raise RuntimeError("transforms.json missing: run the SfM export stage first")
+    from modelforge.splat_plan import ply_count
+    if ply_count(os.path.join(project, "sparse_pc.ply")) == 0 and not any("random-init" in a for a in extra):
+        raise RuntimeError("sparse_pc.ply has no points: SfM found no 3D points to start the splat from (too little "
+                           "overlap between the images? see the refine History line; Images used: keep more)")
     if lidar_depth is not None and not has_lidar(project):
         raise RuntimeError("LiDAR depth needs LiDAR points (a ROS 2 bag project with point cloud topics); "
                            "re-run the export stage after extraction")

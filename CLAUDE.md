@@ -622,6 +622,10 @@ extract once, then run the pipeline on subsets of it, in the same project):
   Disk sizes in the Projects status count the hard-linked frames in both folders.
 - A first version made a new project per subset; the user wanted it inside the project, so it was
   replaced.
+- Too sparse a subset breaks SfM: kladno_dopravnik at every 8th image (10 of 80) matched 1,074
+  inliers over 37 pairs and refine ended with **0 points** (focal drifted to 4940 px vs ~3200), and
+  splatfacto then died with an `IndexError` on the empty sparse_pc.ply. Now `splat.run` refuses an
+  empty sparse_pc.ply with a clear message, and the refine History line warns below 100 points.
 - Tests: `tests/test_projects.py` (`test_subsample`, `test_gui_subsample`).
 
 ## Pipeline (M1, headless)

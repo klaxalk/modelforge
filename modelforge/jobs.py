@@ -78,7 +78,10 @@ class Token:
                 self._soft.pop(p, None)
         self.check()
         if rc:
-            raise RuntimeError(f"{cmd[0].rsplit('/', 1)[-1]} {cmd[1] if len(cmd) > 1 else ''} exited with code {rc}: "
+            prog = cmd[0].rsplit("/", 1)[-1]
+            if len(cmd) > 2 and cmd[1] == "-m":  # python -m module: name the module
+                prog, cmd = cmd[2], cmd[2:]
+            raise RuntimeError(f"{prog} {cmd[1] if len(cmd) > 1 else ''} exited with code {rc}: "
                                + (tail[-1] if tail else ""))
         return tail
 
