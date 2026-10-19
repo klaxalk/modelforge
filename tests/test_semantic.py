@@ -158,3 +158,19 @@ def test_surface_distance_and_near_mesh_filter(tmp_path):
     assert list(rel) == [0.9, 0.9, 0.0, 0.0] and dropped == 2
     panel.g_near = V(False)
     assert list(panel._rel()[0]) == [0.9] * 4
+
+
+def test_auto_threshold():
+    """Lowered from the best match: stops before noise specks appear around a single object, before two
+    distinct objects merge, and reports an absent query."""
+    rng = np.random.default_rng(1)
+    ground = np.c_[rng.uniform(0, 100, (20000, 2)), np.zeros(20000)]
+    obj = rng.normal((50, 50, 1.0), (1.5, 1.5, 0.6), (1500, 3))
+    specks = np.vstack([rng.normal((x, y, 0.2), 0.3, (40, 3)) for x, y in rng.uniform(5, 95, (12, 2))])
+    means = np.vstack([ground, obj, specks])  # 12 small noise clusters (specks) of 40 Gaussians at 0.62
+    rel = np.r_[rng.uniform(0.3, 0.58, 20000), rng.uniform(0.66, 0.75, 1500), np.full(len(specks), 0.62)]
+    thr, why = semantic.auto_threshold(means, rel)
+    assert why == "specks" and 0.62 < thr <= 0.66, (thr, why)
+    obs = semantic.objects(means, rel, thr)
+    assert len(obs) == 1 and np.allclose(obs[0]["center"][:2], (50, 50), atol=0.5)
+    assert semantic.auto_threshold(means, np.minimum(rel, 0.55)) == (0.55, "absent")

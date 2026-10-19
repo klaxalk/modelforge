@@ -39,8 +39,11 @@ class SemanticPanel:
                      "splat's Gaussians with an occlusion test: splat/semantic/ (the splat itself is unchanged). "
                      "About a minute for ~60 photos; the first run downloads the models (~5 GB).")
             self.g_compute.on_click(lambda _: self.app.run_stage("semantic"))
-            self.g_query = gui.add_text("Query", initial_value="",
-                                        hint="What to look for, in words: 'a car', 'gravel pile', 'a roof'.")
+            # multiline only to see Enter: viser's text box has no submit event, but a newline arrives
+            self.g_query = gui.add_text("Query", initial_value="", multiline=True,
+                                        hint="What to look for, in words: 'a car', 'gravel pile', 'a roof'. "
+                                             "Enter searches.")
+            self.g_query.on_update(lambda e: self._query_typed(e.client))
             self.g_search = gui.add_button("Search", icon=viser.Icon.SEARCH,
                                            hint="Score every Gaussian against the query. The first search loads "
                                                 "the text model (~1 min); later ones take a moment.")
@@ -49,6 +52,11 @@ class SemanticPanel:
                 "Threshold", min=0.5, max=0.95, step=0.01, initial_value=0.6,
                 hint="Relevance (0.5 = no better than generic words like 'object' or 'stuff', 1 = clearly the "
                      "query) above which a Gaussian counts as a match. Raise it when too much lights up.")
+            self.g_auto = gui.add_checkbox(
+                "Auto threshold", initial_value=True,
+                hint="Each search sets the threshold itself: lowered from the best match until noise specks start "
+                     "to appear or objects merge (semantic.auto_threshold); a best match below 0.6 means the query "
+                     "is probably not in the scene. Move the slider afterwards to adjust.")
             self.g_near = gui.add_checkbox(
                 "Near the mesh only", initial_value=True,
                 hint="Ignore matching Gaussians farther than the tolerance from the mesh (the mesh from the splat, "
@@ -131,6 +139,13 @@ class SemanticPanel:
                 self.g_text_md.content = f"text model: ❌ {e}"
         threading.Thread(target=work, daemon=True).start()
 
+    def _query_typed(self, client):
+        """Enter in the Query box (a newline) starts the search."""
+        v = self.g_query.value
+        if "\n" in v:
+            self.g_query.value = " ".join(v.split()).strip()
+            self.search(client)
+
     def search(self, client=None):
         q = self.g_query.value.strip()
         if not q:
@@ -146,11 +161,22 @@ class SemanticPanel:
                 emb = self.encoder.encode([q] + list(semantic.NEGATIVES))
                 self.g_result.content = "⏳ scoring …"
                 self.rel, self.query = self._features().relevance(emb[0], emb[1:]), q
+                absent = False
+                if self.g_auto.value:
+                    thr, why = semantic.auto_threshold(self._splat_means(), self._rel()[0],
+                                                       min_gaussians=int(self.g_min.value))
+                    absent = why == "absent"
+                    self.g_thr.value = (self.g_thr.max if absent else  # nothing to highlight
+                                        float(np.clip(round(thr, 2), self.g_thr.min, self.g_thr.max)))
                 self._redraw()
                 self._update_objects()
+                if absent:
+                    self._set_objects([])
+                    self.g_result.content = (f"**{q}**: probably not in the scene (best relevance "
+                                             f"{float(self._rel()[0].max()):.2f} < {semantic.ABSENT})")
                 self.g_result.content += f" · {time.time() - t0:.1f} s"
                 self.g_text_md.content = "text model: ✅ ready"
-                if self.objs and client is not None:  # a new search: go to the best object at once
+                if self.objs and client is not None and not absent:  # a new search: go to the best object
                     self.g_objects.value = self.g_objects.options[0]
                     self.go(0, client)
             except Exception as e:  # noqa: BLE001 - shown in the GUI

@@ -284,6 +284,44 @@ def objects(means, rel, thr, voxel=None, min_gaussians=30, max_objects=20):
     return out[:max_objects]
 
 
+ABSENT = 0.6  # best relevance below this: probably not in the scene
+AUTO_FLOOR = 0.55  # the automatic threshold stays above this (0.5 = no better than the generic words)
+
+
+def auto_threshold(means, rel, min_gaussians=30, step=0.01, floor=AUTO_FLOOR, specks=3):
+    """Threshold for a query, from how its objects behave while it is lowered from the best match: the last
+    value before (1) `specks` or more new groups barely above min_gaussians appear (noise sets in) or (2) the
+    largest object at least 1.5x its size by absorbing another one (objects merge); else the floor. Specks count
+    only while no new substantial object appears alongside (real instances emerge with some). Both only
+    count once there is a substantial object (>= 10 x min_gaussians; a merge needs two): near the top an
+    object still forms from fragments. Returns (threshold, reason); a best relevance below ABSENT returns
+    (best, "absent"). kladno_dopravnik: "a machine" 0.66 (specks), "gravel pile" 0.62 (merge)."""
+    top = float(rel.max()) if len(rel) else 0.0
+    if top < ABSENT:
+        return top, "absent"
+    t = np.floor(top / step) * step
+    prev, prev_t = None, None
+    while t >= floor - 1e-9:
+        obs = objects(means, rel, t, min_gaussians=min_gaussians, max_objects=100000)
+        small = sum(1 for o in obs if o["count"] < 3 * min_gaussians)
+        big = [o["count"] for o in obs]
+        if prev is not None:
+            p_small, p_big = prev
+            solid = 10 * min_gaussians
+            n_solid, p_solid = sum(1 for c in big if c >= solid), sum(1 for c in p_big if c >= solid)
+            # noise: new specks while no new substantial object appears (new piles of gravel come with some)
+            if p_solid and small - p_small >= specks and n_solid <= p_solid:
+                return prev_t, "specks"
+            # two distinct objects of comparable size join (a fragment joining its own object is not a merge)
+            if len(p_big) > 1 and p_big[1] >= max(solid, 0.3 * p_big[0]) and big and big[0] >= 1.5 * p_big[0] and \
+                    big[0] >= p_big[0] + 0.5 * p_big[1]:
+                return prev_t, "merge"
+        if obs:
+            prev, prev_t = (small, big), t
+        t = round(t - step, 6)
+    return (prev_t if prev_t is not None else floor), "floor"
+
+
 class TextEncoder:
     """A long-lived worker with the text model (load once: ~1 min; then a query takes milliseconds)."""
 

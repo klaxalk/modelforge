@@ -1210,6 +1210,20 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   - kladno_dopravnik: "a car" → 1 object (5.5 m); "a machine" at 0.66 → the crusher (16 m, its
     conveyors) + 2 specks; "gravel pile" at 0.65 → 20 piles (neighbouring piles can merge: one 56 m).
 - A new search **goes to the best object at once** (in the browser that pressed Search).
+- **Enter searches**: the Query box is multi-line only so a newline (Enter) reaches the server (viser's text
+  box has no submit event); the newline is removed and the search starts.
+- **Auto threshold** (default on; `semantic.auto_threshold`; the user asked for an automatic threshold): the
+  threshold is lowered from the best match in 0.01 steps, regrouping objects each step, and stops at the
+  last value before (1) **specks**: ≥ 3 new groups under 3 × min size while no new substantial object
+  (≥ 10 × min size) appears, or (2) a **merge**: the largest object grows ≥ 1.5 × by absorbing another
+  substantial one of ≥ 30 % its size (fragments joining their own object are not merges); floor 0.55. A best
+  relevance below 0.6 → "probably not in the scene" (threshold to the top, no markers, no camera jump).
+  - Sweep on kladno_dopravnik (mesh filter on): "a machine" 0.66 (specks; crusher alone), "gravel pile" 0.68
+    (specks; 18–19 piles, in the plateau before piles merge at 0.60), "a car" 0.55 (floor; one object all
+    the way), "a person" / "a tree" absent (best 0.56 / 0.58), "dirt road" 0.65 (fragments: diffuse
+    "stuff"). Earlier rule versions stopped gravel at 0.75 / 0.74 / 0.73 on fragments forming.
+  - Statistics alone (median + k·MAD of the relevance) cannot do it: "a machine" needs k ≈ 2, "a car"
+    k ≈ 12.
 - **Near the mesh only** (default on, tolerance 3 mesh voxels; the user asked to prune with the mesh):
   matches whose centre is farther than the tolerance from the mesh count as 0 for the highlight, the counts
   and the objects. `semantic.search_mesh`: the splat mesh (its TSDF voxel) else COLMAP's Delaunay / Poisson
