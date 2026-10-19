@@ -16,9 +16,7 @@ import traceback
 from dataclasses import asdict
 
 import numpy as np
-import plotly.graph_objects as go
 import viser
-from plotly.subplots import make_subplots
 
 from modelforge import jobs, videos
 from modelforge.dji import extract as ex
@@ -106,7 +104,6 @@ class IngestPanel:
         self._clear_preview()
         self.g_status.content = ""
         self.g_plan_md.content = ""
-        self.g_plot.figure = go.Figure()
         self._update_status()
         self.request_plan(edited=False)
 
@@ -238,7 +235,6 @@ class IngestPanel:
                                        hint="Tracks per source (bright inside the range, grey outside) and dots at "
                                             "the planned image positions.")
         self.g_show.on_update(lambda _: self._draw_scene())
-        self.g_plot = gui.add_plotly(go.Figure(), aspect=1.0)
         self.g_overwrite = gui.add_checkbox("Overwrite existing images", initial_value=False,
                                             hint="Old images and everything derived from them (databases, sparse, "
                                                  "dense, splat, report) move to previous/<time>/, nothing is deleted.")
@@ -499,7 +495,6 @@ class IngestPanel:
             self.plan, self.prev = None, None
             self.g_plan_md.content = "no enabled sources"
             self._draw_scene()
-            self._update_plot()
             self._update_status()
             return
         if self.kind == "video":
@@ -545,7 +540,6 @@ class IngestPanel:
         md += [f"⚠️ {w}" for w in plan.warnings]
         self.g_plan_md.content = "  \n".join(md)
         self._draw_scene()
-        self._update_plot()
         self._update_status()
         self._preview_source_changed(keep_time=True)
 
@@ -592,89 +586,6 @@ class IngestPanel:
         c = np.concatenate(pcols) if pcols else np.zeros((1, 3), np.uint8)
         scene.add_point_cloud("/ingest/samples", points=p, colors=c, point_size=1.2, precision="float32",
                               point_shape="circle")
-
-    def _update_plot(self):
-        if not self.plan or not self.plan.sources:
-            self.g_plot.figure = go.Figure()
-            return
-        if self.kind == "video":
-            self._update_plot_video()
-            return
-        if self.kind == "rosbag":
-            self._update_plot_rosbag()
-            return
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-                            subplot_titles=("altitude [m] · ● planned images", "speed [m/s]", "gimbal pitch [deg]"))
-        for sp in self.plan.sources:
-            c, tel = sp.clip, sp.clip.telemetry(self.settings.yaw_source)
-            idx = np.arange(0, c.n, 6)
-            t = sp.time_base + c.pts[idx]
-            a = tel["a"][idx]
-            col = "rgb(%d,%d,%d)" % source_color(sp.index)
-            sel = np.where(sp.valid[idx], 1.0, np.nan)
-            name = f"{sp.index + 1}. {sp.prefix}"
-            for row, y in ((1, a[:, 2] + sp.alt_offset), (2, np.linalg.norm(a[:, 4:7], axis=1)),
-                           (3, tel["pitch"][idx])):
-                fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(150,150,150)", width=1),
-                                         showlegend=False, hoverinfo="skip"), row, 1)
-                fig.add_trace(go.Scatter(x=t, y=y * sel, mode="lines", line=dict(color=col, width=2), name=name,
-                                         showlegend=row == 1), row, 1)
-            if sp.windows:
-                k = np.array([(w0 + w1) // 2 for w0, w1 in sp.windows])
-                fig.add_trace(go.Scatter(x=sp.time_base + c.pts[k], y=tel["a"][k, 2] + sp.alt_offset, mode="markers",
-                                         marker=dict(size=4, color=col), showlegend=False), 1, 1)
-        fig.update_xaxes(title_text="time [s] (project timeline)", row=3, col=1)
-        fig.update_layout(margin=dict(l=40, r=10, t=30, b=30), height=560,
-                          legend=dict(orientation="h", y=-0.12), template=self.app.plot_template())
-        self.g_plot.figure = fig
-
-    def _update_plot_video(self):
-        """No telemetry: the sampling curve (cumulative image motion, or time) with the planned images."""
-        fig = go.Figure()
-        for sp in self.plan.sources:
-            c = sp.clip
-            idx = np.arange(0, c.n, 6)
-            t = sp.time_base + c.pts[idx]
-            col = "rgb(%d,%d,%d)" % source_color(sp.index)
-            sel = np.where(sp.valid[idx], 1.0, np.nan)
-            fig.add_trace(go.Scatter(x=t, y=sp.s[idx], mode="lines", line=dict(color="rgb(150,150,150)", width=1),
-                                     showlegend=False, hoverinfo="skip"))
-            fig.add_trace(go.Scatter(x=t, y=sp.s[idx] * sel, mode="lines", line=dict(color=col, width=2),
-                                     name=f"{sp.index + 1}. {sp.prefix}"))
-            if sp.windows:
-                k = np.array([(w0 + w1) // 2 for w0, w1 in sp.windows])
-                fig.add_trace(go.Scatter(x=sp.time_base + c.pts[k], y=sp.s[k], mode="markers",
-                                         marker=dict(size=5, color=col), showlegend=False))
-        unit = "cumulative image motion [image widths]" if self.settings.sampling == "motion" else "time [s]"
-        fig.update_layout(title=f"{unit} · ● planned images", margin=dict(l=40, r=10, t=40, b=30), height=360,
-                          legend=dict(orientation="h", y=-0.2), template=self.app.plot_template(),
-                          xaxis_title="time [s] (project timeline)")
-        self.g_plot.figure = fig
-
-    def _update_plot_rosbag(self):
-        """Camera height and speed (from the TF / odometry poses) with the planned images."""
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                            subplot_titles=("camera height (world z) [m] · ● planned images", "speed [m/s]"))
-        for sp in self.plan.sources:
-            c = sp.clip
-            t = sp.time_base + c.pts
-            z = c.centers[:, 2]
-            v = np.r_[0.0, np.linalg.norm(np.diff(c.centers, axis=0), axis=1) / np.maximum(np.diff(c.stamps), 1e-6)]
-            col = "rgb(%d,%d,%d)" % source_color(sp.index)
-            sel = np.where(sp.valid, 1.0, np.nan)
-            for row, y in ((1, z), (2, v)):
-                fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(150,150,150)", width=1),
-                                         showlegend=False, hoverinfo="skip"), row, 1)
-                fig.add_trace(go.Scatter(x=t, y=y * sel, mode="lines", line=dict(color=col, width=2),
-                                         name=f"{sp.index + 1}. {sp.prefix}", showlegend=row == 1), row, 1)
-            if sp.windows:
-                k = np.array([(w0 + w1) // 2 for w0, w1 in sp.windows])
-                fig.add_trace(go.Scatter(x=sp.time_base + c.pts[k], y=z[k], mode="markers",
-                                         marker=dict(size=5, color=col), showlegend=False), 1, 1)
-        fig.update_xaxes(title_text="time [s] (project timeline)", row=2, col=1)
-        fig.update_layout(margin=dict(l=40, r=10, t=30, b=30), height=440, legend=dict(orientation="h", y=-0.15),
-                          template=self.app.plot_template())
-        self.g_plot.figure = fig
 
     # ------------------------------------------------------------------ frame preview
     def _preview_index(self):

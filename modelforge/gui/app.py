@@ -14,9 +14,7 @@ import time
 import traceback
 
 import numpy as np
-import plotly.graph_objects as go
 import viser
-from plotly.subplots import make_subplots
 
 from modelforge import dense, jobs, pipeline, projects, splat, splat_mesh, splat_plan
 from modelforge.dji import ingest
@@ -36,6 +34,7 @@ DENSE_QUALITY = {"superfast (320 px)": "superfast", "low (640 px, fast)": "low",
                  "high (full res)": "high", "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
 DENSE_QUALITY_DEFAULT = next(k for k, v in DENSE_QUALITY.items() if v == dense.DEFAULT_QUALITY)
 
+QUICK_SHORT = {"Cameras": "Cams", "Residuals": "Resid", "Trajectory": "Traj"}  # quick bar labels (two short rows)
 STAGE_HINTS = {
     "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
                 "camera). A few minutes on CPU.",
@@ -315,9 +314,6 @@ class App:
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
 
-        with self.left.add_tab("Plots", viser.Icon.CHART_LINE):
-            self.g_plot = gui.add_plotly(go.Figure(), aspect=0.9)
-
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
@@ -392,40 +388,6 @@ class App:
                      + " Incremental shows each registered image; global and hierarchical show their stages.")
             for stage in SFM_BUTTONS:  # refine (DJI) or reconstruct (no metadata): _apply_kind shows one
                 b = gui.add_button(f"Run {stage}" + (" (live)" if stage == "refine" else ""),
-                                   hint=STAGE_HINTS[stage])
-                b.on_click(lambda _, s=stage: self.run_stage(s))
-                self.g_buttons[stage] = b
-
-        with tabs.add_tab("Dense", viser.Icon.GRID_DOTS):
-            gui.add_markdown("COLMAP MVS. PatchMatch stereo: " + (
-                "CUDA available" if dense.has_cuda() else
-                "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
-            self.g_dense_in_all = gui.add_checkbox(
-                "Include in Run full pipeline", initial_value=False,
-                hint="Off: the full pipeline's dense result is the mesh from the splat (Splat mesh tab). On: COLMAP's "
-                     "MVS (undistort → stereo → fusion → mesh → texture) runs after it as well.")
-            self.g_dense_quality = gui.add_dropdown(
-                "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
-                hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
-                     "stages run). superfast: 320 px, fast PatchMatch (default, the quickest, coarse mesh). low: "
-                     "640 px, fast PatchMatch. medium: 1200 px. high: full resolution. max: COLMAP defaults at full "
-                     "resolution (hours for 300 images).")
-            self.g_dense_lidar = gui.add_checkbox(
-                "Use LiDAR points", initial_value=True,
-                hint="ROS 2 bag projects: merge the LiDAR cloud into the fused points before meshing (each point "
-                     "with the cameras that see it, occlusion-checked against the depth maps), so surfaces without "
-                     "texture still get geometry. The image-only cloud stays as dense/fused_mvs.ply.")
-            self.g_mesh_method = gui.add_dropdown(
-                "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
-                hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
-                     "closes holes and may balloon over open areas.")
-            b = gui.add_button("Run dense (all)", icon=viser.Icon.PLAYER_TRACK_NEXT, disabled=not dense.has_cuda(),
-                               hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
-                                    "Needs CUDA. Time depends on Quality.")
-            b.on_click(lambda _: self.run_stage("dense"))
-            self.g_buttons["dense"] = b
-            for stage in pipeline.DENSE_STAGES:
-                b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()),
                                    hint=STAGE_HINTS[stage])
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
@@ -543,6 +505,40 @@ class App:
             b.on_click(lambda _: self.run_stage("splatmesh"))
             self.g_buttons["splatmesh"] = b
 
+        with tabs.add_tab("Dense", viser.Icon.GRID_DOTS):
+            gui.add_markdown("COLMAP MVS. PatchMatch stereo: " + (
+                "CUDA available" if dense.has_cuda() else
+                "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
+            self.g_dense_in_all = gui.add_checkbox(
+                "Include in Run full pipeline", initial_value=False,
+                hint="Off: the full pipeline's dense result is the mesh from the splat (Splat mesh tab). On: COLMAP's "
+                     "MVS (undistort → stereo → fusion → mesh → texture) runs after it as well.")
+            self.g_dense_quality = gui.add_dropdown(
+                "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
+                hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
+                     "stages run). superfast: 320 px, fast PatchMatch (default, the quickest, coarse mesh). low: "
+                     "640 px, fast PatchMatch. medium: 1200 px. high: full resolution. max: COLMAP defaults at full "
+                     "resolution (hours for 300 images).")
+            self.g_dense_lidar = gui.add_checkbox(
+                "Use LiDAR points", initial_value=True,
+                hint="ROS 2 bag projects: merge the LiDAR cloud into the fused points before meshing (each point "
+                     "with the cameras that see it, occlusion-checked against the depth maps), so surfaces without "
+                     "texture still get geometry. The image-only cloud stays as dense/fused_mvs.ply.")
+            self.g_mesh_method = gui.add_dropdown(
+                "Mesh method", options=dense.MESH_METHODS + ("both",), initial_value="delaunay",
+                hint="delaunay: visibility-based, keeps open surfaces (default). poisson: watertight, "
+                     "closes holes and may balloon over open areas.")
+            b = gui.add_button("Run dense (all)", icon=viser.Icon.PLAYER_TRACK_NEXT, disabled=not dense.has_cuda(),
+                               hint="undistort → stereo → fusion → mesh → texture on the refined poses. "
+                                    "Needs CUDA. Time depends on Quality.")
+            b.on_click(lambda _: self.run_stage("dense"))
+            self.g_buttons["dense"] = b
+            for stage in pipeline.DENSE_STAGES:
+                b = gui.add_button(f"Run {stage}", disabled=(stage == "stereo" and not dense.has_cuda()),
+                                   hint=STAGE_HINTS[stage])
+                b.on_click(lambda _, s=stage: self.run_stage(s))
+                self.g_buttons[stage] = b
+
         with self.left.add_tab("Export", viser.Icon.DOWNLOAD):
             self.g_export_md = gui.add_markdown("")
             with gui.add_folder("Mesh"):
@@ -611,10 +607,11 @@ class App:
         self.log_panel.minimize()  # folded by default; one click opens it
         self.hw_panel.float(x=776, y=-8, width=480, height=260)
         self.hw_panel.minimize()
-        # one row: viser gives every button of a group the same width and wraps when they do not fit (the
-        # 7th, Fly, wrapped at 470 px and was stretched across a row of its own);
-        # ("● Residuals" is the longest label: ~94 px per button)
-        self.quick.float(x=8, y=8, width=24 + 94 * len(self._quick_items()), height=96)
+        # viser gives every button of a group the same width (the longest label: ~72 px for "· Thumbs") and wraps
+        # the rest onto further rows, stretching a short last row; 12 buttons at 6 per row give an even 2 x 6 grid
+        # (the user found one row of 13 too wide, ~1250 px)
+        per_row = (len(self._quick_items()) + 1) // 2
+        self.quick.float(x=8, y=8, width=24 + 72 * per_row, height=136)
 
     # ------------------------------------------------------------- settings
     def _settings_path(self):
@@ -642,13 +639,10 @@ class App:
             self._save_setting("last_project", rel)
 
     def set_dark(self, dark):
-        """Switch the theme (all clients), restyle the plots and remember the choice."""
+        """Switch the theme (all clients) and remember the choice (the Hardware plot follows at its next update)."""
         self.dark = bool(dark)
         self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
         self._save_setting("dark_mode", self.dark)
-        if self.snap is not None:
-            self._update_plots()
-        self.ingest._update_plot()
 
     def plot_template(self):
         return "plotly_dark" if self.dark else "plotly_white"
@@ -755,7 +749,6 @@ class App:
         if self.project is None:
             self.g_snapshot.options = ("priors",)
             self.g_stats.content = self.g_legend.content = ""
-            self.g_plot.figure = go.Figure()
         else:
             names = tuple(self.project.snapshot_names())
             self.g_snapshot.options = names
@@ -834,7 +827,6 @@ class App:
             self._draw_cameras()
             self._draw_lines()
             self._update_stats()
-            self._update_plots()
             if self.selected is not None:
                 self.select(self.selected)
 
@@ -967,24 +959,6 @@ class App:
         rnd = refine_rep.get(snapshot, {}) if snapshot.startswith(("round_", "calib_")) and not snapshot.endswith("_tri") else {}
         pm = rnd.get("prior_model", {})
         return None if pm.get("skipped") else pm.get("model")
-
-    def _update_plots(self):
-        s = self.snap
-        pos, rot = self.deviations()
-        v = s.cams.valid
-        t = self.project.time
-        col = ["rgb(%d,%d,%d)" % source_color(k) for k in self.project.source[v]]
-        fig = make_subplots(rows=3, cols=1, vertical_spacing=0.09,
-                            subplot_titles=("position deviation from prior [m]",
-                                            "rotation deviation from prior [deg]", "point reprojection error [px]"))
-        fig.add_trace(go.Scatter(x=t[v], y=pos[v], mode="markers", marker=dict(size=4, color=col), name="pos"), 1, 1)
-        fig.add_trace(go.Scatter(x=t[v], y=rot[v], mode="markers", marker=dict(size=4, color=col), name="rot"), 2, 1)
-        if len(s.point_error):
-            fig.add_trace(go.Histogram(x=np.clip(s.point_error, 0, 5), nbinsx=50, name="err"), 3, 1)
-        fig.update_xaxes(title_text="time [s] (colour = source)", row=2, col=1)
-        fig.update_layout(showlegend=False, margin=dict(l=40, r=10, t=30, b=30), height=640,
-                          template=self.plot_template())
-        self.g_plot.figure = fig
 
     # ------------------------------------------------------------- inspect
     def select(self, i):
@@ -1219,12 +1193,12 @@ class App:
         d = getattr(self, "dense", None) or {"splat": None, "meshes": {}, "fused": None}
         return (("Splat", d["splat"] is not None or getattr(self, "_splat_live_on", False), self.g_splat.value),
                 ("Mesh", bool(d["meshes"]), self.g_mesh.value != "off"),
+                ("Dense", d["fused"] is not None, self.g_dense_pts.value),
                 ("Points", self.project is not None, self.g_points.value),
                 ("Cameras", self.project is not None, self.g_cams.value),
                 ("Thumbs", self.project is not None and self.g_cams.value, self.g_thumbs.value),
                 ("Residuals", self.project is not None, self.g_corr.value),  # View: Prior → refined
                 ("Trajectory", self.project is not None, self.g_traj.value),  # View: camera / prior paths
-                ("Dense", d["fused"] is not None, self.g_dense_pts.value),
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
                 ("Orbit", True, bool(self._orbits)),
                 ("Center", True, False),
@@ -1233,7 +1207,8 @@ class App:
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
         ● on, ○ off, · nothing to show yet."""
-        labels = tuple(f"⌖ {name}" if name == "Center" else f"{'●' if on and avail else '○' if avail else '·'} {name}"
+        labels = tuple(f"⌖ {name}" if name == "Center" else
+                       f"{'●' if on and avail else '○' if avail else '·'} {QUICK_SHORT.get(name, name)}"
                        for name, avail, on in self._quick_items())
         if labels == self._quick_labels:
             return
@@ -1243,11 +1218,16 @@ class App:
         with self._quick_tab:
             g = self.server.gui.add_button_group(
                 "", options=labels, order=1.0,
-                hint="Show / hide the splat, the mesh, the sparse points, the cameras, their thumbnails (with "
-                     "the cameras on), the residuals (red prior → refined segments), the trajectories, the dense points and the Ingest flight plan (tracks + planned image dots); "
-                     "start / stop the orbit, center the view on the scene, or fly the camera path (● on, ○ off, "
-                     "· nothing yet). Same as the View tab.")
-        g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
+                hint="Splat, Mesh, Dense (fused points), Points (sparse), Cams (cameras), Thumbs (their "
+                     "thumbnails, with the cameras on), Resid (red prior → refined segments), Traj (trajectories), "
+                     "Plan (the Ingest flight plan); Orbit, Center (look at the whole scene), Fly (the camera "
+                     "path). ● on, ○ off, · nothing yet. Same as the View tab.")
+        long = {v: k for k, v in QUICK_SHORT.items()}
+
+        def click(e):
+            short = e.target.value.split(" ", 1)[1]
+            self._quick_click(long.get(short, short), e.client)
+        g.on_click(click)
         self._quick_group = g
 
     def _quick_click(self, name, client):
@@ -1763,7 +1743,6 @@ class App:
                 self._draw_cameras()
                 self._draw_lines()
                 self._update_stats()
-                self._update_plots()
             if stage not in ("polish",):
                 self.g_progress.value = 100.0 * (rnd + 1) / rounds if phase == "round_done" else 100.0
 

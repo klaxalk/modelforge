@@ -195,9 +195,9 @@ def test_quick_bar(app):
     state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
-    assert state() == {"Splat": "●", "Mesh": "○", "Points": "○", "Cameras": "○", "Thumbs": "·", "Residuals": state()["Residuals"],
-                       "Trajectory": state()["Trajectory"], "Dense": "○",
-                       "Plan": state()["Plan"], "Orbit": "○", "Center": "⌖", "Fly": "○"}  # points, cameras, thumbs off
+    assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "○", "Cams": "○", "Thumbs": "·",
+                       "Resid": state()["Resid"], "Traj": state()["Traj"], "Plan": state()["Plan"], "Orbit": "○",
+                       "Center": "⌖", "Fly": "○"}  # points, cameras, thumbs off
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Mesh", None)
@@ -212,15 +212,15 @@ def test_quick_bar(app):
     app._quick_click("Thumbs", None)  # nothing while the cameras are off
     assert not app.g_thumbs.value
     app._quick_click("Cameras", None)
-    assert app.g_cams.value and state()["Cameras"] == "●" and state()["Thumbs"] == "○"
+    assert app.g_cams.value and state()["Cams"] == "●" and state()["Thumbs"] == "○"
     app._quick_click("Thumbs", None)
     assert app.g_thumbs.value and state()["Thumbs"] == "●"
     before = app.g_corr.value
     app._quick_click("Residuals", None)
-    assert app.g_corr.value is (not before) and state()["Residuals"] == ("●" if not before else "○")
+    assert app.g_corr.value is (not before) and state()["Resid"] == ("●" if not before else "○")
     before = app.g_traj.value
     app._quick_click("Trajectory", None)
-    assert app.g_traj.value is (not before) and state()["Trajectory"] == ("●" if not before else "○")
+    assert app.g_traj.value is (not before) and state()["Traj"] == ("●" if not before else "○")
     app._quick_click("Dense", None)
     assert app.g_dense_pts.value and state()["Dense"] == "●"
     c = Client()

@@ -36,9 +36,9 @@ Done:
 - Multi-video ingest: sources = video + time range, per-source offsets.
 - Web GUI with two docked panels:
   - left (`gui.add_panel()`): Projects / Videos / Ingest / View / Inspect /
-    Plots / Export / Settings (dark mode);
+    Export / Settings (dark mode);
   - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
-    Dense / Splat, history;
+    Splat / Splat mesh / Dense, history;
   - two windows floating at the bottom of the 3D view: the log (left) and the Hardware monitor (right).
   - Projects: list, open, create, rename, delete; final vs. intermediate
     results; clean.
@@ -387,7 +387,7 @@ Video-kind notes:
   resolution). Per-video intrinsics for different phones are future work.
 - **GUI.**
   - The Ingest tab hides lead / rotation credit / yaw source / the 3D flight
-    plan and plots the motion curve.
+    plan.
   - The Sparse tab shows reconstruct instead of refine and the BA controls.
   - The View tab skips prior frustums, lines and deviations.
 - Tests: `tests/test_video_kind.py`.
@@ -465,8 +465,8 @@ and the splat.
 - GUI:
   - Projects "Kind: ROS 2 bag".
   - The Ingest tab lists bags; a "ROS 2 bag" folder holds topic / frame
-    pickers, a checkbox per cloud topic, voxel and range. The plot shows
-    height + speed; 3D shows the track and a frustum preview.
+    pickers, a checkbox per cloud topic, voxel and range. 3D shows the track
+    and a frustum preview.
   - Upload is hidden (bags are folders).
 - Tests: `tests/test_rosbag_kind.py` (TF, a tiny in-test bag, the GUI flow on
   the berlin-derived bag).
@@ -1332,17 +1332,19 @@ Code layout:
     (ffmpeg accurate seek), the aligned telemetry and a white frustum in 3D.
     "Start here" / "End here" set the range.
   - **3D**: each source's track, bright in its colour inside the range and
-    grey outside, plus the planned image positions. **Plot**: altitude, speed
-    and gimbal pitch on the project timeline, with planned images marked.
+    grey outside, plus the planned image positions. (Its plots of altitude /
+    speed / motion were removed on 2026-10-19: the user found them not useful.)
   - **Extract**: runs `ingest.run` with progress. A project with images needs
     the Overwrite box ticked. Afterwards the app reloads the project
     (`App.load_project`) and the Sparse tab takes over.
 - `modelforge/gui/app.py`. Layout, as the user asked:
   - The **left panel** (`self.left = gui.add_panel()`, `dock_left`, 420 px)
-    holds Projects / Videos / Ingest / View / Inspect / Plots / Export.
+    holds Projects / Videos / Ingest / View / Inspect / Export. (A Plots tab
+    with deviation and reprojection-error charts was dropped on 2026-10-19: unused.)
   - The **right (main) panel** (`main_panel.dock_right()`) only runs the
     methods: header, run state + progress, **Run full pipeline**, tabs
-    Sparse / Dense / Splat, then History.
+    Sparse / Splat / Splat mesh / Dense (COLMAP's MVS last: the full pipeline's
+    dense result is the splat mesh), then History.
   - Browser tab title "ModelForge": viser hardcodes `<title>Viser</title>` in
     its built `index.html`, so the Dockerfile patches it (a late layer, so the
     rebuild takes seconds). The panel label is `ViserServer(label=...)`.
@@ -1359,10 +1361,12 @@ Code layout:
     - The choice is remembered in `ROOT/.modelforge_gui.json`.
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
-    - It is one button-group row: ● / ○ / · Splat, Mesh, Points (sparse),
-      Cameras, Thumbs (camera thumbnails; available while Cameras is on),
-      Residuals (View "Prior → refined": the red prior → refined segments),
-      Trajectory (View "Trajectories"), Dense (fused points), Plan, Orbit, ⌖ Center, Fly.
+    - One button group in **two rows of 6** (the user found one row of 13, ~1250 px, too wide):
+      ● / ○ / · Splat, Mesh, Dense (fused points), Points (sparse), Cams, Thumbs (camera
+      thumbnails; available while Cams is on) / Resid (View "Prior → refined": the red prior →
+      refined segments), Traj (View "Trajectories"), Plan, Orbit, ⌖ Center, Fly. Short labels
+      (`QUICK_SHORT`): viser gives every button the longest label's width (~72 px) and wraps, so
+      12 buttons at 6 per row make an even grid ~456 px wide.
     - **⌖ Center** (also View tab "Center the view"; `App.recenter`): looks at the cameras + sparse
       points (2–98 % range, so stray far points don't count) from the south, above them. The same
       framing runs when a browser connects and on a project switch. The user lost the scene of a
@@ -1472,8 +1476,6 @@ Code layout:
     time, or source. Stats list the per-source offsets.
   - **Inspect**: click a camera to see its image, with observations in green,
     residuals × gain in red, and unmatched keypoints in grey.
-  - **Plots**: Plotly charts of deviation vs. project time (colour = source)
-    and a point-error histogram.
   - **Sparse**: "Run SfM (all)", or features, pairs, match, refine (live),
     export one at a time.
     - A state line: ⏳ running stage k/n with stage/total time and a detail
