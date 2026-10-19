@@ -143,6 +143,25 @@ def iter_images(path, topic, indices):
                 yield k, stamp(m.header), decode_image(m, conn.msgtype)
 
 
+def iter_gray_small(path, topic, width=160):
+    """(index, gray uint8 image ~width px wide) for every message of an image topic, for image motion.
+    JPEG / PNG are decoded at 1/2, 1/4 or 1/8 directly (OpenCV's reduced decode), so a 12 MP bag frame
+    costs a few ms."""
+    with reader(path) as r:
+        conns = [c for c in r.connections if c.topic == topic]
+        for k, (conn, _, raw) in enumerate(r.messages(connections=conns)):
+            m = r.deserialize(raw, conn.msgtype)
+            if conn.msgtype.endswith("CompressedImage"):
+                buf = np.frombuffer(m.data, np.uint8)
+                g = cv2.imdecode(buf, cv2.IMREAD_REDUCED_GRAYSCALE_8)
+                if g is None or g.shape[1] < width:  # small images: full decode
+                    g = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+            else:
+                g = cv2.cvtColor(decode_image(m, conn.msgtype), cv2.COLOR_RGB2GRAY)
+            h = max(2, int(round(width * g.shape[0] / g.shape[1] / 2)) * 2)
+            yield k, cv2.resize(g, (width, h), interpolation=cv2.INTER_AREA)
+
+
 def camera_info(path, topic):
     """First calibrated CameraInfo: {"width", "height", "model", "params", "distortion_model"} as a COLMAP
     camera. plumb_bob / rational_polynomial -> OPENCV (k1 k2 p1 p2; higher terms dropped), equidistant ->

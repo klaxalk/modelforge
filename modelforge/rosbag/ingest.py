@@ -34,7 +34,9 @@ from modelforge.rosbag import bag
 from modelforge.rosbag.tf import inv, make, quat_to_rot, rot_to_quat, slerp
 
 KIND = "rosbag"
-SAMPLING = ("distance", "time")
+SAMPLING = ("distance", "time", "motion")  # motion: image motion (optical flow), as for videos; needs no poses
+POSE_SOURCES = ("tf", "odometry", "none")  # none: images only, treated like a video without metadata
+MOTION_CACHE = ".modelforge_motion.json"  # per bag folder, keyed by size + mtime + topic
 DEFAULT_ROT_WEIGHT = 0.15  # m per degree of view rotation (~9 m look-at depth: ground robots, handheld rigs)
 
 
@@ -72,11 +74,13 @@ def ros_defaults(path):
     buf = bag.tf_buffer(path)
     children = {c for _, c in list(buf.static) + list(buf.dynamic)}
     roots = [f for f in buf.frames if f not in children and cam and buf.path(f, cam)]
-    odoms = bag.topics_of(inv_, bag.ODOM_TYPE)
+    odoms = [t for t in bag.topics_of(inv_, bag.ODOM_TYPE) if inv_["topics"][t].get("count", 1)]  # not empty ones
     world = roots[0] if roots else (inv_["frame_of"].get(odoms[0], "") if odoms else "")
     dynamic_to_cam = bool(roots) and any((a, b) not in buf.static and (b, a) not in buf.static
                                          for a, b, _ in (buf.path(world, cam) or []))
     source = "tf" if dynamic_to_cam or not odoms else "odometry"
+    if not roots and not odoms:  # TF does not reach the camera and there is no odometry: images only
+        source = "none"
     return {"image_topic": image, "info_topic": info, "pose_source": source, "world_frame": world,
             "camera_frame": "", "odom_topic": odoms[0] if odoms else "",
             "cloud_topics": bag.topics_of(inv_, bag.CLOUD_TYPE), "voxel": 0.05, "max_range": 60.0}
@@ -140,18 +144,28 @@ class Clip:
         self.camera_frame = ros.get("camera_frame") or bag.inventory(path)["frame_of"].get(self.topic, "")
         self.lead, self.srt_path, self.takeoff_abs_alt = 0.0, None, None
         rpy = ros.get("camera_rpy")  # None: the camera frame is the optical frame
+        self.has_poses = ros["pose_source"] != "none"  # none: images only (like a video without metadata)
         self.align = {"method": ros["pose_source"], "world_frame": ros["world_frame"],
                       "camera_frame": self.camera_frame, "camera_rpy": rpy}
         T_frame_optical = make(mount_rotation(rpy), np.zeros(3)) if rpy is not None else np.eye(4)
-        poser = Poser(path, ros)
         self.T = np.full((self.n, 4, 4), np.nan)
-        for k, t in enumerate(self.stamps):
-            T = poser.world_from(self.camera_frame, t)
-            if T is not None:
-                self.T[k] = T @ T_frame_optical
+        if self.has_poses:
+            poser = Poser(path, ros)
+            for k, t in enumerate(self.stamps):
+                T = poser.world_from(self.camera_frame, t)
+                if T is not None:
+                    self.T[k] = T @ T_frame_optical
+        self._motion = None
         self.valid_pose = np.isfinite(self.T[:, 0, 0])
         self.centers = self.T[:, :3, 3]
         self.axes = self.T[:, :3, 2]  # optical axis (z) in the world
+
+    def motion(self):
+        """Per-image motion (mean optical-flow magnitude / image width; image 0 = 0), as for videos without
+        metadata; cached next to the bag (size + mtime + topic)."""
+        if self._motion is None:
+            self._motion = image_motion(self.video, self.topic, self.n)
+        return self._motion
 
     def frame_image(self, t, width=640):
         k = int(np.clip(np.searchsorted(self.pts, t), 0, max(self.n - 1, 0)))
@@ -202,9 +216,39 @@ class Plan:
         return sum(len(sp.windows) for sp in self.sources)
 
 
+def image_motion(path, topic, n, width=160):
+    """Mean dense optical flow between consecutive images / width (cached; see Clip.motion)."""
+    st = os.stat(path)
+    key = f"{st.st_size}:{st.st_mtime_ns}:{topic}"
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(path.rstrip("/"))), MOTION_CACHE)
+    try:
+        cache = json.load(open(cache_path))
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return np.array(cache[key], float)
+    prev, out = None, [0.0]
+    for _, g in bag.iter_gray_small(path, topic, width):
+        if prev is not None:
+            if g.shape != prev.shape:
+                g = cv2.resize(g, (prev.shape[1], prev.shape[0]))
+            flow = cv2.calcOpticalFlowFarneback(prev, g, None, 0.5, 2, 9, 2, 5, 1.1, 0)
+            out.append(float(np.linalg.norm(flow, axis=2).mean()) / width)
+        prev = g
+    m = np.pad(np.array(out), (0, max(0, n - len(out))))[:n]
+    try:
+        cache[key] = [round(x, 7) for x in m.tolist()]
+        json.dump(cache, open(cache_path, "w"))
+    except OSError:
+        pass
+    return m
+
+
 def _curve(clip, mode, w):
     if mode == "time":
         return clip.pts.copy()
+    if mode == "motion":
+        return np.cumsum(clip.motion())
     c = clip.centers.copy()
     ok = clip.valid_pose
     if not ok.any():
@@ -227,11 +271,16 @@ def make_plan(sources, settings):
     clips = {i: load_clip(s.video, ros=_ros(settings, s.video)) for i, s in enabled}
     enabled.sort(key=lambda x: (clips[x[0]].wall_start or 0.0) + x[1].start)
     warnings, curves, valids = [], {}, {}
+    posed = all(clips[i].has_poses for i, _ in enabled)
+    if not posed and mode == "distance":  # distance needs poses: images only sample by image motion
+        mode = "motion"
     for i, s in enabled:
         c = clips[i]
         end = c.duration if s.end is None else s.end
-        valids[i] = (c.pts >= s.start) & (c.pts <= end) & c.valid_pose
+        valids[i] = (c.pts >= s.start) & (c.pts <= end) & (c.valid_pose if posed else True)
         curves[i] = _curve(c, mode, w)
+        if not posed:
+            continue
         if not c.valid_pose.any():
             warnings.append(f"{os.path.basename(s.video)}: no camera pose at any image (world frame "
                             f"'{c.ros['world_frame']}' not connected to '{c.camera_frame}' at the image stamps)")
@@ -258,7 +307,8 @@ def make_plan(sources, settings):
     sizes = {(c.width, c.height) for c in clips.values()}
     if len(sizes) > 1:
         warnings.append(f"sources differ in resolution {sorted(sizes)}: one project = one camera")
-    report = {"mode": mode, "unit": "m" if mode == "distance" else "s", "rot_weight_m_per_deg": w,
+    report = {"mode": mode, "unit": {"distance": "m", "motion": "image widths of motion"}.get(mode, "s"),
+              "rot_weight_m_per_deg": w if mode == "distance" else None, "poses": posed,
               "total": round(total, 3), "spacing": round(spacing, 4), "num_images": sum(len(p.windows) for p in plans),
               "window": settings.window, "sources": len(plans),
               "path_m": round(sum(p.report.get("path_m", 0.0) for p in plans), 1),
@@ -267,7 +317,10 @@ def make_plan(sources, settings):
 
 
 def preview(plan, *args, **kwargs):
-    """Camera tracks (bright inside the range) and planned positions for the GUI's 3D view."""
+    """Camera tracks (bright inside the range) and planned positions for the GUI's 3D view (None for
+    images-only bags: nothing to show in 3D before reconstruction)."""
+    if not plan.report.get("poses", True):
+        return None
     out = []
     for sp in plan.sources:
         c = sp.clip
@@ -392,13 +445,20 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
     progress = progress or (lambda done, total, msg: None)
     for sp in plan.sources:
         c = sp.clip
-        log(f"{sp.prefix}: {len(sp.windows)} images, poses from {c.ros['pose_source']} in '{c.ros['world_frame']}'")
+        log(f"{sp.prefix}: {len(sp.windows)} images, " + (f"poses from {c.ros['pose_source']} in '{c.ros['world_frame']}'"
+                                                          if c.has_poses else "no poses (images only)"))
         for k, rgb, sharp in _sharpest(c, sp.windows):
             name = f"{sp.prefix}_{k:05d}.jpg"
             if name in seen:
                 continue
             seen.add(name)
             Image.fromarray(rgb).save(os.path.join(project, "images", name), quality=settings.quality)
+            if not c.has_poses:  # images only: no prior, kept for order / time (as for videos)
+                records.append({"image": name, "source": sp.index, "video": sp.prefix, "frame": k,
+                                "pts": float(c.pts[k]), "time_s": float(sp.time_base + c.pts[k]),
+                                "stamp": float(c.stamps[k]), "s": float(sp.s[k]), "sharpness": round(sharp, 2)})
+                progress(len(records), total, f"{sp.prefix} t = {c.pts[k]:.1f} s")
+                continue
             R, p = c.T[k][:3, :3], c.T[k][:3, 3]
             ok = np.flatnonzero(c.valid_pose)
             a, b = ok[max(0, np.searchsorted(ok, k) - 1)], ok[min(len(ok) - 1, np.searchsorted(ok, k) + 1)]
@@ -421,6 +481,9 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
         c, s = sp.clip, sp.source
         if not (c.ros.get("cloud_topics")):
             continue
+        if not c.has_poses:
+            log(f"warning: {sp.prefix}: LiDAR skipped (it needs camera poses to be placed in the world)")
+            continue
         t0 = c.stamps[0] + s.start
         t1 = c.stamps[0] + (s.end if s.end is not None else c.duration)
         pts, inten, st = accumulate_clouds(s.video, c.ros, t0, t1, log)
@@ -436,8 +499,9 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
                 pts = np.concatenate([np.c_[prev["x"], prev["y"], prev["z"]], pts])
                 inten = np.concatenate([np.asarray(prev["intensity"]), inten])
             write_cloud(path, pts, inten)
-    cams = np.array([[r["enu_x"], r["enu_y"], r["enu_z"]] for r in records])
-    ground_z = float(np.percentile(xyz[:, 2], 2)) if len(xyz) else float(cams[:, 2].min() - 1.5)
+    cams = np.array([[r["enu_x"], r["enu_y"], r["enu_z"]] for r in records if "enu_x" in r]).reshape(-1, 3)
+    ground_z = (float(np.percentile(xyz[:, 2], 2)) if len(xyz) else
+                float(cams[:, 2].min() - 1.5) if len(cams) else None)
     out = {
         "kind": KIND,
         "sources": [sp.describe() for sp in plan.sources],

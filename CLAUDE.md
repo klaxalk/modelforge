@@ -543,6 +543,19 @@ and the splat.
     then jumped to done. Test: `test_sharpest_streams_per_window`.
   - Tests: `test_extrinsic_rpy` (the test bag's forward mount reproduced from `base` + 0, 0, 0),
     `test_uncalibrated_camera_info`.
+- **Images-only bags** (pose source **none**; the user asked, 2026-10-19): no TF to the camera and no
+  odometry. `ros_defaults` picks it when neither reaches the camera (empty topics don't count).
+  - Sampling: **motion** (`image_motion`: Farneback flow on 160 px grey frames from
+    `bag.iter_gray_small`, OpenCV reduced JPEG decode; cached in `.modelforge_motion.json` next to
+    the bag, keyed by size + mtime + topic) or time; distance falls back to motion.
+  - poses.json records carry no pose (as for videos), LiDAR is skipped (it needs poses), no 3D preview.
+  - `pipeline.sparse_kind(project)`: a rosbag project without priors reconstructs like a video
+    (features oriented / RADIAL unless camera_info is calibrated, sequential pairs, incremental
+    mapper, up-oriented frame); the GUI's Sparse tab, the full pipeline and the CLI use it.
+  - Ingest tab: Pose source none hides the frame / odometry / mount fields; the preview shows frame +
+    time.
+  - Checked on `synthetic_bag` forced to none: 20 images extracted in 0.9 s, reconstruct 18/20,
+    0.26 px. Test: `test_images_only_bag`.
 - Not done yet:
   - per-point LiDAR timestamps (motion distortion within a scan);
   - LiDAR as a BA constraint (point-to-plane residuals on SfM points);

@@ -159,10 +159,12 @@ class IngestPanel:
             self.g_ros_info = gui.add_dropdown("Camera info", options=(NO_INFO,),
                                                hint="sensor_msgs/CameraInfo: known intrinsics, kept fixed in BA "
                                                     "(plumb_bob -> OPENCV, equidistant -> fisheye). None: estimated.")
-            self.g_ros_pose = gui.add_dropdown("Pose source", options=("tf", "odometry"),
+            self.g_ros_pose = gui.add_dropdown("Pose source", options=ros_ingest.POSE_SOURCES,
                                                hint="tf: the camera pose from the TF tree (world -> camera frame) at "
                                                     "each image stamp. odometry: an Odometry topic (its frame -> its "
-                                                    "child), chained with TF to the world and to the camera.")
+                                                    "child), chained with TF to the world and to the camera. none: "
+                                                    "images only (no TF to the camera, no odometry): sampled by image "
+                                                    "motion and reconstructed like a video without metadata.")
             self.g_ros_world = gui.add_dropdown("World frame", options=("-",),
                                                 hint="The frame the poses are expressed in: the project's world.")
             self.g_ros_camera = gui.add_dropdown("Camera frame", options=(IMAGE_FRAME,),
@@ -436,6 +438,7 @@ class IngestPanel:
                 if v in h.options:
                     h.value = v
             self.g_ros_voxel.value, self.g_ros_range.value = r["voxel"], r["max_range"]
+            self._ros_pose_widgets()
             rpy = r.get("camera_rpy")
             self.g_ros_use_rpy.value = rpy is not None
             self.g_ros_rpy.value = tuple(float(v) for v in (rpy if rpy is not None else (0.0, 0.0, 0.0)))
@@ -461,7 +464,14 @@ class IngestPanel:
                                       "frame the camera is mounted on and use Extrinsic RPY")
         self._ros_bag = path
 
+    def _ros_pose_widgets(self):
+        """Pose source none (images only): the frame / odometry / mount fields do not apply."""
+        posed = self.g_ros_pose.value != "none"
+        for h in (self.g_ros_world, self.g_ros_camera, self.g_ros_odom, self.g_ros_use_rpy, self.g_ros_rpy):
+            h.visible = posed
+
     def _ros_changed(self):
+        self._ros_pose_widgets()
         if self._loading:
             return
         ros = {"image_topic": self.g_ros_image.value, "pose_source": self.g_ros_pose.value,
@@ -552,7 +562,7 @@ class IngestPanel:
         r = plan.report
         md = [f"**plan: {plan.num_images} images** from {len(plan.sources)} source(s) · spacing "
               f"{r['spacing']:.3g} {r['unit']}"]
-        if self.kind == "video" and r.get("mode") == "motion" and r["spacing"] > 0.25:
+        if r.get("mode") == "motion" and r["spacing"] > 0.25:
             md.append("⚠️ consecutive images move more than a quarter image width apart: SfM without metadata may "
                       "not connect them (more images or a shorter range)")
         if r.get("rot_weight_m_per_deg") is not None and r["mode"] == "distance":
@@ -655,6 +665,11 @@ class IngestPanel:
         c = self._load_clip(s)
         i = int(np.clip(np.searchsorted(c.pts, t), 0, c.n - 1))
         self.g_pv_image.image = c.frame_image(c.pts[i])
+        if self.kind == "rosbag" and not c.has_poses:  # images only: frame and time, as for videos
+            inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
+            self.g_pv_md.content = (f"image {i} · t = {c.pts[i]:.2f} s · {'inside' if inside else 'outside'} the range "
+                                    "· no camera poses (images only)")
+            return
         if self.kind == "rosbag":  # the camera pose from TF / odometry, and its frustum in 3D
             inside = s.start <= c.pts[i] <= (s.end if s.end is not None else np.inf)
             if not c.valid_pose[i]:

@@ -650,9 +650,13 @@ class App:
     def _kind(self):
         return ingest.load_kind(self.path)
 
+    def _sparse_kind(self):
+        """pipeline.sparse_kind: a ROS 2 bag of images only reconstructs like a video."""
+        return pipeline.sparse_kind(self.path)
+
     def _apply_kind(self):
         """Sparse tab: refine + BA controls for DJI projects, reconstruct for videos without metadata."""
-        video = self._kind() == "video"
+        video = self._sparse_kind() == "video"
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = not video
@@ -663,8 +667,10 @@ class App:
             self._kind() == "rosbag"
         self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
         self.g_sparse_md.content = (
-            "Incremental SfM from the images alone (video without metadata): features → pairs → match → "
-            "reconstruct → export. Arbitrary frame and scale, oriented up." if video else
+            ("Incremental SfM from the images alone (" + ("ROS 2 bag without camera poses" if self._kind() == "rosbag"
+                                                          else "video without metadata")
+             + "): features → pairs → match → reconstruct → export. Arbitrary frame and scale, oriented up.")
+            if video else
             "Pose refinement from the bag's TF / odometry priors (camera_info intrinsics fixed): features → pairs → "
             "match → refine → export; SfM points are checked against the LiDAR." if self._kind() == "rosbag" else
             "Pose refinement from the DJI priors: features → pairs → match → refine → export (nerfstudio dataset).")
@@ -1038,7 +1044,7 @@ class App:
                 self._history(f"✅ **extract** · {len(self.project.names)} images")
             report = pipeline.Report(project)
             pri = self.project.priors
-            sfm = pipeline.sfm_stages(self._kind())
+            sfm = pipeline.sfm_stages(self._sparse_kind())
             if stage == "all":
                 seq, skipped = list(sfm), []
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
@@ -1067,7 +1073,7 @@ class App:
                 self._begin_stage(st, k, len(seq))
                 ts = time.time()
                 if st == "features":
-                    pipeline.stage_features(project, report, self._kind(), self.g_extractor.value,
+                    pipeline.stage_features(project, report, self._sparse_kind(), self.g_extractor.value,
                                             int(self.g_max_features.value), bool(self.g_upright.value),
                                             progress=self._on_features_progress)
                 elif st == "reconstruct":
@@ -1099,7 +1105,7 @@ class App:
                     if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
                         self._history("⚪ **analyze** · the overlap analysis of these images exists: reused")
                         continue
-                    overlap.analyze(project, kind=self._kind(), token=self._token, log=self._on_log,
+                    overlap.analyze(project, kind=self._sparse_kind(), token=self._token, log=self._on_log,
                                     progress=self._on_analysis_progress)
                     self.subset.refresh()
                 elif st == "keyframes":  # the full pipeline with Images used = keyframes

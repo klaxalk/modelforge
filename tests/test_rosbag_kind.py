@@ -35,7 +35,7 @@ def test_tf_buffer():
     assert b.frames == ["base", "cam", "world"]
 
 
-def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False):
+def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, images_only=False):
     """A camera moving 0.1 m per image along x over a frozen test pattern, + TF, odometry, camera_info
     and one LiDAR (sqlite3, or MCAP storage); returns the true T_world_cam per image."""
     from rosbags.rosbag2 import StoragePlugin, Writer
@@ -68,6 +68,8 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False):
 
         def write(topic, t, msg):
             wr.write(conns[topic], int(t * 1e9), ts.serialize_cdr(msg, conns[topic].msgtype))
+        if images_only:  # no TF, no odometry, no LiDAR: images (+ camera_info) only
+            write = (lambda w_: lambda topic, t, msg: w_(topic, t, msg) if topic.startswith("/cam/") else None)(write)
         write("/tf_static", 100.0, T_["tf2_msgs/msg/TFMessage"](transforms=[
             tfs(100.0, "base", "cam_optical", T_base_cam), tfs(100.0, "base", "lidar", make(np.eye(3), (0, 0, 0.2))),
             tfs(100.0, "map", "odom", T_world_odom)]))
@@ -151,6 +153,32 @@ def test_extrinsic_rpy(tmp_path):
     for k in range(c.n):
         assert np.allclose(c.T[k][:3, :3], truth[k][:3, :3], atol=1e-9)
         assert np.isclose(np.linalg.norm(c.T[k][:3, 3] - truth[k][:3, 3]), 0.1)  # the mount's offset
+
+
+def test_images_only_bag(tmp_path):
+    """A bag of images only (no TF, no odometry): pose source none, sampled by image motion, poses.json
+    without priors, and the sparse method is the video one (incremental SfM)."""
+    from modelforge import pipeline
+    path = str(tmp_path / "images_only_bag")
+    write_small_bag(path, images_only=True)
+    d = ri.ros_defaults(path)
+    assert d["pose_source"] == "none"
+    c = ri.load_clip(path, ros=d)
+    assert not c.has_poses and c.n == 30
+    m = c.motion()
+    assert len(m) == 30 and m[0] == 0 and np.all(m[1:] > 0)  # the pattern pans 2 px per image
+    assert os.path.exists(os.path.join(str(tmp_path), ri.MOTION_CACHE))
+    plan = ri.make_plan([dji.Source(path)], dji.Settings(sampling="distance", num_images=6, ros=d))
+    assert plan.report["mode"] == "motion" and not plan.report["poses"] and plan.num_images == 6
+    assert ri.preview(plan) is None
+    proj = projects.create(str(tmp_path), "imgproj", kind="rosbag")
+    out = ri.run(proj, [dji.Source(path)], dji.Settings(sampling="motion", num_images=6, ros=d))
+    assert len(out["images"]) == 6 and not any("colmap_qvec" in r for r in out["images"])
+    pri, _ = priors.load(proj)
+    assert not priors.has_poses(pri)
+    assert pipeline.sparse_kind(proj) == "video" and pipeline.sfm_stages(pipeline.sparse_kind(proj)) == \
+        pipeline.VIDEO_SFM_STAGES
+    assert json.load(open(os.path.join(proj, "camera.json")))["params"][:2] == [100.0, 100.0]  # still known
 
 
 def test_uncalibrated_camera_info(tmp_path):

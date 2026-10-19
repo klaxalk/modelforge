@@ -44,6 +44,20 @@ STAGES = ("features", "pairs", "match", "refine", "reconstruct", "export") + DEN
 GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": SFM_STAGES + DENSE_STAGES}
 
 
+def sparse_kind(project):
+    """The kind whose sparse method a project uses: ingest.json's kind, except that a ROS 2 bag without
+    camera poses (pose source none: images only) reconstructs like a video without metadata."""
+    kind = ingest.load_kind(project)
+    if kind == "rosbag":
+        try:
+            images = json.load(open(os.path.join(project, "poses.json")))["images"]
+        except (OSError, ValueError, KeyError):
+            return kind
+        if images and not any("colmap_qvec" in r for r in images):
+            return "video"
+    return kind
+
+
 def sfm_stages(kind):
     """The sparse stages of a project kind (ingest.json "kind")."""
     return VIDEO_SFM_STAGES if kind == "video" else SFM_STAGES  # dji, rosbag: priors -> refine
@@ -440,7 +454,7 @@ def stage_export(project, report, rec=None, lidar=True):
     """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud."""
     if rec is None:
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    kind = ingest.load_kind(project)
+    kind = sparse_kind(project)  # a ROS 2 bag of images only: an up-oriented local frame, like a video
     world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
     path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar)
     n_lidar = json.load(open(path)).get("modelforge", {}).get("lidar_points_in_ply", 0)
@@ -526,7 +540,7 @@ def main():
     unknown = [s for s in args.stages.split(",") if s not in STAGES and s not in GROUPS]
     if unknown:
         ap.error(f"unknown stages {unknown}")
-    kind = ingest.load_kind(args.project)
+    kind = sparse_kind(args.project)
     sfm = sfm_stages(kind)
     stages = expand_stages(args.stages, {"sfm": sfm, "dense": DENSE_STAGES, "all": sfm + DENSE_STAGES})
 
