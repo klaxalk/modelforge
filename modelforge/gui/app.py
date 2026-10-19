@@ -236,7 +236,7 @@ class App:
                                                      "mesh; shown as soon as training finishes (and live while it "
                                                      "trains).")
                 self.g_splat_all = gui.add_checkbox(
-                    "All gaussians", initial_value=False,
+                    "All gaussians", initial_value=True,
                     hint=f"Show every Gaussian of the splat. Off: a random subset of at most "
                          f"{gdata.SPLAT_SHOWN:,} (finished splat) or {gdata.LIVE_SPLAT_SHOWN:,} (live preview while "
                          f"training), which keeps the browser responsive. Millions of Gaussians need a strong GPU "

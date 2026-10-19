@@ -1001,9 +1001,9 @@ training should pause and resume):
   subsamples to ≤500k for the browser. The GUI draws it as
   `/dense/splat_live`, replacing the old splat during training; the
   finished splat replaces it at the end.
-- **All gaussians** (View → Dense / splat, off by default; the user asked):
-  the browser gets a random subset, ≤500k Gaussians live and ≤1M for the
-  finished splat (`gdata.LIVE_SPLAT_SHOWN` / `SPLAT_SHOWN`). Ticked, it sends
+- **All gaussians** (View → Dense / splat, **on by default** since 2026-10-19; the user asked):
+  unticked, the browser gets a random subset, ≤500k Gaussians live and ≤1M for
+  the finished splat (`gdata.LIVE_SPLAT_SHOWN` / `SPLAT_SHOWN`). Ticked, it sends
   all of them; the last live snapshot is reloaded at once. The status lines
   say "N gaussians (k shown …)" when a subset is drawn.
 - `ns-train` gets `--method-name <method>`. splatfacto-big (and -mcmc) keep
