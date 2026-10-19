@@ -608,6 +608,22 @@ Results on the sample clip (single source):
   - Time sampling also misses turns (105°), and 7% of its images land while
     hovering.
 
+**Images used: a subset of the extraction** (Sparse tab folder, `gui/subset.py`;
+`projects.apply_subsample`; the user asked, 2026-10-19: extracting a large video is expensive, so
+extract once, then run the pipeline on subsets of it, in the same project):
+- Keep every N (per source, capture order), Starting at (offset), Time range (project timeline).
+- The first time, `images/`, `poses.json`, `poses.csv` move / copy to `PROJECT/extracted/` (the
+  pool). `images/` then holds hard links to the selected frames and `poses.json` / `poses.csv` the
+  selected entries, so every stage runs unchanged on the subset. poses.json records `subsample`.
+- Results of the previous image set (features, matches, sparse, transforms, dense, splat, splatmesh,
+  nerfstudio, export, images_N, report) move to `previous/<time>/` (`ingest.archive_outputs(names=)`);
+  then run the pipeline again. Keep every 1 over the whole range uses all images again.
+- `extracted/` is in `ingest.OUTPUTS` (re-extraction archives it with the rest) and kept by Clean.
+  Disk sizes in the Projects status count the hard-linked frames in both folders.
+- A first version made a new project per subset; the user wanted it inside the project, so it was
+  replaced.
+- Tests: `tests/test_projects.py` (`test_subsample`, `test_gui_subsample`).
+
 ## Pipeline (M1, headless)
 
 `scripts/dev python -m modelforge.pipeline PROJECT [--stages features,pairs,match,refine,export]`
@@ -1149,14 +1165,6 @@ Code layout:
     - Paths inside a project are relative, so a rename breaks nothing; only
       old nerfstudio run configs keep the old absolute path, and they are
       not reused.
-  - **Subsample the open project** (the user asked, 2026-10-19: extraction of a large video is
-    expensive, so extract once, then take subsets): `projects.subsample(root, src, name, every,
-    offset, start, end)` makes a new project from every `every`-th image of each source (from the
-    `offset`-th, in capture order) inside a window of the project timeline. Images are **hard
-    links** (copied only across file systems), poses.json / poses.csv keep the selected entries
-    (poses.json records `subsampled_from`), ingest.json, camera.json and lidar/ are copied. Seconds
-    instead of a re-extraction; the new project runs SfM etc. on its own. Disk sizes in the status
-    count hard-linked images in both projects. Tests: `test_subsample`, `test_gui_subsample`.
   - **Clean intermediates** needs a confirmation box. It deletes the
     databases, `sparse/round_*`, the dense workspace (depth maps),
     `nerfstudio/` runs, `splat/splat.ply` and `previous/`. It keeps the

@@ -50,9 +50,10 @@ INTERMEDIATE = (
     ("images_*", "downscaled frames for splat training"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("previous", "archived earlier extractions"),
+    ("extracted", "all extracted frames (a subset of them is in images/)"),
 )
 # Never deleted by clean: the extracted frames are an input of every stage.
-KEEP_ON_CLEAN = ("images",)
+KEEP_ON_CLEAN = ("images", "extracted")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 LIBRARY_DIR = "videos"  # ROOT/videos holds the video library (modelforge.videos), so it is no project name
 
@@ -119,58 +120,82 @@ def subsample_selection(images, every=1, offset=0, start=None, end=None):
     return sorted(keep)
 
 
-def subsample(root, src, name, every=1, offset=0, start=None, end=None):
-    """New project root/name with a subset of src's extracted images (see subsample_selection): the
-    images are hard-linked (no copy, no decoding), poses.json / poses.csv keep their entries, ingest.json,
-    camera.json and lidar/ are copied. So a large extraction is paid once and subsets of it (every 2nd,
-    every 3rd, a time window) are new projects in seconds. Returns (path, images kept)."""
+POOL = "extracted"  # all extracted images + their poses, once a subset is in use (images/ = hard links into it)
+
+
+def subsample_info(path):
+    """{"extracted": images extracted (pool), "used": images in images/ now, "setting": the subsample
+    applied (poses.json "subsample") or None}."""
+    def count(p):
+        try:
+            return len(json.load(open(p))["images"])
+        except (OSError, ValueError, KeyError):
+            return 0
+    used = count(os.path.join(path, "poses.json"))
+    pool = os.path.join(path, POOL, "poses.json")
+    setting = None
+    if os.path.exists(os.path.join(path, "poses.json")):
+        setting = json.load(open(os.path.join(path, "poses.json"))).get("subsample")
+    return {"extracted": count(pool) if os.path.exists(pool) else used, "used": used, "setting": setting}
+
+
+def extracted_images(path):
+    """poses.json "images" of everything extracted (the pool if a subset is in use)."""
+    pool = os.path.join(path, POOL, "poses.json")
+    src = pool if os.path.exists(pool) else os.path.join(path, "poses.json")
+    return json.load(open(src))["images"]
+
+
+def apply_subsample(path, every=1, offset=0, start=None, end=None):
+    """Use a subset of the project's extracted images (subsample_selection) from now on: images/,
+    poses.json and poses.csv become that subset, so every stage runs on it unchanged. The first time,
+    the full extraction moves to PROJECT/extracted/ (the pool); images/ then holds hard links into it.
+    Results computed from the previous image set (features, matches, sparse, dense, splat, ...) are
+    moved to previous/<time>/, as on re-extraction. every=1 over the whole timeline uses all images
+    again. Returns (images used, images extracted, archive folder or None)."""
     import csv
-    _check_name(name)
-    src = os.path.abspath(src)
-    dst = os.path.join(os.path.abspath(root), name)
-    if os.path.exists(dst):
-        raise FileExistsError(f"{dst} already exists")
-    poses_path = os.path.join(src, "poses.json")
-    if not os.path.exists(poses_path):
-        raise ValueError(f"{os.path.basename(src)} has no extracted images (poses.json) to subsample")
-    poses = json.load(open(poses_path))
+    path = os.path.abspath(path)
+    if not os.path.exists(os.path.join(path, "poses.json")):
+        raise ValueError("no extracted images (poses.json) yet: extract them in the Ingest tab first")
+    pool = os.path.join(path, POOL)
+    if not os.path.exists(os.path.join(pool, "poses.json")):  # first subset: the extraction becomes the pool
+        os.makedirs(pool)
+        os.rename(os.path.join(path, "images"), os.path.join(pool, "images"))
+        for f in ("poses.json", "poses.csv"):
+            if os.path.exists(os.path.join(path, f)):
+                shutil.copy2(os.path.join(path, f), os.path.join(pool, f))
+    poses = json.load(open(os.path.join(pool, "poses.json")))
     keep = subsample_selection(poses["images"], every, offset, start, end)
     if not keep:
         raise ValueError("no images left with these settings")
-    os.makedirs(os.path.join(dst, "images"))
-    try:
-        for k in keep:
-            name_k = poses["images"][k]["image"]
-            a, b = os.path.join(src, "images", name_k), os.path.join(dst, "images", name_k)
-            try:
-                os.link(a, b)
-            except OSError:  # another file system
-                shutil.copy2(a, b)
-        kept = [poses["images"][k] for k in keep]
-        out = dict(poses, images=kept,
-                   subsampled_from={"project": os.path.basename(src), "every": max(1, int(every)),
-                                    "offset": max(0, int(offset)), "start": start, "end": end,
-                                    "images_in_source": len(poses["images"])})
-        json.dump(out, open(os.path.join(dst, "poses.json"), "w"), indent=1)
-        names = {im["image"] for im in kept}
-        csv_src = os.path.join(src, "poses.csv")
-        if os.path.exists(csv_src):
-            with open(csv_src, newline="") as f, open(os.path.join(dst, "poses.csv"), "w", newline="") as g:
-                rows = csv.reader(f)
-                w = csv.writer(g)
-                header = next(rows)
-                w.writerow(header)
-                col = header.index("image") if "image" in header else 0
-                w.writerows(r for r in rows if r and r[col] in names)
-        for f in (ingest.PLAN_FILE, "camera.json"):
-            if os.path.exists(os.path.join(src, f)):
-                shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
-        if os.path.isdir(os.path.join(src, "lidar")):
-            shutil.copytree(os.path.join(src, "lidar"), os.path.join(dst, "lidar"))
-    except BaseException:
-        shutil.rmtree(dst, ignore_errors=True)
-        raise
-    return dst, len(keep)
+    stale = [n for n in ingest.OUTPUTS if n not in ("images", "poses.json", "poses.csv", POOL)]
+    archived = ingest.archive_outputs(path, stale)
+    images = os.path.join(path, "images")
+    shutil.rmtree(images, ignore_errors=True)  # hard links only: the pool keeps the files
+    os.makedirs(images)
+    kept = [poses["images"][k] for k in keep]
+    for im in kept:
+        a, b = os.path.join(pool, "images", im["image"]), os.path.join(images, im["image"])
+        try:
+            os.link(a, b)
+        except OSError:  # a file system without hard links
+            shutil.copy2(a, b)
+    full = len(keep) == len(poses["images"])
+    out = dict(poses, images=kept)
+    if not full:
+        out["subsample"] = {"every": max(1, int(every)), "offset": max(0, int(offset)), "start": start, "end": end,
+                            "images_extracted": len(poses["images"])}
+    json.dump(out, open(os.path.join(path, "poses.json"), "w"), indent=1)
+    names = {im["image"] for im in kept}
+    if os.path.exists(os.path.join(pool, "poses.csv")):
+        with open(os.path.join(pool, "poses.csv"), newline="") as f, \
+                open(os.path.join(path, "poses.csv"), "w", newline="") as g:
+            rows, w = csv.reader(f), csv.writer(g)
+            header = next(rows)
+            w.writerow(header)
+            col = header.index("image") if "image" in header else 0
+            w.writerows(r for r in rows if r and r[col] in names)
+    return len(keep), len(poses["images"]), archived
 
 
 def _check_project(root, path):

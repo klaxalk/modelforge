@@ -46,7 +46,8 @@ PLAN_FILE = "ingest.json"
 # Everything derived from the images; moved to PROJECT/previous/<time>/ on re-extraction.
 OUTPUTS = ("images", "poses.json", "poses.csv", "features.db", "database.db", "database.db-wal", "database.db-shm",
            "pairs.txt", "sparse", "dense", "transforms.json", "sparse_pc.ply", "report.json", "splat", "nerfstudio",
-           "export", "images_*")  # images_N: downscaled frames for splat training
+           "export", "images_*", "splatmesh",  # images_N: downscaled frames for splat training
+           "extracted")  # all extracted frames while a subset is in use (projects.apply_subsample)
 VIDEO_EXTS = (".mp4", ".mov")
 
 
@@ -424,11 +425,12 @@ def has_outputs(project):
     return os.path.exists(os.path.join(project, "poses.json")) or (os.path.isdir(img) and bool(os.listdir(img)))
 
 
-def archive_outputs(project):
-    """Move image-derived outputs to PROJECT/previous/<time>/ (nothing is deleted)."""
+def archive_outputs(project, names=OUTPUTS):
+    """Move image-derived outputs (names: OUTPUTS or a part of it) to PROJECT/previous/<time>/ (nothing
+    is deleted)."""
     dst = os.path.join(project, "previous", time.strftime("%Y%m%d-%H%M%S"))
     moved = False
-    for p in sorted(q for name in OUTPUTS for q in glob.glob(os.path.join(project, name))):
+    for p in sorted(q for name in names for q in glob.glob(os.path.join(project, name))):
         os.makedirs(dst, exist_ok=True)
         shutil.move(p, os.path.join(dst, os.path.basename(p)))
         moved = True

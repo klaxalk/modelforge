@@ -28,6 +28,7 @@ from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
+from modelforge.gui.subset import SubsetPanel
 
 SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
 
@@ -146,6 +147,7 @@ class App:
         self._flights = {}  # client id -> {"stop": Event, "jump": None or path time to jump to}
         self._fly_guard = False  # set while the flight moves the position slider (not a user scrub)
         self._build_gui()
+        self.subset.refresh()
         self._apply_kind()
         self._set_aspect()
         if self.project:
@@ -310,6 +312,7 @@ class App:
 
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
             self.g_sparse_md = gui.add_markdown("")
+            self.subset = SubsetPanel(self, gui)
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
                                hint="Runs features → pairs → match → refine → export in sequence. "
                                     "About 15-20 min on CPU for 300 images; matching dominates.")
@@ -681,6 +684,12 @@ class App:
             self._show_project()
         self.projects.refresh()
 
+    def refresh_after_images_changed(self):
+        """Another image set (Images used): the old run's live preview and History no longer apply."""
+        self._splat_live_on = False
+        self.server.scene.remove_by_name("/dense/splat_live")
+        self._refresh_dense()
+
     def open_project(self, path):
         """Switch the whole GUI to another (new or existing) project folder."""
         if self.running or self.ingest.running:
@@ -731,6 +740,7 @@ class App:
 
     def _show_project(self):
         self.g_header.content = self._header()
+        self.subset.refresh()
         self._apply_kind()
         self._set_aspect()
         if self.project is None:

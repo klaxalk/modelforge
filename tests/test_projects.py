@@ -3,7 +3,9 @@
 
 import json
 import os
+import shutil
 import socket
+import time
 
 import pytest
 
@@ -160,19 +162,21 @@ def test_gui_rename_and_delete(tmp_path):
 
 
 def test_subsample(tmp_path):
-    """Every N-th image per source in a time window, hard-linked into a new project."""
+    """A subset of the extracted images in the same project: every N-th per source in a time window,
+    hard links into the pool, old results archived, every 1 over everything restores all images."""
     root = str(tmp_path)
-    src = projects.create(root, "big")
+    p = projects.create(root, "big")
     images = []
     for source, (t0, n) in enumerate(((0.0, 10), (100.0, 6))):
         for i in range(n):
             name = f"v{source}_{i:05d}.jpg"
-            touch(os.path.join(src, "images", name))
+            touch(os.path.join(p, "images", name))
             images.append({"image": name, "source": source, "time_s": t0 + i, "enu_x": float(i)})
-    json.dump({"sources": [{}, {}], "ground_z": -5.0, "images": images}, open(os.path.join(src, "poses.json"), "w"))
-    with open(os.path.join(src, "poses.csv"), "w") as f:
+    json.dump({"sources": [{}, {}], "ground_z": -5.0, "images": images}, open(os.path.join(p, "poses.json"), "w"))
+    with open(os.path.join(p, "poses.csv"), "w") as f:
         f.write("image,source,time_s\n" + "".join(f"{im['image']},{im['source']},{im['time_s']}\n" for im in images))
-    json.dump({"fx": 1}, open(os.path.join(src, "camera.json"), "w"))
+    touch(os.path.join(p, "features.db"))
+    touch(os.path.join(p, "sparse", "refined", "images.bin"))
 
     keep = projects.subsample_selection(images, every=3)
     assert [images[k]["image"] for k in keep] == ["v0_00000.jpg", "v0_00003.jpg", "v0_00006.jpg", "v0_00009.jpg",
@@ -180,40 +184,49 @@ def test_subsample(tmp_path):
     assert len(projects.subsample_selection(images, every=2, offset=1)) == 5 + 3
     assert [images[k]["time_s"] for k in projects.subsample_selection(images, every=2, start=3, end=7)] == [3, 5, 7]
 
-    dst, n = projects.subsample(root, src, "small", every=2, offset=1)
-    assert n == 8 and projects.is_project(dst)
-    poses = json.load(open(os.path.join(dst, "poses.json")))
+    n, total, archived = projects.apply_subsample(p, every=2, offset=1)
+    assert (n, total) == (8, 16) and archived and os.path.exists(os.path.join(archived, "features.db"))
+    assert not os.path.exists(os.path.join(p, "features.db")) and not os.path.exists(os.path.join(p, "sparse"))
+    poses = json.load(open(os.path.join(p, "poses.json")))
     assert [im["image"] for im in poses["images"]][:2] == ["v0_00001.jpg", "v0_00003.jpg"]
-    assert poses["ground_z"] == -5.0 and poses["subsampled_from"]["every"] == 2
-    assert poses["subsampled_from"]["images_in_source"] == 16
-    assert sorted(os.listdir(os.path.join(dst, "images"))) == sorted(im["image"] for im in poses["images"])
-    a, b = os.path.join(src, "images", "v0_00001.jpg"), os.path.join(dst, "images", "v0_00001.jpg")
-    assert os.stat(a).st_ino == os.stat(b).st_ino  # hard link, no copy
-    rows = open(os.path.join(dst, "poses.csv")).read().splitlines()
-    assert rows[0] == "image,source,time_s" and len(rows) == 1 + 8
-    assert os.path.exists(os.path.join(dst, "camera.json")) and os.path.exists(os.path.join(dst, "ingest.json"))
-    with pytest.raises(FileExistsError):
-        projects.subsample(root, src, "small")
+    assert poses["ground_z"] == -5.0 and poses["subsample"]["every"] == 2
+    assert sorted(os.listdir(os.path.join(p, "images"))) == sorted(im["image"] for im in poses["images"])
+    a, b = os.path.join(p, "extracted", "images", "v0_00001.jpg"), os.path.join(p, "images", "v0_00001.jpg")
+    assert os.stat(a).st_ino == os.stat(b).st_ino  # hard link into the pool
+    assert len(open(os.path.join(p, "poses.csv")).read().splitlines()) == 1 + 8
+    assert projects.subsample_info(p) == {"extracted": 16, "used": 8, "setting": poses["subsample"]}
+
+    n, _, archived = projects.apply_subsample(p, every=3, start=2, end=8)  # another subset of the pool
+    assert n == 3 and archived is None  # nothing computed since
     with pytest.raises(ValueError):
-        projects.subsample(root, src, "none", start=50, end=60)  # nothing in that window
-    assert not os.path.exists(os.path.join(root, "none"))
+        projects.apply_subsample(p, start=50, end=60)  # nothing in that window
+    n, _, _ = projects.apply_subsample(p)  # all again
+    assert n == 16 and "subsample" not in json.load(open(os.path.join(p, "poses.json")))
+    assert len(os.listdir(os.path.join(p, "images"))) == 16 and len(projects.extracted_images(p)) == 16
+    assert "extracted" in projects.KEEP_ON_CLEAN and "extracted" in ingest.OUTPUTS  # re-extraction archives it
 
 
 def test_gui_subsample(tmp_path):
     from modelforge.gui.app import App
     root = str(tmp_path)
     real = os.path.join(root, "real")
-    os.makedirs(real)
-    for name in ("poses.json", "images", "sparse"):
-        os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(real, name))
+    shutil.copytree(os.path.join(REAL, "images"), os.path.join(real, "images"))  # applying moves images/
+    shutil.copy2(os.path.join(REAL, "poses.json"), os.path.join(real, "poses.json"))
+    os.symlink(os.path.abspath(os.path.join(REAL, "sparse")), os.path.join(real, "sparse"))
     app = App(real, port=free_port(), root=root)
     try:
         n = len(app.project.names)
-        p = app.projects
-        p.g_sub_every.value = 4
-        assert f"of {n} images" in p.g_sub_md.content and "real_every4" in p.g_sub_md.content
-        p.subsample()
-        assert app.path.endswith("real_every4") and len(app.project.names) == len(range(0, n, 4))
-        assert "✅" in p.g_msg.content
+        s = app.subset
+        assert f"all **{n}**" in s.g_md.content
+        s.g_every.value = 4
+        assert f"of {n} images" in s.g_preview.content
+        s.apply()
+        t0 = time.time()
+        while "now using" not in s.g_preview.content and time.time() - t0 < 60:
+            time.sleep(0.1)
+        k = len(range(0, n, 4))
+        assert f"now using {k} of {n}" in s.g_preview.content, s.g_preview.content
+        assert len(app.project.names) == k and f"**{k}** of {n}" in s.g_md.content
+        assert not os.path.exists(os.path.join(real, "sparse"))  # the old results moved to previous/
     finally:
         app.server.stop()
