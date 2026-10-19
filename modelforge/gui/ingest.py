@@ -167,7 +167,20 @@ class IngestPanel:
                                                 hint="The frame the poses are expressed in: the project's world.")
             self.g_ros_camera = gui.add_dropdown("Camera frame", options=(IMAGE_FRAME,),
                                                  hint="The camera's optical frame (x right, y down, z forward; ROS "
-                                                      "*_optical_frame). Default: the image messages' frame_id.")
+                                                      "*_optical_frame). Default: the image messages' frame_id. "
+                                                      "When TF has no frame for the camera, pick the frame it is "
+                                                      "mounted on (e.g. the body, x forward, z up) and use "
+                                                      "Extrinsic RPY.")
+            self.g_ros_use_rpy = gui.add_checkbox(
+                "Use extrinsic RPY", initial_value=False,
+                hint="The Camera frame is a mount frame (ROS body convention: x forward, y left, z up), not the "
+                     "optical frame: the camera's orientation in it is given by Extrinsic RPY below.")
+            self.g_ros_rpy = gui.add_vector3(
+                "Extrinsic RPY [deg]", initial_value=(0.0, 0.0, 0.0), step=1.0,
+                hint="Camera orientation in the Camera frame: roll about x, pitch about y, yaw about z, in that "
+                     "order about the frame's fixed axes, starting from a camera looking forward with the image's "
+                     "top up. 0, 0, 0 = forward; 0, 90, 0 = straight down (image top towards the front); "
+                     "0, 30, 0 = forward, tilted 30° down. SfM refines the last few degrees.")
             self.g_ros_odom = gui.add_dropdown("Odometry topic", options=("-",),
                                                hint="nav_msgs/Odometry, for pose source odometry.")
             self.g_ros_clouds = gui.add_folder("Point clouds")
@@ -178,7 +191,7 @@ class IngestPanel:
             self.g_ros_range = gui.add_number("LiDAR max range [m]", initial_value=60.0, min=1.0, step=5.0,
                                               hint="Returns farther from the sensor are dropped.")
             for h in (self.g_ros_image, self.g_ros_info, self.g_ros_pose, self.g_ros_world, self.g_ros_camera,
-                      self.g_ros_odom, self.g_ros_voxel, self.g_ros_range):
+                      self.g_ros_odom, self.g_ros_voxel, self.g_ros_range, self.g_ros_use_rpy, self.g_ros_rpy):
                 h.on_update(lambda _: self._ros_changed())
             self._cloud_boxes = {}
         self.g_sources = gui.add_folder("Sources")
@@ -423,6 +436,9 @@ class IngestPanel:
                 if v in h.options:
                     h.value = v
             self.g_ros_voxel.value, self.g_ros_range.value = r["voxel"], r["max_range"]
+            rpy = r.get("camera_rpy")
+            self.g_ros_use_rpy.value = rpy is not None
+            self.g_ros_rpy.value = tuple(float(v) for v in (rpy if rpy is not None else (0.0, 0.0, 0.0)))
             for h in self._cloud_boxes.values():
                 h.remove()
             self._cloud_boxes = {}
@@ -439,6 +455,10 @@ class IngestPanel:
         dur = inv["end"] - inv["start"]
         name = os.path.basename(path.rstrip("/"))
         self.g_ros_md.content = f"`{name}` · {dur:.0f} s · {len(inv['topics'])} topics · {len(frames)} TF frames"
+        img_frame = inv["frame_of"].get(r["image_topic"], "")
+        if img_frame and img_frame not in frames:
+            self.g_ros_md.content += (f"  \n⚠️ the images' frame `{img_frame}` is not in TF: set Camera frame to the "
+                                      "frame the camera is mounted on and use Extrinsic RPY")
         self._ros_bag = path
 
     def _ros_changed(self):
@@ -450,7 +470,8 @@ class IngestPanel:
                "camera_frame": "" if self.g_ros_camera.value == IMAGE_FRAME else self.g_ros_camera.value,
                "odom_topic": "" if self.g_ros_odom.value == "-" else self.g_ros_odom.value,
                "cloud_topics": [t for t, cb in self._cloud_boxes.items() if cb.value],
-               "voxel": float(self.g_ros_voxel.value), "max_range": float(self.g_ros_range.value)}
+               "voxel": float(self.g_ros_voxel.value), "max_range": float(self.g_ros_range.value),
+               "camera_rpy": [float(v) for v in self.g_ros_rpy.value] if self.g_ros_use_rpy.value else None}
         self.settings = ingest.Settings(**{**asdict(self.settings), "ros": ros})
         for w in self._source_widgets:  # the clip (poses) depends on the topics and frames: re-analyse
             w["ready"] = False

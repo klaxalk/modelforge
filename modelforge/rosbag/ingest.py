@@ -42,6 +42,23 @@ def default_settings():
     return dji.Settings(sampling="distance", num_images=200, ros=None)
 
 
+# optical axes (x right, y down, z forward) of a camera looking forward, in a ROS body frame (x forward,
+# y left, z up): Extrinsic RPY 0, 0, 0
+FORWARD_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+
+
+def mount_rotation(rpy_deg):
+    """R_frame_optical of a camera mounted in a body-like frame with Extrinsic RPY (degrees): roll about
+    x, pitch about y, yaw about z, applied in that order about the frame's fixed axes (R = Rz Ry Rx),
+    starting from a forward-looking camera with the image's top up. Pitch 90 = looking straight down,
+    the image's top towards the front. For bags whose TF does not reach the camera's optical frame."""
+    r, p, y = np.radians(np.asarray(rpy_deg, float))
+    Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
+    Ry = np.array([[np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
+    Rz = np.array([[np.cos(y), -np.sin(y), 0], [np.sin(y), np.cos(y), 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx @ FORWARD_OPTICAL
+
+
 def ros_defaults(path):
     """Settings.ros guessed from a bag: the first compressed (else raw) image topic, its CameraInfo,
     the TF root above the camera as world, TF poses if they reach the camera, else odometry."""
@@ -122,14 +139,16 @@ class Clip:
         self.wall_start = float(self.stamps[0]) if self.n else None
         self.camera_frame = ros.get("camera_frame") or bag.inventory(path)["frame_of"].get(self.topic, "")
         self.lead, self.srt_path, self.takeoff_abs_alt = 0.0, None, None
+        rpy = ros.get("camera_rpy")  # None: the camera frame is the optical frame
         self.align = {"method": ros["pose_source"], "world_frame": ros["world_frame"],
-                      "camera_frame": self.camera_frame}
+                      "camera_frame": self.camera_frame, "camera_rpy": rpy}
+        T_frame_optical = make(mount_rotation(rpy), np.zeros(3)) if rpy is not None else np.eye(4)
         poser = Poser(path, ros)
         self.T = np.full((self.n, 4, 4), np.nan)
         for k, t in enumerate(self.stamps):
             T = poser.world_from(self.camera_frame, t)
             if T is not None:
-                self.T[k] = T
+                self.T[k] = T @ T_frame_optical
         self.valid_pose = np.isfinite(self.T[:, 0, 0])
         self.centers = self.T[:, :3, 3]
         self.axes = self.T[:, :3, 2]  # optical axis (z) in the world
@@ -346,6 +365,9 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
     log(f"sampling: {plan.report}")
     ros0 = plan.sources[0].clip.ros
     camera = bag.camera_info(plan.sources[0].source.video, ros0["info_topic"]) if ros0.get("info_topic") else None
+    if ros0.get("info_topic") and camera is None:
+        log(f"warning: {ros0['info_topic']} holds no calibration (all zeros): the camera intrinsics are estimated "
+            "by SfM instead")
     if camera:
         w, h = plan.sources[0].clip.width, plan.sources[0].clip.height
         if (camera["width"], camera["height"]) != (w, h):  # e.g. a resized image topic: scale the intrinsics

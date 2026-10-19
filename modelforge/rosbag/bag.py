@@ -144,15 +144,18 @@ def iter_images(path, topic, indices):
 
 
 def camera_info(path, topic):
-    """First CameraInfo: {"width", "height", "model", "params", "distortion_model"} as a COLMAP camera.
-    plumb_bob / rational_polynomial -> OPENCV (k1 k2 p1 p2; higher terms dropped), equidistant ->
-    OPENCV_FISHEYE (k1..k4), none -> PINHOLE."""
+    """First calibrated CameraInfo: {"width", "height", "model", "params", "distortion_model"} as a COLMAP
+    camera. plumb_bob / rational_polynomial -> OPENCV (k1 k2 p1 p2; higher terms dropped), equidistant ->
+    OPENCV_FISHEYE (k1..k4), none -> PINHOLE. None if the topic has none: uncalibrated drivers publish
+    all zeros (size 0 x 0, K = 0), which is no calibration (the intrinsics are then estimated by SfM)."""
     with reader(path) as r:
         conns = [c for c in r.connections if c.topic == topic]
         for conn, _, raw in r.messages(connections=conns):
             m = r.deserialize(raw, conn.msgtype)
             K, d, dm = np.asarray(m.k, float).reshape(3, 3), list(np.asarray(m.d, float)), m.distortion_model
             fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+            if m.width <= 0 or m.height <= 0 or fx <= 0 or fy <= 0:  # not calibrated: try the next message
+                continue
             if dm == "equidistant":
                 model, params = "OPENCV_FISHEYE", [fx, fy, cx, cy] + (d + [0.0] * 4)[:4]
             elif dm in ("plumb_bob", "rational_polynomial") and d:

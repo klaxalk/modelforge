@@ -518,6 +518,21 @@ and the splat.
   - Tests: `test_splat_lidar_command`,
     `test_lidar_depth_image_in_nerfstudio_venv` (occlusion filter, method
     registration).
+- **Uncalibrated camera_info / camera not in TF** (the user's `franta` bag, 2026-10-19: a downward
+  camera on a UAV; images stamped `uav64/rpi_camera_front`, a frame missing from TF; camera_info all
+  zeros, size 0 × 0):
+  - `bag.camera_info` skips messages without a calibration (size or focal ≤ 0); none left = no
+    camera.json, so SfM estimates the intrinsics. Extraction used to die with a division by zero.
+  - **Extrinsic RPY** (Ingest → ROS 2 bag: "Use extrinsic RPY" + vector; `Settings.ros["camera_rpy"]`,
+    None = the camera frame is the optical frame): the Camera frame is then a mount frame in ROS body
+    convention (x forward, y left, z up) and `rosbag.ingest.mount_rotation` gives R_frame_optical =
+    Rz(yaw) Ry(pitch) Rx(roll) · FORWARD_OPTICAL (extrinsic, about the frame's fixed axes; 0, 0, 0 =
+    looking forward, image top up; 0, 90, 0 = straight down, image top to the front).
+  - On franta with Camera frame `uav64/fcu`: without RPY the optical axis pointed straight up
+    (median z +1.00), with 0, 90, 0 straight down (−1.00), 2216/2216 poses.
+  - The Ingest tab warns when the images' frame is not in TF.
+  - Tests: `test_extrinsic_rpy` (the test bag's forward mount reproduced from `base` + 0, 0, 0),
+    `test_uncalibrated_camera_info`.
 - Not done yet:
   - per-point LiDAR timestamps (motion distortion within a scan);
   - LiDAR as a BA constraint (point-to-plane residuals on SfM points);

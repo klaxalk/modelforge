@@ -35,7 +35,7 @@ def test_tf_buffer():
     assert b.frames == ["base", "cam", "world"]
 
 
-def write_small_bag(path, n=30, w=160, h=120, mcap=False):
+def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False):
     """A camera moving 0.1 m per image along x over a frozen test pattern, + TF, odometry, camera_info
     and one LiDAR (sqlite3, or MCAP storage); returns the true T_world_cam per image."""
     from rosbags.rosbag2 import StoragePlugin, Writer
@@ -90,9 +90,11 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False):
             ok, jpg = cv2.imencode(".jpg", img)
             write("/cam/image/compressed", t, T_["sensor_msgs/msg/CompressedImage"](
                 header=header(t, "cam_optical"), format="jpeg", data=jpg.reshape(-1)))
-            write("/cam/info", t, T_["sensor_msgs/msg/CameraInfo"](
-                header=header(t, "cam_optical"), height=h, width=w, distortion_model="plumb_bob",
-                d=np.array([0.01, 0.0, 0.0, 0.0, 0.0]), k=np.array([100.0, 0, 80, 0, 100.0, 60, 0, 0, 1]),
+            write("/cam/info", t, T_["sensor_msgs/msg/CameraInfo"](  # uncalibrated drivers publish all zeros
+                header=header(t, "cam_optical"), height=0 if uncalibrated else h, width=0 if uncalibrated else w,
+                distortion_model="" if uncalibrated else "plumb_bob",
+                d=np.zeros(0) if uncalibrated else np.array([0.01, 0.0, 0.0, 0.0, 0.0]),
+                k=np.zeros(9) if uncalibrated else np.array([100.0, 0, 80, 0, 100.0, 60, 0, 0, 1]),
                 r=np.eye(3).reshape(-1), p=np.zeros(12), binning_x=0, binning_y=0,
                 roi=T_["sensor_msgs/msg/RegionOfInterest"](x_offset=0, y_offset=0, height=0, width=0, do_rectify=False)))
             pts = np.array([[1.0, 0.0, 0.0], [2.0, 1.0, -0.5], [np.nan, 0, 0]], np.float32)  # in the lidar frame
@@ -103,6 +105,40 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False):
                 row_step=36, data=pts.reshape(-1).view(np.uint8), is_dense=False))
             truth.append(T_wb @ T_base_cam)
     return truth
+
+
+def test_extrinsic_rpy(tmp_path):
+    """A camera frame missing from TF: poses of its mount frame + Extrinsic RPY. The test bag mounts the
+    optical frame on base looking forward (0.1 m ahead), so base + RPY 0, 0, 0 gives the true
+    orientations; pitch 90 looks straight down with the image's top towards the front."""
+    R = ri.mount_rotation([0, 0, 0])
+    assert np.allclose(R[:, 2], [1, 0, 0]) and np.allclose(R[:, 1], [0, 0, -1])  # forward, image down = down
+    R = ri.mount_rotation([0, 90, 0])
+    assert np.allclose(R[:, 2], [0, 0, -1]) and np.allclose(-R[:, 1], [1, 0, 0])  # down, image top = front
+    R = ri.mount_rotation([0, 30, 0])
+    assert np.isclose(np.degrees(np.arcsin(-R[2, 2])), 30)  # forward, tilted 30 deg down
+    path = str(tmp_path / "small_bag")
+    truth = write_small_bag(path)
+    d = ri.ros_defaults(path)
+    c = ri.load_clip(path, ros=dict(d, camera_frame="base", camera_rpy=[0.0, 0.0, 0.0]))
+    assert c.valid_pose.all() and c.align["camera_rpy"] == [0.0, 0.0, 0.0]
+    for k in range(c.n):
+        assert np.allclose(c.T[k][:3, :3], truth[k][:3, :3], atol=1e-9)
+        assert np.isclose(np.linalg.norm(c.T[k][:3, 3] - truth[k][:3, 3]), 0.1)  # the mount's offset
+
+
+def test_uncalibrated_camera_info(tmp_path):
+    """A camera_info of zeros (uncalibrated driver) is no calibration: extraction works without camera.json
+    (it divided by the zero size before), and SfM estimates the intrinsics."""
+    path = str(tmp_path / "zero_info_bag")
+    write_small_bag(path, uncalibrated=True)
+    assert bag.camera_info(path, "/cam/info") is None
+    d = ri.ros_defaults(path)
+    proj = projects.create(str(tmp_path), "zeroproj", kind="rosbag")
+    lines = []
+    out = ri.run(proj, [dji.Source(path)], dji.Settings(sampling="distance", num_images=6, ros=d), log=lines.append)
+    assert len(out["images"]) == 6 and not os.path.exists(os.path.join(proj, "camera.json"))
+    assert any("no calibration" in m for m in lines)
 
 
 def test_small_bag(tmp_path):
