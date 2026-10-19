@@ -27,11 +27,14 @@ from ~2900 training images on.
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
         [--cache disk|cpu|gpu] [--downscale 2] [--strategy default|mcmc] [--max-gaussians N]
-        [--camera-opt off|SO3xR3|SE3] [--no-plan] [--lidar-depth 0.2] [extra ns-train args]
+        [--camera-opt off|SO3xR3|SE3] [--no-plan] [--lidar-depth 0.2] [--resume] [extra ns-train args]
+Stop (GUI) / Pause: the trainer saves a checkpoint at the current step (nsplugin/mf_train.py); Stop then
+exports the partial splat, and `resume` (--resume) continues with the run's own settings.
 """
 
 import argparse
 import glob
+import json
 import os
 import re
 import shutil
@@ -57,6 +60,16 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # the table is redrawn with curso
 
 Stopped = jobs.Cancelled  # stopping is shared with the other stages (modelforge.jobs)
 Job = jobs.Token
+RESUME = os.path.join("splat", "resume.json")  # a stopped / paused run that can continue
+CONTROL = os.path.join("splat", "control")  # asks the trainer for a checkpoint and exit (nsplugin/mf_train.py)
+
+
+class Paused(jobs.Cancelled):
+    """Training was paused: checkpoint saved, resume.json written, nothing exported."""
+
+
+class StoppedPartial(jobs.Cancelled):
+    """Training was stopped: checkpoint saved, the partial splat exported to splat/splat_enu.ply."""
 
 
 def available():
@@ -69,8 +82,8 @@ def available():
     return None
 
 
-def _env():
-    env = dict(os.environ, PYTHONUNBUFFERED="1", TERM="dumb", COLUMNS="160")
+def _env(extra=None):
+    env = dict(os.environ, PYTHONUNBUFFERED="1", TERM="dumb", COLUMNS="160", **(extra or {}))
     env["PATH"] = NS_BIN + os.pathsep + env.get("PATH", "")  # nerfstudio's own tools first
     # torch >= 2.6 loads weights_only by default, which rejects nerfstudio 1.1.5 checkpoints
     # (numpy scalars inside); they are our own, written by ns-train in this project
@@ -84,12 +97,12 @@ def _env():
     return env
 
 
-def _stream(cmd, on_line, job):
+def _stream(cmd, on_line, job, env=None, soft_stop=None):
     def line(text):
         text = _ANSI.sub("", text).rstrip()
         if text:
             on_line(text)
-    job.run(cmd, line, env=_env())  # Cancelled when stopped, RuntimeError on failure
+    job.run(cmd, line, env=_env(env), soft_stop=soft_stop)  # Cancelled when stopped, RuntimeError on failure
 
 
 def ns_method(method, lidar_depth=None):
@@ -137,10 +150,12 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
-                  steps_per_save=None, lidar_depth=None, schedule=None):
+                  steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
-    (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt)."""
+    (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
+    latest checkpoint there (a paused / stopped run; `run` trains through nsplugin/mf_train.py, which
+    makes that work for splatfacto)."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -162,6 +177,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
                                              "camera_opt")})
     if steps_per_save:
         cmd += ["--steps-per-save", str(int(steps_per_save))]
+    if load_dir:
+        cmd += ["--load-dir", load_dir]
     if lidar_depth is not None:
         cmd += ["--pipeline.model.lidar-depth-lambda", str(float(lidar_depth))]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
@@ -276,9 +293,13 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None,
-        schedule=None):
+        schedule=None, pause=None, load_dir=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
     schedule: densification / learning-rate settings from splat_plan.suggest (or None: splatfacto's).
+    Stopping the job (job.cancel) asks the trainer for a checkpoint at the current step first; the run's
+    settings go to splat/resume.json (see `resume`). With `pause` (threading.Event) set: Paused, nothing
+    exported. Otherwise the partial splat is exported and converted as usual, then StoppedPartial.
+    load_dir: continue from that checkpoint folder (used by `resume`).
     lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1)."""
     from modelforge.export import splat_to_enu
@@ -305,8 +326,13 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         if q:
             lidar_log.append(q)
 
+    settings = {"method": method, "iterations": iterations, "extra": list(extra), "cache": cache,
+                "downscale": int(downscale), "lidar_depth": lidar_depth, "schedule": schedule}
+    if load_dir is None:
+        _remove(os.path.join(project, RESUME))  # a new run replaces the paused one
     prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
-    on_line(f"splat: training {method_dir}, cache {cache}, downscale {downscale}"
+    on_line(("splat: resuming " if load_dir else "splat: training ")
+            + f"{method_dir}, cache {cache}, downscale {downscale}"
             + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "")
             + (f", {iterations or DEFAULT_ITERATIONS:,} steps" if schedule else "")
             + (f", {schedule['strategy']} densification" if schedule and schedule.get("strategy") else "")
@@ -318,11 +344,37 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
                          daemon=True).start()
+    control = os.path.join(project, CONTROL)
+    os.makedirs(os.path.dirname(control), exist_ok=True)  # a fresh project has no splat/ yet
+    for f in (control, control + ".done"):
+        _remove(f)
+    cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
+                        lidar_depth, schedule, load_dir)
+    cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
+    stopped_at = None
     try:
-        _stream(train_command(project, method, iterations, extra, cache, downscale,
-                              preview_every if on_snapshot else None, lidar_depth, schedule), line, job)
+        _stream(cmd, line, job, env={"MF_SPLAT_CONTROL": control},
+                soft_stop=lambda: open(control, "w").write("checkpoint"))
+    except jobs.Cancelled:
+        try:
+            done = json.load(open(control + ".done"))
+        except (OSError, ValueError):
+            raise jobs.Cancelled("stopped before a checkpoint was saved") from None
+        stopped_at = int(done["step"])
+        json.dump(dict(settings, load_dir=done["dir"], step=stopped_at,
+                       transforms_mtime=os.path.getmtime(os.path.join(project, "transforms.json"))),
+                  open(os.path.join(project, RESUME), "w"), indent=1)
+        if pause is not None and pause.is_set():
+            on_line(f"splat: paused at step {stopped_at:,}; Resume continues from there")
+            raise Paused(f"paused at step {stopped_at:,} of {iterations or DEFAULT_ITERATIONS:,}") from None
+        on_line(f"splat: stopped at step {stopped_at:,}; exporting the partial splat")
+        job = Job()  # the job is cancelled; the export of the partial result still has to run
     finally:
         stop.set()
+        for f in (control, control + ".done"):
+            _remove(f)
+    if stopped_at is None:
+        _remove(os.path.join(project, RESUME))  # trained to the end
     t_train = time.time() - t0
     config = latest_config(project, method_dir)
     out_dir = os.path.join(project, "splat")
@@ -337,6 +389,10 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
              "downscale": int(downscale), "config": config, "splat": enu,
              "num_gaussians": _num_vertices(enu), "train_seconds": round(t_train, 1),
              "seconds": round(time.time() - t0, 1)}
+    if stopped_at is not None:
+        stats["stopped_at_step"] = stopped_at  # a partial result; splat/resume.json continues it
+    if load_dir:
+        stats["resumed_from"] = load_dir
     if schedule:
         stats["schedule"] = {k: schedule.get(k) for k in ("strategy", "max_gaussians", "stop_split_at",
                                                           "reset_alpha_every", "camera_opt") if schedule.get(k)}
@@ -346,7 +402,45 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     Report(project).set("splat", stats)
     on_line(f"splat: {dict(stats, lidar_depth={k: v for k, v in stats['lidar_depth'].items() if k != 'history'})}"
             if "lidar_depth" in stats else f"splat: {stats}")
+    if stopped_at is not None:
+        raise StoppedPartial(f"stopped at step {stopped_at:,} of {iterations or DEFAULT_ITERATIONS:,}; the partial "
+                             "splat is exported (splat/splat_enu.ply) and Resume continues the training")
     return stats
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def resume_info(project):
+    """The paused / stopped run's settings (splat/resume.json) if it can continue, else None: its
+    checkpoint must still exist and transforms.json must be unchanged (same cameras and scene frame)."""
+    try:
+        info = json.load(open(os.path.join(project, RESUME)))
+    except (OSError, ValueError):
+        return None
+    if not glob.glob(os.path.join(info.get("load_dir", ""), "step-*.ckpt")):
+        return None
+    t = os.path.join(project, "transforms.json")
+    if not os.path.exists(t) or abs(os.path.getmtime(t) - info.get("transforms_mtime", 0)) > 1e-3:
+        return None
+    return info
+
+
+def resume(project, **kwargs):
+    """Continue the paused / stopped run with its own settings (method, steps, schedule, ...) from its
+    last checkpoint: optimizer state, learning-rate schedules and the step count carry on. kwargs as
+    for `run` (callbacks, job, pause, preview_every)."""
+    info = resume_info(project)
+    if info is None:
+        raise RuntimeError("nothing to resume: no paused or stopped splat run with a checkpoint "
+                           "(or transforms.json changed since)")
+    return run(project, info["method"], info["iterations"], tuple(info["extra"]), cache=info["cache"],
+               downscale=info["downscale"], lidar_depth=info["lidar_depth"], schedule=info["schedule"],
+               load_dir=info["load_dir"], **kwargs)
 
 
 def _num_vertices(ply):
@@ -367,6 +461,8 @@ def main():
                     "more Gaussians than fit, else default with a reset period scaled to the image count)")
     ap.add_argument("--max-gaussians", type=int, help="MCMC budget (default: from the scene and GPU memory)")
     ap.add_argument("--camera-opt", choices=CAMERA_OPT, help="pose refinement while training (default SO3xR3)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue the paused / stopped run (splat/resume.json) with its own settings")
     ap.add_argument("--no-plan", action="store_true",
                     help="splatfacto's own defaults (30000 steps, no schedule) instead of the flight-based plan")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
@@ -374,6 +470,9 @@ def main():
     args, extra = ap.parse_known_args()
     project = os.path.abspath(args.project)
     try:
+        if args.resume:
+            resume(project, on_line=lambda m: print(m, flush=True))
+            return
         if args.no_plan:
             iterations, downscale, schedule = args.iterations, args.downscale or 1, None
         else:

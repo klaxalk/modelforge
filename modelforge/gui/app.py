@@ -54,6 +54,8 @@ STAGE_HINTS = {
     "mesh": "Mesh the fused points (method above) and write a simplified preview for the View tab.",
     "texture": "Texture the mesh from the images: dense/textured-<method>/mesh.ply + texture.png.",
     "splat": "nerfstudio splatfacto: train, export, convert to ENU (splat/splat_enu.ply).",
+    "splat-resume": "Continue the paused or stopped splat training from its last checkpoint, with its own "
+                    "settings (method, steps, schedule): optimizer state and learning-rate schedules carry on.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → splat → splat mesh (→ COLMAP dense if ticked in the Dense tab).",
@@ -69,6 +71,7 @@ NEXT_STEP = {
     "undistort": "next: **stereo**", "stereo": "next: **fusion**", "fusion": "next: **mesh**",
     "mesh": "View tab → Mesh; next: **texture**", "texture": "textured mesh written; Export tab",
     "splat": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
+    "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
 }
 LOG_LINES = 200
@@ -169,9 +172,11 @@ class App:
         self.g_buttons["all"] = b
         self.g_stop = gui.add_button("Stop", icon=viser.Icon.PLAYER_STOP, color="red", disabled=True,
                                      hint="Stop the running job (a stage, the full pipeline, splat training or an "
-                                          "extraction). Subprocess stages (stereo, meshing, texturing, splat) and "
+                                          "extraction). Subprocess stages (stereo, meshing, texturing) and "
                                           "bundle adjustment stop at once; feature extraction, matching, "
-                                          "triangulation and fusion stop when their current call returns.")
+                                          "triangulation and fusion stop when their current call returns. Splat "
+                                          "training saves a checkpoint at the current step, then exports that "
+                                          "partial splat (shown and exportable; Splat tab → Resume continues).")
         self.g_stop.on_click(lambda _: self.stop())
         # Two panels: the right (main) one runs the methods, the left one holds everything else.
         self.left = gui.add_panel()
@@ -484,6 +489,17 @@ class App:
                                     "cameras and the mesh).")
             b.on_click(lambda _: self.run_stage("splat"))
             self.g_buttons["splat"] = b
+            self.g_splat_pause = gui.add_button(
+                "Pause training", icon=viser.Icon.PLAYER_PAUSE, disabled=True,
+                hint="Save a checkpoint at the current step and end training without exporting (frees the GPU "
+                     "at once; the live preview stays). Resume continues later from that step. Stop (top) also "
+                     "keeps the checkpoint but exports the partial splat.")
+            self.g_splat_pause.on_click(lambda _: self.pause_splat())
+            b = gui.add_button("Resume training", icon=viser.Icon.PLAYER_PLAY, disabled=True,
+                               hint=STAGE_HINTS["splat-resume"] + " Available after Pause or Stop, while "
+                                    "transforms.json is unchanged.")
+            b.on_click(lambda _: self.run_stage("splat-resume"))
+            self.g_buttons["splat-resume"] = b
             gui.add_button("Reload dense / splat", hint="Re-scan the project for fused points, meshes and "
                            "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                 lambda _: self._refresh_dense())
@@ -672,6 +688,8 @@ class App:
         with self.lock:
             self.path = path
             self._clear_scene()
+            self._splat_live_on = False  # a paused run's live preview belongs to the old project
+            self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self._show_project()
             self._history_lines, self._log_lines = [], []
@@ -1001,7 +1019,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh"):
+            elif stage in ("splat", "splatmesh", "splat-resume"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1037,8 +1055,8 @@ class App:
                         self.g_skip.disabled = True
                 elif st == "export":
                     pipeline.stage_export(project, report)
-                elif st == "splat":
-                    self._run_splat(project)
+                elif st in ("splat", "splat-resume"):
+                    self._run_splat(project, resume=st == "splat-resume")
                     report = pipeline.Report(project)  # splat.run wrote its stats
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
                 elif st == "splatmesh":
@@ -1060,6 +1078,15 @@ class App:
             self._refresh_splat_plan()  # new cameras: new suggestion
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
+        except splat.Paused as e:
+            self._history(f"⏸ **splat** {e}")
+            final = (f"⏸ **splat {e}** · {time.strftime('%H:%M:%S')}  \n"
+                     "Splat tab → **Resume training** continues from there")
+        except splat.StoppedPartial as e:
+            self._refresh_dense()  # the partial splat replaces the live preview
+            self._history(f"⏹ **splat** {e}")
+            final = (f"⏹ **splat {e}** · {time.strftime('%H:%M:%S')}  \n"
+                     "View tab → Dense / splat → **Splat**; Export tab")
         except jobs.Cancelled:
             label = self._job["label"]
             self._history(f"⏹ **{label}** stopped")
@@ -1078,11 +1105,34 @@ class App:
                 self.g_state.content = final or "❌ **stopped**"
             unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
                            "splat": splat.available() is not None,
+                           "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
                            "splatmesh": splat_mesh.available() is not None}
             for name, b in self.g_buttons.items():
                 b.disabled = unavailable.get(name, False)
             self.g_progress.visible = False
             self.g_stop.disabled = not self.ingest.running
+            self.g_splat_pause.disabled = True
+            self._sync_resume()
+
+    def pause_splat(self):
+        """Pause button: like Stop (the trainer saves a checkpoint and ends), but splat.run skips the
+        export and leaves the live preview; Resume continues."""
+        if self.running and getattr(self, "_splat_pause_event", None) is not None:
+            self._splat_pause_event.set()
+            self.g_splat_pause.disabled = True
+            self.stop()
+
+    def _sync_resume(self):
+        """Resume button and status line from splat/resume.json (after a pause / stop)."""
+        info = splat.resume_info(self.path) if self.path else None
+        b = self.g_buttons.get("splat-resume")
+        if b is not None and not self.running:
+            b.disabled = info is None or splat.available() is not None
+        if info and not self.running:
+            self.g_splat_status.content = (
+                f"⏸ {info['method']} stopped at step {info['step']:,} of "
+                f"{info['iterations'] or splat.DEFAULT_ITERATIONS:,}"
+                " · **Resume training** continues with its settings (×" + str(info["downscale"]) + ")")
 
     def stop(self):
         """Stop button: cancel the running job and / or an extraction (in a thread: killing a
@@ -1419,10 +1469,18 @@ class App:
                 self.g_splat_plan.content = text
         threading.Thread(target=work, daemon=True).start()
 
-    def _run_splat(self, project):
-        plan = self._splat_settings(project)
-        iters, down = plan["iterations"], plan["downscale"]
-        self._on_log("splat plan: " + "; ".join(plan["notes"]))
+    def _run_splat(self, project, resume=False):
+        """Train (or, resume=True, continue the paused / stopped run with its own settings)."""
+        info = splat.resume_info(project) if resume else None
+        if resume and info is None:
+            raise RuntimeError("nothing to resume (no checkpoint, or transforms.json changed since)")
+        if info:
+            iters, down = info["iterations"] or splat.DEFAULT_ITERATIONS, info["downscale"]
+            self._on_log(f"splat: resuming {info['method']} from step {info['step']:,} of {iters:,}")
+        else:
+            plan = self._splat_settings(project)
+            iters, down = plan["iterations"], plan["downscale"]
+            self._on_log("splat plan: " + "; ".join(plan["notes"]))
 
         self._live_msg = ""
 
@@ -1439,12 +1497,18 @@ class App:
         def prepare(done, total):  # images_<factor>/ before training (thousands of images: minutes)
             self.g_progress.value = 100.0 * done / total
             self._job["detail"] = f"downscaling images ×{down}: {done:,} / {total:,}"
+        self._splat_pause_event = pause = threading.Event()
+        self.g_splat_pause.disabled = False
+        keep_live = False
         try:
-            if self._kind() == "rosbag":  # the initial cloud with or without the LiDAR points
+            if self._kind() == "rosbag" and not info:  # the initial cloud with or without the LiDAR points
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
             weight = float(self.g_splat_depth.value)
             lidar_depth = weight if self._kind() == "rosbag" and weight > 0 and splat.has_lidar(project) else None
             live = self.g_splat_live.value
+            if not live:  # a paused run's preview may still be up
+                self._splat_live_on = False
+                self.server.scene.remove_by_name("/dense/splat_live")
             if live:  # the live layer stands in for the previous result while training
                 self.server.scene.remove_by_name("/dense/splat")
                 self._unchanged("splat", None)
@@ -1452,15 +1516,24 @@ class App:
                 self.g_splat.disabled, self.g_splat.value = False, True  # View tab toggle drives the live layer
                 self.g_splat_status.content = (f"live preview: first snapshot at step "
                                                f"{int(self.g_splat_every.value):,}, then in the View tab")
-            splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
-                      job=self._token, cache="disk" if self.g_splat_disk.value else "gpu",
-                      downscale=down, preview_every=int(self.g_splat_every.value),
-                      on_snapshot=self._on_splat_snapshot if live else None, lidar_depth=lidar_depth,
-                      on_prepare=prepare, schedule=plan)
+            common = dict(on_line=on_line, on_progress=progress, job=self._token,
+                          preview_every=int(self.g_splat_every.value), pause=pause,
+                          on_snapshot=self._on_splat_snapshot if live else None, on_prepare=prepare)
+            if info:
+                splat.resume(project, **common)
+            else:
+                splat.run(project, self.g_splat_method.value, iters, cache="disk" if self.g_splat_disk.value else "gpu",
+                          downscale=down, lidar_depth=lidar_depth, schedule=plan, **common)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
+        except splat.Paused:
+            keep_live = live  # paused: the last live snapshot stays on screen (the Splat toggle drives it)
+            raise
         finally:
-            self._splat_live_on = False
-            self.server.scene.remove_by_name("/dense/splat_live")
+            self._splat_pause_event = None
+            self.g_splat_pause.disabled = True
+            if not keep_live:
+                self._splat_live_on = False
+                self.server.scene.remove_by_name("/dense/splat_live")
 
     def _on_splat_snapshot(self, step, npz, transforms):
         """A new training checkpoint: redraw the live splat in the View tab."""
@@ -1645,6 +1718,7 @@ class App:
         self._refresh_export()
         self._sync_quickbar()
         self._refresh_splat_plan()
+        self._sync_resume()
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):

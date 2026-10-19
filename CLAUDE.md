@@ -204,7 +204,7 @@ modelforge/
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── splat_plan.py   # splat training plan from the cameras (area, GSD, image count) and GPU memory
 │   ├── splat_mesh.py   # mesh from the splat: TSDF fusion of rendered depth (export/splat_tsdf.py in /opt/nerfstudio)
-│   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss)
+│   ├── nsplugin/       # nerfstudio plugin run in /opt/nerfstudio: splatfacto-lidar (LiDAR depth loss), mf_train (checkpoint on Stop, resume fix)
 │   ├── projects.py     # project folders: list / create / status / clean
 │   ├── jobs.py         # stopping jobs: Token (check / cancel / run killable subprocesses)
 │   ├── videos.py       # shared video library: list / probe / usage / upload / rename / delete (Videos tab)
@@ -944,6 +944,33 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
     silently, at 117 ms per image, and Stop waited for it; now 5 ms per image.
   - Images are written as `.part.jpg`, then renamed, so a stopped run leaves
     no truncated image that the up-to-date check would keep.
+
+**Stop, Pause and Resume** (the user asked, 2026-10-19: a stopped splat should be usable, and
+training should pause and resume):
+- Training runs as `python -m mf_train` (`modelforge/nsplugin/mf_train.py`, ns-train + two patches).
+  - **Checkpoint on request:** when `PROJECT/splat/control` appears (checked every 10 steps), the
+    trainer saves a checkpoint at the current step, writes `control.done` {step, dir} and exits 0.
+    nerfstudio saves only every `steps_per_save` and nothing on Ctrl-C.
+  - **Resume fix:** nerfstudio's `--load-dir` is broken for splatfacto. `load_state_dict` replaces
+    the Gaussian parameters with new tensors of the checkpoint's size, but the optimizers keep the
+    initial tensors and the loaded Adam state, so the first step would fail on shapes or train tensors
+    nobody renders. The patch rebinds the optimizers to the new parameters, keeping the state.
+- `jobs.Token.run(soft_stop=, soft_timeout=300)`: on cancel such a process is asked (the control
+  file) and waited for instead of terminated; terminated if it does not exit in time.
+- **Stop** (top button): checkpoint, `splat/resume.json` (the run's settings + checkpoint dir +
+  step + transforms.json mtime), then the partial splat is exported and converted with a fresh token
+  (the job's is cancelled) → `splat.StoppedPartial`; the GUI shows it and it is exportable;
+  `report.json["splat"]["stopped_at_step"]`.
+- **Pause** (Splat tab): the same without the export → `splat.Paused`; the live preview stays.
+- **Resume training** (Splat tab, stage `splat-resume`; CLI `--resume`): `splat.resume` reruns with
+  the stored settings (not the tab's) and `--load-dir`; step, optimizer state and learning-rate
+  schedules continue. `resume_info` refuses when the checkpoint is gone or transforms.json changed
+  (other cameras / scene frame). A new training run deletes resume.json; a finished one too.
+- Stopped before the first step reaches the check (e.g. while images load): no checkpoint, a plain
+  stop. ROS 2 bag projects skip the pre-training re-export on resume (it would change transforms.json).
+- Tests: `tests/test_splat_pause.py` (a fake trainer + ns-export: pause → resume continues at
+  step + 1 with --load-dir → stop exports the partial splat; soft stop; mf_train patches load in
+  nerfstudio's venv). Real run on a fullrun_test copy (2000 steps): paused at 710, resumed at 711, densified on (78k → 157k Gaussians), stopped at 1130 with the partial splat exported.
 
 **Live preview** (Splat tab, on by default):
 - The user wanted to watch the splat form in the GUI's 3D view.
