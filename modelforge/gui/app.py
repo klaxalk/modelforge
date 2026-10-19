@@ -1529,7 +1529,12 @@ class App:
         elif phase in ("round_done", "done"):
             with self.lock:
                 name = ev.get("name", f"round_{rnd}") if phase == "round_done" else "refined"
-                self.snap = self.project.snapshot_from_reconstruction(name, ev["rec"])
+                # the pipeline writes the snapshot before the event: reading the files is much faster
+                # than converting the Reconstruction (8000 images: 8 s instead of 4.5 min under the lock)
+                if os.path.isdir(os.path.join(self.path, "sparse", name)):
+                    self.snap = self.project.load_snapshot(name)
+                else:
+                    self.snap = self.project.snapshot_from_reconstruction(name, ev["rec"])
                 self._draw_points()
                 self._draw_cameras()
                 self._draw_lines()

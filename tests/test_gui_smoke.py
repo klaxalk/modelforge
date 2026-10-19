@@ -62,3 +62,25 @@ def test_live_refine_events(app):
     assert np.allclose(app.cam_handles[i].position, cams.centers[i])
     app._on_refine_event({"phase": "round_done", "round": 0, "rounds": 3, "rec": rec, "eval": {}})
     assert app.snap.name == "round_0" and len(app.snap.points) > 0
+
+
+def test_read_snapshot_matches_reconstruction():
+    """The numpy reader of the binary model gives what pycolmap.Reconstruction gives (points in id order)."""
+    import pycolmap
+    from modelforge.gui.data import Project
+    p = Project(PROJECT)
+    fast = p.read_snapshot("refined")
+    rec = pycolmap.Reconstruction(os.path.join(PROJECT, "sparse", "refined"))
+    slow = p.snapshot_from_reconstruction("refined", rec)
+    v = slow.cams.valid
+    assert (fast.cams.valid == v).all() and fast.rec is None
+    assert np.allclose(fast.cams.centers[v], slow.cams.centers[v]) and np.allclose(fast.cams.R_wc[v], slow.cams.R_wc[v])
+    order = np.argsort(np.array(list(rec.points3D.keys())))
+    assert np.array_equal(fast.points, slow.points[order]) and np.array_equal(fast.colors, slow.colors[order])
+    assert np.allclose(fast.point_error, slow.point_error[order], atol=1e-5)
+    assert np.allclose(fast.reproj_error, slow.reproj_error, equal_nan=True, atol=1e-6)
+    assert np.array_equal(fast.num_obs, slow.num_obs) and fast.intrinsics == slow.intrinsics
+    i = int(np.flatnonzero(v)[0])
+    a, b = p.inspect_image(slow, i)[1], p.inspect_image(fast, i)[1]
+    assert a["observations"] == b["observations"] and a["keypoints"] == b["keypoints"]
+    assert abs(a["median_err_px"] - b["median_err_px"]) < 1e-6

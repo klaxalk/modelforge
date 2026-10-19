@@ -7,6 +7,7 @@ frustum convention: wxyz = scalar-first quaternion of R_wc, position = center.
 import json
 import os
 import re
+import struct
 from dataclasses import dataclass, field
 
 import cv2
@@ -131,7 +132,8 @@ class Snapshot:
     reproj_error: np.ndarray = None  # (N,) mean per image [px]
     num_obs: np.ndarray = None  # (N,)
     intrinsics: dict = None  # width, height, params, model
-    rec: object = None  # pycolmap.Reconstruction (None for the priors snapshot)
+    rec: object = None  # pycolmap.Reconstruction (live refine events without a written snapshot)
+    obs: object = None  # Observations (snapshots read from disk): one image's keypoints for Inspect
 
 
 def _snapshot_order(name):
@@ -143,6 +145,98 @@ def _snapshot_order(name):
     if not m:
         return (10 ** 5, 0)
     return (int(m.group(2)) - (100 if m.group(1) == "calib" else 0), 0 if m.group(3) else 1)
+
+
+# ---------------------------------------------------------------- COLMAP binary model, read with numpy
+# pycolmap.Reconstruction + per-keypoint Python loops took 4.5 min for 8000 images (83M keypoints,
+# 8M points); reading the files as arrays takes seconds. Layouts: colmap/scene/reconstruction_io_binary.cc
+POINT2D = np.dtype([("xy", "<f8", 2), ("pid", "<i8")])  # images.bin keypoint; point3D_id uint64, -1 = none
+POINT3D_HEAD = 8 + 24 + 3 + 8 + 8  # id, xyz, rgb, error, track length; then (image_id, point2D_idx) uint32 pairs
+
+
+def read_cameras_bin(path):
+    """cameras.bin -> {camera_id: pycolmap.Camera}."""
+    buf = open(path, "rb").read()
+    cams, off = {}, 8
+    for _ in range(struct.unpack_from("<Q", buf)[0]):
+        cid, model, w, h = struct.unpack_from("<IiQQ", buf, off)
+        off += 24
+        cam = pycolmap.Camera.create_from_model_id(cid, pycolmap.CameraModelId(model), 1.0, w, h)
+        k = len(cam.params)
+        cam.params = np.frombuffer(buf, "<f8", k, off)
+        off += 8 * k
+        cams[cid] = cam
+    return cams
+
+
+def read_images_bin(path):
+    """images.bin -> list of (name, camera_id, R_cw, t_cw, offset of the keypoint block, keypoint count)."""
+    mm = np.memmap(path, np.uint8, mode="r")
+    out, off = [], 8
+    for _ in range(int(mm[:8].view("<u8")[0])):
+        head = mm[off:off + 64].tobytes()
+        q = struct.unpack_from("<4d", head, 4)  # w, x, y, z
+        t = np.array(struct.unpack_from("<3d", head, 36))
+        cam_id = struct.unpack_from("<I", head, 60)[0]
+        off += 64
+        end = off
+        while True:  # the name is null-terminated
+            z = np.flatnonzero(mm[end:end + 256] == 0)
+            if len(z):
+                end += int(z[0])
+                break
+            end += 256
+        name = mm[off:end].tobytes().decode()
+        off = end + 1
+        n = int(mm[off:off + 8].view("<u8")[0])
+        off += 8
+        out.append((name, cam_id, xyzw_to_rot((q[1], q[2], q[3], q[0])), t, off, n))
+        off += n * POINT2D.itemsize
+    return out
+
+
+def read_keypoints(path, offset, n):
+    return np.fromfile(path, POINT2D, n, offset=offset)
+
+
+def read_points3d_bin(path, ids, track_lengths, chunk=200_000):
+    """points3D.bin -> (xyz, rgb) for `ids` (sorted, as COLMAP writes them), whose track lengths come
+    from counting the keypoints in images.bin: that gives every record's offset without a Python loop
+    over millions of points. Raises ValueError if the file does not match."""
+    mm = np.memmap(path, np.uint8, mode="r")
+    if int(mm[:8].view("<u8")[0]) != len(ids):
+        raise ValueError("points3D.bin: point count differs from images.bin")
+    size = POINT3D_HEAD + 8 * track_lengths.astype(np.int64)
+    offs = 8 + np.concatenate([[0], np.cumsum(size[:-1])]).astype(np.int64)
+    if len(ids) and offs[-1] + size[-1] != len(mm):
+        raise ValueError("points3D.bin: size differs from the tracks in images.bin")
+    xyz, rgb = np.empty((len(ids), 3)), np.empty((len(ids), 3), np.uint8)
+    cols = np.arange(35)  # id (8), xyz (24), rgb (3)
+    for k in range(0, len(ids), chunk):
+        raw = mm[offs[k:k + chunk, None] + cols]
+        if not np.array_equal(raw[:, :8].copy().view("<i8")[:, 0], ids[k:k + chunk]):
+            raise ValueError("points3D.bin: point ids differ from images.bin")
+        xyz[k:k + chunk] = raw[:, 8:32].copy().view("<f8")
+        rgb[k:k + chunk] = raw[:, 32:35]
+    return xyz, rgb
+
+
+class Observations:
+    """Where each image's keypoints lie in images.bin, so Inspect reads one image on demand."""
+
+    def __init__(self, path, blocks, ids):
+        self.path, self.blocks, self.ids = path, blocks, ids  # blocks: {name index: (offset, n)}
+
+    def image(self, i):
+        """(xy (n, 2), row in Snapshot.points or -1) of image i's keypoints, or None."""
+        if i not in self.blocks:
+            return None
+        a = read_keypoints(self.path, *self.blocks[i])
+        pid = a["pid"]
+        row = np.searchsorted(self.ids, pid).clip(0, max(len(self.ids) - 1, 0))
+        ok = (pid >= 0) & (len(self.ids) > 0)
+        ok[ok] = self.ids[row[ok]] == pid[ok]
+        return a["xy"], np.where(ok, row, -1)
 
 
 class Project:
@@ -182,8 +276,59 @@ class Project:
     def load_snapshot(self, name):
         if name == "priors":
             return Snapshot("priors", self.prior_cams)
-        rec = pycolmap.Reconstruction(os.path.join(self.path, "sparse", name))
-        return self.snapshot_from_reconstruction(name, rec)
+        try:
+            return self.read_snapshot(name)
+        except (ValueError, OSError, struct.error):  # unexpected layout: the slow, general way
+            rec = pycolmap.Reconstruction(os.path.join(self.path, "sparse", name))
+            return self.snapshot_from_reconstruction(name, rec)
+
+    def read_snapshot(self, name):
+        """A snapshot straight from the binary files (no pycolmap.Reconstruction): the same numbers as
+        snapshot_from_reconstruction, in seconds instead of minutes for thousands of images."""
+        d = os.path.join(self.path, "sparse", name)
+        cameras = read_cameras_bin(os.path.join(d, "cameras.bin"))
+        images = read_images_bin(os.path.join(d, "images.bin"))
+        n = len(self.names)
+        cams = Cameras.empty(n)
+        reproj, nobs = np.full(n, np.nan), np.zeros(n, int)
+        kept, blocks = [], {}
+        for img_name, cam_id, R_cw, t, off, npts in images:
+            pid = read_keypoints(os.path.join(d, "images.bin"), off, npts)
+            seen = pid["pid"] >= 0
+            kept.append((self.index.get(img_name), cam_id, R_cw, t, pid["xy"][seen], pid["pid"][seen]))
+        all_pid = np.concatenate([k[5] for k in kept]) if kept else np.zeros(0, np.int64)
+        ids, lengths = np.unique(all_pid, return_counts=True)
+        xyz, rgb = read_points3d_bin(os.path.join(d, "points3D.bin"), ids, lengths)
+        del all_pid
+        err_rows, err_vals = [], []
+        for (i, cam_id, R_cw, t, xy, pid), (_, _, _, _, off, npts) in zip(kept, images):
+            rows = np.searchsorted(ids, pid)
+            err = np.zeros(0)
+            if len(rows):
+                proj = np.asarray(cameras[cam_id].img_from_cam(xyz[rows] @ R_cw.T + t))
+                err = np.linalg.norm(proj - xy, axis=1)
+                fin = np.isfinite(err)  # points behind the camera project to NaN before filtering
+                rows, err = rows[fin], err[fin]
+                err_rows.append(rows)
+                err_vals.append(err)
+            if i is None:
+                continue
+            cams.R_wc[i] = R_cw.T
+            cams.centers[i] = -R_cw.T @ t
+            nobs[i] = len(pid)
+            if len(err):
+                reproj[i] = float(err.mean())
+            blocks[i] = (off, npts)
+        # per point: mean reprojection error over its track, as Reconstruction.update_point_3d_errors
+        rows = np.concatenate(err_rows) if err_rows else np.zeros(0, np.int64)
+        vals = np.concatenate(err_vals) if err_vals else np.zeros(0)
+        cnt = np.bincount(rows, minlength=len(ids))
+        perr = np.bincount(rows, vals, minlength=len(ids)) / np.maximum(cnt, 1)
+        cam = next(iter(cameras.values()))
+        intr = {"model": cam.model.name, "width": int(cam.width), "height": int(cam.height),
+                "params": [float(v) for v in cam.params]}
+        return Snapshot(name, cams, xyz, rgb, perr, reproj, nobs, intr,
+                        obs=Observations(os.path.join(d, "images.bin"), blocks, ids))
 
     def poses_from_reconstruction(self, rec):
         """Registered poses only (cheap enough to call on every BA iteration)."""
@@ -249,6 +394,8 @@ class Project:
         img = cv2.resize(img, (width, round(h * s)), interpolation=cv2.INTER_AREA)
         stats = {}
         rec = snap.rec
+        if rec is None and snap.obs is not None:
+            return self._inspect_from_files(snap, i, img, s, residual_gain)
         if rec is not None:
             image = rec.find_image_with_name(self.names[i])
             if image is not None and snap.cams.valid[i]:
@@ -273,6 +420,34 @@ class Project:
                     stats = {"observations": len(errs), "keypoints": len(image.points2D),
                              "median_err_px": float(np.median(errs)), "p90_err_px": float(np.percentile(errs, 90))}
         return img, stats
+
+    def _inspect_from_files(self, snap, i, img, s, residual_gain):
+        """inspect_image for a snapshot read from disk (Snapshot.obs instead of a Reconstruction)."""
+        got = snap.obs.image(i) if snap.cams.valid[i] else None
+        if got is None:
+            return img, {}
+        xy, row = got
+        for x, y in xy[row < 0] * s:
+            cv2.circle(img, (int(x), int(y)), 1, (150, 150, 150), -1)
+        seen = row >= 0
+        if not seen.any():
+            return img, {}
+        intr = snap.intrinsics
+        cam = pycolmap.Camera.create_from_model_name(0, intr["model"], 1.0, intr["width"], intr["height"])
+        cam.params = intr["params"]
+        R_cw = snap.cams.R_wc[i].T
+        t = -R_cw @ snap.cams.centers[i]
+        u = np.asarray(cam.img_from_cam(snap.points[row[seen]] @ R_cw.T + t))
+        errs = np.linalg.norm(u - xy[seen], axis=1)
+        for (x, y), (ux, uy) in zip(xy[seen] * s, u * s):
+            end = (int(x + residual_gain * (ux - x)), int(y + residual_gain * (uy - y)))
+            cv2.line(img, (int(x), int(y)), end, (255, 60, 60), 1, cv2.LINE_AA)
+            cv2.circle(img, (int(x), int(y)), 2, (60, 220, 60), -1)
+        errs = errs[np.isfinite(errs)]
+        if not len(errs):
+            return img, {}
+        return img, {"observations": len(errs), "keypoints": len(xy),
+                     "median_err_px": float(np.median(errs)), "p90_err_px": float(np.percentile(errs, 90))}
 
 
 # ---------------------------------------------------------------- dense / splat

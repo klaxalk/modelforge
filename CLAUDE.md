@@ -1044,6 +1044,18 @@ Code layout:
   `sparse/round_N[_tri]`, `refined`) and thumbnails into numpy. Poses are
   world_from_cam, the same convention as viser frustums (OpenCV, wxyz =
   scalar-first quaternion of R_wc).
+  - Snapshots are read straight from COLMAP's binary files with numpy
+    (`Project.read_snapshot`), not through `pycolmap.Reconstruction` and
+    per-keypoint Python loops. kladno_dira (8000 images, 83M keypoints, 8M
+    points): 271 s → 8.4 s. While it loaded under `App.lock`, the state line
+    could not update, so a splat started meanwhile showed "idle".
+    - `points3D.bin` is sorted by id; track lengths are counted from
+      `images.bin`, which gives every record's offset without a loop.
+    - Inspect reads the clicked image's keypoints from `images.bin` on demand
+      (`Observations`), 0.08 s.
+    - Results equal the pycolmap path (`test_read_snapshot_matches_reconstruction`);
+      on an unexpected layout it falls back to pycolmap.
+    - Live refine events read the snapshot the pipeline has just written.
 - `modelforge/gui/projects.py`: the **Projects** tab (first tab), built on
   `modelforge/projects.py`.
   - Lists project folders under the root: any folder with `ingest.json` or
