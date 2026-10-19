@@ -39,7 +39,7 @@ Done:
     Plots / Export / Settings (dark mode);
   - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
     Dense / Splat, history;
-  - a third window with the log and the Hardware tab, floating at the bottom of the 3D view.
+  - two windows floating at the bottom of the 3D view: the log (left) and the Hardware monitor (right).
   - Projects: list, open, create, rename, delete; final vs. intermediate
     results; clean.
   - Videos: a file manager over the shared video library: folders (create,
@@ -1196,7 +1196,7 @@ Code layout:
   - Browser tab title "ModelForge": viser hardcodes `<title>Viser</title>` in
     its built `index.html`, so the Dockerfile patches it (a late layer, so the
     rebuild takes seconds). The panel label is `ViserServer(label=...)`.
-  - **Hardware** tab (bottom window next to Log, `modelforge/gui/hardware.py`, the user asked): live CPU, RAM, GPU
+  - **Hardware** window (bottom, right of the log, `modelforge/gui/hardware.py`, the user asked): live CPU, RAM, GPU
     utilization and GPU memory (bars + numbers + GPU temperature / power), and a 2-minute history plot.
     Sampled at 1 Hz from `/proc/stat`, `/proc/meminfo` (host-wide, also in the container) and
     `nvidia-smi` (no psutil / pynvml in the image). Tests: `tests/test_gui_hardware.py`.
@@ -1222,12 +1222,16 @@ Code layout:
       (same order) when a state changes.
     - The log window starts minimized and History collapsed, as the user
       asked.
-  - The **log** is a third panel (`self.log_panel`), floated at the bottom of
-    the 3D view (`float(x=8, y=-8, width=900, height=260)`; negative y is
+  - The **log** is its own panel (`self.log_panel`), floated at the bottom of
+    the 3D view (`float(x=8, y=-8, width=760, height=260)`; negative y is
     measured from the bottom). viser docks panels only to the left / right
     edges or above / below another panel, so "bottom", as the user asked, is
     a float. It shows the last 200 lines, newest first, because markdown
     cannot auto-scroll.
+    - The Hardware monitor (`self.hw_panel`) floats right of it (x=776,
+      480 px). The user wanted them split side by side; a floating panel
+      cannot be split into columns (only docked ones can), so they are two
+      windows. Both start minimized.
   - **Run full pipeline** (stage `all`) runs SfM → splat → splat mesh with the
     tabs' settings: the dense result is the mesh from the splat, as the user asked
     (2026-10-18). COLMAP's MVS follows only with the Dense tab's "Include in Run full

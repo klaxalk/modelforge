@@ -527,8 +527,8 @@ class App:
             self.g_dark.on_update(lambda _: self.set_dark(self.g_dark.value))
         with gui.add_folder("History", expand_by_default=False):
             self.g_history = gui.add_markdown("_nothing run in this session_")
-        # third window: the log, floating at the bottom of the 3D view (viser docks panels only to
-        # the left / right edges or above / below another panel, so "bottom" is a float)
+        # bottom windows: the log and the hardware monitor, floating at the bottom of the 3D view (viser
+        # docks panels only to the left / right edges or above / below another panel, so "bottom" is a float)
         # quick bar: the View tab's visibility toggles + orbit, floating at the top of the 3D view
         self.quick = gui.add_panel()
         self._quick_tab = self.quick.add_tab("Quick view", viser.Icon.EYE)
@@ -537,16 +537,21 @@ class App:
         with self.log_panel.add_tab("Log", viser.Icon.TERMINAL_2):
             gui.add_markdown(f"_last {LOG_LINES} lines of the running job, newest first_")
             self.g_log = gui.add_markdown("")
-        with self.log_panel.add_tab("Hardware", viser.Icon.CPU):
-            self.hardware = HardwarePanel(self, gui, plot_aspect=0.25)  # the bottom window is wide and low
+        # the hardware monitor is its own window right of the log: a floating panel cannot be split
+        # into columns (viser splits only docked panels), so two windows sit side by side
+        self.hw_panel = gui.add_panel()
+        with self.hw_panel.add_tab("Hardware", viser.Icon.CPU):
+            self.hardware = HardwarePanel(self, gui, plot_aspect=0.3)  # the bottom window is low
         self._place_panels()
 
     def _place_panels(self):
         self.left.dock_left()
         self.left.set_width(420)
         self.server.gui.main_panel.dock_right()
-        self.log_panel.float(x=8, y=-8, width=900, height=260)  # negative y: measured from the bottom
+        self.log_panel.float(x=8, y=-8, width=760, height=260)  # negative y: measured from the bottom
         self.log_panel.minimize()  # folded by default; one click opens it
+        self.hw_panel.float(x=776, y=-8, width=480, height=260)
+        self.hw_panel.minimize()
         # one row: viser gives every button of a group the same width and wraps when they do not fit (the
         # 7th, Fly, wrapped at 470 px and was stretched across a row of its own); ~78 px per button
         self.quick.float(x=8, y=8, width=24 + 78 * len(self._quick_items()), height=96)
