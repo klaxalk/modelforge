@@ -5,6 +5,7 @@ across gaps."""
 
 import json
 import os
+import re
 import shutil
 import time
 
@@ -184,5 +185,36 @@ def test_chunked_refine_from_gui(tmp_path):
         assert r["final"]["point_error_px"]["median"] < 1.0
         names = app.project.snapshot_names()
         assert names.index("calib_1") < names.index("posegraph") < names.index("refined")
+    finally:
+        app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "database.db")),
+                    reason="needs a matched project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
+def test_refine_shows_iterations_of_the_cap(tmp_path):
+    """The state line shows "iteration k / cap" during BA, each round's final count ("BA k / cap iterations
+    (SETTLED)"), and the History line lists every round's iterations."""
+    from modelforge.gui.app import App
+    from tests.test_gui_dense import free_port
+    p = str(tmp_path)
+    for name in ("poses.json", "images", "database.db"):
+        os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(p, name))
+    for name in ("ingest.json", "camera.json"):
+        if os.path.exists(os.path.join(REAL, name)):
+            shutil.copyfile(os.path.join(REAL, name), os.path.join(p, name))
+    app = App(p, port=free_port())
+    try:
+        app.g_ba_mode.value = "global"
+        app.g_ba_iters.value = 300
+        app.run_stage("refine")
+        seen, t0 = set(), time.time()
+        while app.running and time.time() - t0 < 900:
+            seen.add(app._job.get("detail", ""))
+            time.sleep(0.05)
+        assert "finished" in app.g_state.content, app.g_state.content
+        assert any(re.search(r"iteration \d+ / 300", d) for d in seen), seen
+        assert any(re.search(r"BA \d+ / 300 iterations \((SETTLED|CONVERGENCE|NO_CONVERGENCE)\)", d)
+                   for d in seen), seen
+        assert re.search(r"BA iterations \d+, \d+, \d+ / 300", app.g_history.content), app.g_history.content
     finally:
         app.server.stop()

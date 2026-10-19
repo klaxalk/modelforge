@@ -841,6 +841,10 @@ Known limitations:
     Untested on the full 300-image clip.
   - `prior_ba(settle=None)` runs to Ceres' convergence. The report's
     termination says `SETTLED`.
+  - The GUI shows BA progress against the cap: "iteration 120 / 500" live, "BA 120 / 500 iterations
+    (SETTLED)" when a round ends (the `round_done` event carries `ba` and `max_iterations`; also in the
+    log line), and the refine History line lists every round ("BA iterations 93, 22, 20 / 500"). The
+    user asked. Test: `test_local_ba.py::test_refine_shows_iterations_of_the_cap`.
 - **BA iteration cap and Skip** (Sparse tab, `stage_refine(max_iterations=,
   skip=)`, CLI `--ba-iterations`):
   - The cap applies per round; the default is 500, a backstop only.

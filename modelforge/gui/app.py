@@ -1700,6 +1700,11 @@ class App:
                             "between the images (Images used: keep more of them?); dense and splat need points")
                 e, d = f["point_error_px"], f["prior_deviation"]["position_m"]
                 mode = " (chunked)" if r.get("ba", {}).get("mode") == "chunked" else ""
+                its = [v["ba"]["iterations"] for k, v in sorted(r.items(), key=lambda kv: kv[0])
+                       if k.startswith("round_") and isinstance(v, dict) and "ba" in v]
+                cap = r.get("ba", {}).get("max_iterations")
+                if its and cap:
+                    mode += f" · BA iterations {', '.join(map(str, its))} / {cap}"
                 return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "
                         f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']}){mode}")
             if st == "reconstruct":
@@ -1762,11 +1767,18 @@ class App:
                 return
             self._last_live = now
             win = f"window {ev['window'] + 1}/{ev['windows']}, " if ev.get("windows") else ""
-            self._job["detail"] = f"{step}: bundle adjustment {win}iteration {ev['iteration']}, cost {ev['cost']:.4g}"
+            cap = int(self.g_ba_iters.value)
+            self._job["detail"] = (f"{step}: bundle adjustment {win}iteration {ev['iteration']}"
+                                   + (f" / {cap}" if cap else "") + f", cost {ev['cost']:.4g}")
             if stage == "polish" and ev.get("windows"):
                 self.g_progress.value = 88.0 + 10.0 * (ev["window"] + 1) / ev["windows"]
             self._update_cameras_live(ev["rec"])
         elif phase in ("round_done", "done"):
+            if ev.get("ba"):  # the round's final iteration count, e.g. 120 / 500 (SETTLED)
+                ba = ev["ba"]
+                msg = f"{step}: BA {ba['iterations']} / {ev.get('max_iterations')} iterations ({ba['termination']})"
+                self._job["detail"] = msg
+                self._on_log(msg)
             with self.lock:
                 name = ev.get("name", f"round_{rnd}") if phase == "round_done" else "refined"
                 # the pipeline writes the snapshot before the event: reading the files is much faster

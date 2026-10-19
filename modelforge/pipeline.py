@@ -229,7 +229,8 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
                                     "prior_model": calib, "source_offsets": offsets,
                                     "seconds": round(time.time() - t0, 1)}
         log(f"{ctx['name']} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, median "
-            f"{tri['point_error_px'].get('median')}px -> BA {ba['iterations']} it ({ba['termination']}, {ba['seconds']} s), "
+            f"{tri['point_error_px'].get('median')}px -> BA {ba['iterations']}/{max_iterations} it ({ba['termination']}, "
+            f"{ba['seconds']} s), "
             f"median {ev['point_error_px'].get('median')}px, prior dev pos {ev['prior_deviation']['position_m']} "
             f"rot {ev['prior_deviation']['rotation_deg']}, focal {ev['camera']['params'][0]}")
         if offsets:
@@ -240,7 +241,7 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
                 f"B {m['boresight_norm_deg']} deg, dt {m['dt_ms']} ms | rejected abs {calib['abs_rejected']} "
                 f"rel {calib['rel_rejected']} | d2 median abs {calib['abs_d2_median']} rel {calib['rel_d2_median']}")
         if write:
-            emit({"phase": "round_done", **ctx, "rec": rec, "eval": ev})
+            emit({"phase": "round_done", **ctx, "rec": rec, "eval": ev, "ba": ba, "max_iterations": max_iterations})
     return rec, last, results
 
 
