@@ -94,12 +94,17 @@ def test_gui_switches_projects(tmp_path):
         app.projects.g_list.value = "real"
         app.projects.open_selected()
         assert app.project is not None and app.snap.name == "refined"
+        assert app.g_points.value and app.g_cams.value  # no splat / mesh: the sparse model is shown
         n = len(os.listdir(os.path.join(REAL, "images")))
         assert len(app.cam_handles) == len(app.project.names) == n
         assert f"{n} images" in app.g_header.content
 
+        import numpy as np
+        app.ingest.g_pv_image.image = np.full((36, 64, 3), 200, np.uint8)  # a frame of the old project
+        gen = app.ingest._pv_gen
         app.open_project(os.path.join(root, "fresh"))
         assert app.project is None and not app.cam_handles and "no images yet" in app.g_header.content
+        assert app.ingest._pv_gen > gen and not np.asarray(app.ingest.g_pv_image.image).any()  # preview cleared
         assert app.ingest.path.endswith("fresh") and app.ingest.sources == []
 
         app.running = True  # a running job blocks switching

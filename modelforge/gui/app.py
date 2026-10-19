@@ -157,6 +157,7 @@ class App:
             names = self.project.snapshot_names()
             self.load_snapshot("refined" if "refined" in names else names[-1])
         self._refresh_dense()
+        self._auto_show_sparse()
         self.server.on_client_connect(self._on_connect)
         threading.Thread(target=self._watch_uploads, daemon=True).start()
 
@@ -256,6 +257,10 @@ class App:
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
+            gui.add_button("Center the view", icon=viser.Icon.FOCUS_CENTERED,
+                           hint="Look at the whole scene (cameras and sparse points) from the south, above it. Use it "
+                                "when the view has wandered off. Also in the quick bar (⌖ Center).").on_click(
+                lambda e: self.recenter(e.client))
             with gui.add_folder("Orbit"):
                 self.g_orbit = gui.add_button(
                     "Start orbit", icon=viser.Icon.ROTATE_360,
@@ -293,7 +298,7 @@ class App:
                 self.g_fly_md = gui.add_markdown("")
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
-            for h in (self.g_points, self.g_cams, self.g_thumbs, self.g_corr):
+            for h in (self.g_points, self.g_cams, self.g_thumbs, self.g_corr, self.g_traj):
                 h.on_update(lambda _: self._sync_quickbar())
             for h in (self.g_cams, self.g_thumbs, self.g_priors, self.g_scale):
                 h.on_update(lambda _: self._draw_cameras())
@@ -756,21 +761,63 @@ class App:
             self.g_snapshot.options = names
             self.load_snapshot("refined" if "refined" in names else names[-1])
         self._refresh_dense()
+        self._auto_show_sparse()
+
+    def _auto_show_sparse(self, max_cameras=2000):
+        """Points and Cameras start off (thousands of frustums hide a splat); a project with nothing else to
+        show (no splat, mesh or dense points, e.g. right after SfM) gets them on, cameras up to max_cameras."""
+        d = self.dense
+        if self.project is None or d["splat"] is not None or d["meshes"] or d["fused"] is not None:
+            return
+        self.g_points.value = True
+        if len(self.project.names) <= max_cameras:
+            self.g_cams.value = True
 
     def _on_connect(self, client):
+        self.recenter(client)
+
+    def _view_frame(self):
+        """(centre, extent) of what there is to see: the cameras (or the Ingest flight plan) and the sparse
+        points, over their 2-98 % range so stray far points do not count; None without anything."""
         if self.project is None:
             prev = self.ingest.prev
             if not prev:
-                return
-            centers = np.concatenate([x["track"] for x in prev["sources"]])
+                return None
+            pts = np.concatenate([x["track"] for x in prev["sources"]])
         else:
             c = self.snap.cams if self.snap else self.project.prior_cams
-            centers = c.centers[c.valid]
-        mid = centers.mean(0)
-        extent = float(np.linalg.norm(centers.max(0) - centers.min(0)))
-        client.camera.up_direction = (0.0, 0.0, 1.0)
-        client.camera.position = tuple(mid + np.array([0.0, -0.6, 0.5]) * extent)
-        client.camera.look_at = tuple(mid)
+            pts = c.centers[c.valid]
+            if self.snap is not None and len(self.snap.points):
+                p = self.snap.points
+                p = p[np.random.default_rng(0).choice(len(p), min(len(p), 20000), replace=False)]
+                pts = np.concatenate([pts, p]) if len(pts) else p
+        pts = pts[np.all(np.isfinite(pts), axis=1)] if len(pts) else pts
+        if not len(pts):
+            return None
+        lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
+        return (lo + hi) / 2, max(float(np.linalg.norm(hi - lo)), 1e-3)
+
+    def recenter(self, client=None):
+        """Center button (and on connect / project switch): look at the scene from the south, above it,
+        far enough to see all of it. client None = every browser. Stops that browser's orbit / flight."""
+        frame = self._view_frame()
+        if frame is None:
+            return
+        mid, extent = frame
+        clients = [client] if client is not None else list(self.server.get_clients().values())
+        for c in clients:
+            self._stop_fly(c)
+            stop = self._orbits.pop(c.client_id, None)
+            if stop is not None:
+                stop.set()
+            try:
+                with c.atomic():
+                    c.camera.up_direction = (0.0, 0.0, 1.0)
+                    c.camera.position = tuple(mid + np.array([0.0, -0.6, 0.5]) * extent)
+                    c.camera.look_at = tuple(mid)
+            except Exception:  # the browser went away
+                pass
+        self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
 
     # ------------------------------------------------------------- loading
     def load_snapshot(self, name):
@@ -1093,6 +1140,8 @@ class App:
             if stage in ("dense", "splat", "splatmesh", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
+            if stage in ("refine", "reconstruct", "sfm"):
+                self._auto_show_sparse()  # nothing else to look at yet
             self._refresh_splat_plan()  # new cameras: new suggestion
             final = (f"✅ **{stage} finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}  \n"
                      f"{NEXT_STEP.get(stage, '')}")
@@ -1174,15 +1223,17 @@ class App:
                 ("Cameras", self.project is not None, self.g_cams.value),
                 ("Thumbs", self.project is not None and self.g_cams.value, self.g_thumbs.value),
                 ("Residuals", self.project is not None, self.g_corr.value),  # View: Prior → refined
+                ("Trajectory", self.project is not None, self.g_traj.value),  # View: camera / prior paths
                 ("Dense", d["fused"] is not None, self.g_dense_pts.value),
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
                 ("Orbit", True, bool(self._orbits)),
+                ("Center", True, False),
                 ("Fly", self.project is not None, bool(self._flights)))
 
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
         ● on, ○ off, · nothing to show yet."""
-        labels = tuple(f"{'●' if on and avail else '○' if avail else '·'} {name}"
+        labels = tuple(f"⌖ {name}" if name == "Center" else f"{'●' if on and avail else '○' if avail else '·'} {name}"
                        for name, avail, on in self._quick_items())
         if labels == self._quick_labels:
             return
@@ -1193,9 +1244,9 @@ class App:
             g = self.server.gui.add_button_group(
                 "", options=labels, order=1.0,
                 hint="Show / hide the splat, the mesh, the sparse points, the cameras, their thumbnails (with "
-                     "the cameras on), the residuals (red prior → refined segments), the dense points and the Ingest flight plan (tracks + planned image dots); "
-                     "start / stop the orbit, or fly the camera path (● on, ○ off, · nothing yet). Same as the "
-                     "View tab.")
+                     "the cameras on), the residuals (red prior → refined segments), the trajectories, the dense points and the Ingest flight plan (tracks + planned image dots); "
+                     "start / stop the orbit, center the view on the scene, or fly the camera path (● on, ○ off, "
+                     "· nothing yet). Same as the View tab.")
         g.on_click(lambda e: self._quick_click(e.target.value.split(" ", 1)[1], e.client))
         self._quick_group = g
 
@@ -1220,6 +1271,8 @@ class App:
             self.g_thumbs.value = not self.g_thumbs.value
         elif name == "Residuals":
             self.g_corr.value = not self.g_corr.value
+        elif name == "Trajectory":
+            self.g_traj.value = not self.g_traj.value
         elif name == "Dense":
             self.g_dense_pts.value = not self.g_dense_pts.value
         elif name == "Plan":
@@ -1228,6 +1281,8 @@ class App:
             self.toggle_orbit(client)
         elif name == "Fly":
             self.toggle_fly(client)
+        elif name == "Center":
+            self.recenter(client)
         self._sync_quickbar()
 
     def _set_plan_visible(self, on):

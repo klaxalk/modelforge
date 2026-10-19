@@ -1326,7 +1326,9 @@ Code layout:
   - **Sampling**: N over all sources, spacing, rotation credit, window, yaw
     source. The plan summary and warnings update live, and every edit saves
     `ingest.json`.
-  - **Frame preview**: source + time slider. It shows the video frame
+  - **Frame preview**: source + time slider. A project switch clears it, and an added source is
+    selected and shows its first frame once decoded (a preview generation counter: an identical
+    source label + time in the new project used to be skipped as already shown). It shows the video frame
     (ffmpeg accurate seek), the aligned telemetry and a white frustum in 3D.
     "Start here" / "End here" set the range.
   - **3D**: each source's track, bright in its colour inside the range and
@@ -1360,7 +1362,13 @@ Code layout:
     - It is one button-group row: ● / ○ / · Splat, Mesh, Points (sparse),
       Cameras, Thumbs (camera thumbnails; available while Cameras is on),
       Residuals (View "Prior → refined": the red prior → refined segments),
-      Dense (fused points), Plan, Orbit, Fly.
+      Trajectory (View "Trajectories"), Dense (fused points), Plan, Orbit, ⌖ Center, Fly.
+    - **⌖ Center** (also View tab "Center the view"; `App.recenter`): looks at the cameras + sparse
+      points (2–98 % range, so stray far points don't count) from the south, above them. The same
+      framing runs when a browser connects and on a project switch. The user lost the scene of a
+      video-kind project (arbitrary frame and scale) and asked for it.
+    - A project with nothing else to show (no splat, mesh or dense points, e.g. right after SfM)
+      opens with Points and Cameras (≤ 2000) on (`_auto_show_sparse`).
     - Points, Cameras, Thumbs and Prior cameras start off (the user asked):
       with thousands of cameras the frustums hide the splat / mesh.
     - **Plan** is the Ingest flight plan (each source's track plus dots at the

@@ -55,6 +55,7 @@ class IngestPanel:
         self._lock = threading.RLock()  # source widgets: GUI callbacks vs. the planner thread
         self._dirty = threading.Event()
         self._preview_req = None
+        self._pv_gen, self._pv_fresh = 0, True  # preview generation (a new project / source redraws); start at the source's start
         self._preview_lock = threading.Lock()
         self._source_handles = []
         self._build()
@@ -102,6 +103,7 @@ class IngestPanel:
                 self._loading = False
             self._rebuild_sources_locked()
         self.server.scene.remove_by_name("/ingest")
+        self._clear_preview()
         self.g_status.content = ""
         self.g_plan_md.content = ""
         self.g_plot.figure = go.Figure()
@@ -292,6 +294,8 @@ class IngestPanel:
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
         self._rebuild_sources()
+        self._clear_preview()
+        self.g_pv_source.value = self.g_pv_source.options[-1]  # its first frame, once decoded
         self.request_plan()
 
     def _rebuild_sources(self):
@@ -336,6 +340,17 @@ class IngestPanel:
             "range; add the same video again (\"Add piece\") to take several pieces."
         self.g_pv_source.options = tuple(f"{k + 1}. {os.path.basename(s.video)}" for k, s in enumerate(self.sources)) \
             or ("-",)
+        if self.g_pv_source.value not in self.g_pv_source.options:  # the previewed source is gone
+            self._clear_preview()
+            self.g_pv_source.value = self.g_pv_source.options[0]
+
+    def _clear_preview(self):
+        """Empty Frame preview (another project or source): the next preview starts at the source's start."""
+        self._pv_gen += 1
+        self._pv_fresh = True
+        self.g_pv_image.image = np.zeros((36, 64, 3), np.uint8)
+        self.g_pv_md.content = ""
+        self.server.scene.remove_by_name("/ingest/cursor")
 
     def _source_action(self, k, action):
         if action == "Remove":
@@ -676,8 +691,9 @@ class IngestPanel:
         c = self._load_clip(s)
         t = self.g_pv_time.value
         self.g_pv_time.max = round(c.duration, 1)
-        if not keep_time or t > c.duration:
+        if not keep_time or t > c.duration or self._pv_fresh:
             self.g_pv_time.value = float(min(max(s.start, 0.0), c.duration))
+        self._pv_fresh = False
         self.request_preview()
 
     def request_preview(self):
@@ -685,7 +701,7 @@ class IngestPanel:
         if k is None or k >= len(self.sources):
             return
         with self._preview_lock:
-            self._preview_req = (k, float(self.g_pv_time.value))
+            self._preview_req = (self._pv_gen, k, float(self.g_pv_time.value))
 
     def _previewer(self):
         last = None
@@ -697,7 +713,7 @@ class IngestPanel:
                 continue
             last = req
             try:
-                self._show_preview(*req)
+                self._show_preview(*req[1:])
             except Exception as e:
                 traceback.print_exc()
                 self.g_pv_md.content = f"preview failed: `{e}`"
