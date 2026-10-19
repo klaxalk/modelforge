@@ -170,3 +170,21 @@ def test_settle_rule():
     assert cb.settled and still >= 4  # not before 0.5 mm of creep has left the window
     cb = refine._Progress(None, poses, (), None)  # settle=None never stops early
     assert all(cb(Summary()) == go for _ in range(30))
+
+
+def test_skip_round_ends_only_the_running_ba():
+    """Skip this BA round: the running solve ends at once with its current state (SKIPPED_ROUND), the event
+    is cleared, and the next solve runs as usual."""
+    import threading
+    rng = np.random.default_rng(0)
+    rec, gt = make_scene()
+    priors = make_priors(gt, rng, pos_sigma=0.3, rot_sigma_deg=1.0)
+    set_poses(rec, priors)  # start away from the truth: BA has work to do
+    model = robust.PriorModel(PriorSigmas())
+    ev = threading.Event()
+    seen = []
+    ba = refine.prior_ba(rec, priors, model, refine_intrinsics=False, skip_round=ev, settle=None,
+                         on_iteration=lambda s: (seen.append(s.iteration), ev.set() if s.iteration == 2 else None))
+    assert ba["termination"] == "SKIPPED_ROUND" and ba["iterations"] <= 4 and not ev.is_set()
+    ba2 = refine.prior_ba(rec, priors, model, refine_intrinsics=False, skip_round=ev)
+    assert ba2["termination"] != "SKIPPED_ROUND" and ba2["iterations"] > 1  # the next round is untouched

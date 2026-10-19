@@ -204,7 +204,7 @@ BA_MODES = ("auto", "global", "chunked")
 
 
 def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iterations, skip, refine_intrinsics,
-            write=True, ctx_extra=None):
+            write=True, ctx_extra=None, skip_round=None):
     """Refinement rounds [(i, Round)]: triangulate (poses fixed) -> global prior BA -> source offsets ->
     prior-model calibration. Writes sparse/<prefix>_i[_tri] (write=False: a scratch triangulation
     folder, no snapshots, and no "round_done" events: a chunk). Returns (rec, the last Round that
@@ -229,6 +229,7 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
         live = rec
         ba = refine.prior_ba(rec, corrected, model, refine_intrinsics=refine_intrinsics, loss_scale_px=rnd.loss_scale_px,
                              relative=i >= model.start_round, token=token, max_iterations=max_iterations, skip=skip,
+                             skip_round=skip_round,
                              on_iteration=lambda s: emit({"phase": "ba", **ctx, "rec": live, "iteration": s.iteration,
                                                           "cost": s.cost}))
         jobs.check(token)  # an aborted BA leaves no round_N
@@ -263,7 +264,7 @@ def _pose(rec, image_id):
     return np.array(rec.frame(rec.image(image_id).frame_id).rig_from_world.params)
 
 
-def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_iterations, skip):
+def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_iterations, skip, skip_round=None):
     """Chunked refinement (modelforge.sfm.chunked): every chunk through `rounds` on its own (its images
     and matches only, intrinsics fixed), a pose graph over all cameras, then a triangulation of all
     images and a polish sweep of windows. rec (all images registered) gets the poses. Returns
@@ -287,7 +288,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             crec.camera(cid).params = p
         m = robust.copy_model(model)
         crec, _, cres = _rounds(project, crec, pri, m, rounds, "chunk", emit, token, max_iterations, skip, False,
-                                write=False, ctx_extra={"chunk": k, "chunks": len(parts)})
+                                write=False, ctx_extra={"chunk": k, "chunks": len(parts)}, skip_round=skip_round)
         seen = {crec.image(i).name: _pose(crec, i) for i in crec.reg_image_ids()
                 if crec.image(i).num_points3D >= cfg.min_points}  # a camera without points sits at its prior
         edges += chunked.chunk_edges(cfg, [n for n in names if n in seen], seen)
@@ -335,6 +336,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
         model.abs_rejected = rejected
         ba = refine.local_ba(rec, corrected, model, local, on_window=on_window, global_pass=False, token=token,
                              skip=skip, loss_scale_px=rnd.loss_scale_px, max_iterations=max_iterations,
+                             skip_round=skip_round,
                              on_iteration=lambda s: emit({"phase": "ba", "round": 0, "rounds": 1, "stage": "polish",
                                                           "rec": live, **win, "iteration": s.iteration, "cost": s.cost}))
         jobs.check(token)
@@ -350,7 +352,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
 
 
 def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
-                 max_iterations=500, skip=None, ba_mode="auto", chunks=None):
+                 max_iterations=500, skip=None, ba_mode="auto", chunks=None, skip_round=None):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done", and in a
     chunked refine also "chunk_done" | "posegraph"; "ba" events carry the live Reconstruction (poses
     are updated every iteration). Events carry "stage" ("calib" | "round" | "chunk" | "polish"),
@@ -361,6 +363,8 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     triangulated).
     skip (threading.Event): ends the running BA where it is and skips the remaining rounds; the
     final triangulation and outputs still follow, so the pipeline continues.
+    skip_round (threading.Event): ends the running BA where it is (termination SKIPPED_ROUND) and is
+    cleared; the next round (chunk, polish window) runs as usual.
 
     ba_mode: "global" = one BA over all images per round; "chunked" = modelforge.sfm.chunked (chunks
     on their own, a pose graph, a polish sweep); "auto" = chunked from chunks.min_images images on.
@@ -390,7 +394,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         crec = refine.init_from_database(db_path, pri, names=subset)
         # rounds 0-1: round 0 converges the focal length, round 1 the prior model at a tight threshold
         crec, clast, cres = _rounds(project, crec, pri, model, main[:2], "calib", emit, token, max_iterations, skip,
-                                    free_intrinsics)
+                                    free_intrinsics, skip_round=skip_round)
         results.update(cres)
         if clast is not None:
             last = clast
@@ -399,10 +403,10 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         del crec
         if not (skip is not None and skip.is_set()):
             rec, last, results["chunked"] = _refine_chunks(project, rec, pri, model, main[1:], cfg, emit, token,
-                                                           max_iterations, skip)
+                                                           max_iterations, skip, skip_round)
     else:
         rec, mlast, rres = _rounds(project, rec, pri, model, main, "round", emit, token, max_iterations, skip,
-                                   free_intrinsics)
+                                   free_intrinsics, skip_round=skip_round)
         results.update(rres)
         last = mlast or last
     if max_iterations == 0:

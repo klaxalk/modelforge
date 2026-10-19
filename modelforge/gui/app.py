@@ -358,6 +358,12 @@ class App:
                 hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
                      "(final triangulation, then export / splat / dense in the full pipeline).")
             self.g_skip.on_click(lambda _: self.skip_refine())
+            self.g_skip_round = gui.add_button(
+                "Skip this BA round", icon=viser.Icon.PLAYER_TRACK_NEXT, disabled=True,
+                hint="While refine runs: end the current bundle adjustment where it is (e.g. when the cameras no "
+                     "longer move in the 3D view) and go on with the next round as usual. In a chunked refine it "
+                     "ends the current chunk round or polish window. Can be pressed again in later rounds.")
+            self.g_skip_round.on_click(lambda _: self.skip_ba_round())
             with gui.add_folder("Features", expand_by_default=False):
                 self.g_extractor = gui.add_dropdown(
                     "Extractor", options=tuple(features.EXTRACTORS), initial_value="sift",
@@ -665,7 +671,7 @@ class App:
         video = self._sparse_kind() == "video"
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
-        self.g_ba_iters.visible = self.g_skip.visible = not video
+        self.g_ba_iters.visible = self.g_skip.visible = self.g_skip_round.visible = not video
         for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish):
             g.visible = not video
         self.g_mapper.visible = video
@@ -1127,17 +1133,18 @@ class App:
                                          int(self.g_min_inliers.value), token=self._token,
                                          progress=lambda k, n: self._on_count_progress("match", "pair", k, n))
                 elif st == "refine":
-                    self._skip = threading.Event()
-                    self.g_skip.disabled = False
+                    self._skip, self._skip_round = threading.Event(), threading.Event()
+                    self.g_skip.disabled = self.g_skip_round.disabled = False
                     try:
                         pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token,
                                               max_iterations=int(self.g_ba_iters.value), skip=self._skip,
+                                              skip_round=self._skip_round,
                                               ba_mode=self.g_ba_mode.value,
                                               chunks=chunked.Chunked(size=int(self.g_chunk_size.value),
                                                                      overlap=int(self.g_chunk_overlap.value),
                                                                      polish_sweeps=int(self.g_polish.value)))
                     finally:
-                        self.g_skip.disabled = True
+                        self.g_skip.disabled = self.g_skip_round.disabled = True
                 elif st == "export":
                     pipeline.stage_export(project, report)
                 elif st == "analyze":
@@ -1528,6 +1535,14 @@ class App:
                 if not stop.is_set():
                     self.g_fly_md.content = "flight finished" + (" (loop is off)" if not self.g_fly_loop.value else "")
             self._sync_quickbar()
+
+    def skip_ba_round(self):
+        """Skip-round button: end the running BA where it is; the next round runs as usual."""
+        ev = getattr(self, "_skip_round", None)
+        if ev is not None and self.running:
+            ev.set()
+            self._job["detail"] = "ending this bundle adjustment round, then on to the next"
+            self._on_log("--- skip of the current BA round requested")
 
     def skip_refine(self):
         """Skip button: end the running BA where it is and continue after refine."""

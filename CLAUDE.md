@@ -878,6 +878,10 @@ Known limitations:
   - Ceres reports iteration 0 before any step, so a skip that early keeps
     the priors exactly.
   - Unlike Stop, Skip is not a failure and writes `sparse/refined`.
+  - **Skip this BA round** (the user asked: the cameras visibly stop moving before BA ends): ends only
+    the running BA with its current state (termination `SKIPPED_ROUND`, `skip_round` event in
+    `refine._Progress` / `prior_ba`, cleared after the solve); the next round, chunk round or polish
+    window runs as usual. Test: `test_m3_robust.py::test_skip_round_ends_only_the_running_ba`.
 - **Large projects: chunked refinement** (the user asked, 2026-10-18: the 4000-image Mavic 4
   project `kladno_dira` ran > 30 min in round 0's BA alone, and it must work for 10k+ images).
   Sparse tab "BA mode" (auto / global / chunked), "Chunk size", "Chunk overlap", "Polish sweeps";
