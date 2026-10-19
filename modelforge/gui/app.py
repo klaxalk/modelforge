@@ -1675,8 +1675,7 @@ class App:
         self._history_lines = h[-30:]
         self.g_history.content = "  \n".join(reversed(self._history_lines))
 
-    @staticmethod
-    def _stage_summary(st, rep):
+    def _stage_summary(self, st, rep):
         r = rep.get(st, {}) if st in SFM_BUTTONS else rep.get("dense", {}).get(st, {})
         try:
             if st == "features":
@@ -1689,6 +1688,14 @@ class App:
             if st == "refine":
                 f = r["final"]
                 if f["points3D"] < 100:  # nothing for dense / splat to start from
+                    inliers = rep.get("match", {}).get("inlier_matches", 0)
+                    if inliers >= 200 * max(f["reg_images"], 1):  # the images match well: the priors are wrong
+                        hint = ("for a ROS 2 bag check Camera frame / **Extrinsic RPY** (e.g. yaw 180: the image's "
+                                "top the other way)" if self._kind() == "rosbag" else
+                                "check the yaw source and the telemetry lead (Ingest tab)")
+                        return (f"⚠️ {f['reg_images']} cameras, **{f['points3D']} 3D points** although the images "
+                                f"match well ({inliers:,} inlier matches): the pose priors do not fit the images, "
+                                f"e.g. a camera orientation off by a fixed rotation; {hint}")
                     return (f"⚠️ {f['reg_images']} cameras but only **{f['points3D']} 3D points**: too little overlap "
                             "between the images (Images used: keep more of them?); dense and splat need points")
                 e, d = f["point_error_px"], f["prior_deviation"]["position_m"]

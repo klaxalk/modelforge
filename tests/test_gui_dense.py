@@ -108,6 +108,15 @@ def test_features_progress_in_the_state_line(app):
     assert details and details[-1].startswith(f"image {n:,} / {n:,}") and "`" in details[-1]
 
 
+def test_refine_summary_tells_wrong_priors_from_little_overlap(app):
+    """0 points with plenty of inlier matches = priors that don't fit the images (franta: a camera mount off
+    by yaw 180); with few matches it is too little overlap."""
+    final = {"reg_images": 200, "points3D": 0}
+    wrong = app._stage_summary("refine", {"refine": {"final": final}, "match": {"inlier_matches": 4_554_039}})
+    sparse = app._stage_summary("refine", {"refine": {"final": final}, "match": {"inlier_matches": 1074}})
+    assert "do not fit the images" in wrong and "too little overlap" in sparse
+
+
 def test_tab_defaults(app):
     assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)

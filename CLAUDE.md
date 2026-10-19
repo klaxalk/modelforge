@@ -529,7 +529,13 @@ and the splat.
     Rz(yaw) Ry(pitch) Rx(roll) · FORWARD_OPTICAL (extrinsic, about the frame's fixed axes; 0, 0, 0 =
     looking forward, image top up; 0, 90, 0 = straight down, image top to the front).
   - On franta with Camera frame `uav64/fcu`: without RPY the optical axis pointed straight up
-    (median z +1.00), with 0, 90, 0 straight down (−1.00), 2216/2216 poses.
+    (median z +1.00), with 0, 90, 0 straight down (−1.00), 2216/2216 poses. But 0, 90, 0 gave SfM
+    **0 points** (focal drifted to 8390 px, k2 −3.7) despite 4.5M inlier matches: the image's top
+    points to the back on that drone. **0, 90, 180** (found by the user) works. A wrong mount by a
+    multiple of 90° shows exactly like that: great matches, no triangulated points, a runaway camera.
+    The refine History line now says so: < 100 points with ≥ 200 inlier matches per camera → "the pose
+    priors do not fit the images" (ROS 2 bag: check Camera frame / Extrinsic RPY, e.g. yaw 180; DJI:
+    yaw source / lead); fewer matches → "too little overlap" as before.
   - The Ingest tab warns when the images' frame is not in TF.
   - Extraction streams: `_sharpest` yields a window's sharpest frame as soon as decoding passes the
     window's end. Before, it decoded every window first and held all best frames (franta: 200 × 12 MP
