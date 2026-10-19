@@ -423,8 +423,8 @@ class App:
                 hint="On: images stay on disk and are streamed by worker processes, so large datasets fit in "
                      "memory. Off: all images are preloaded into GPU memory (nerfstudio's default; it falls back "
                      "to CPU memory above 500 images), a little faster for small projects.")
-            self.g_splat_down = gui.add_number(
-                "Downsample factor", initial_value=1, min=1, max=16, step=1,
+            self.g_splat_down = gui.add_dropdown(
+                "Downsample factor", options=tuple(str(f) for f in splat.DOWNSCALES), initial_value="1",
                 hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
                      "less detail. The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
             self.g_splat_lidar = gui.add_checkbox(

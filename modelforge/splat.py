@@ -96,6 +96,9 @@ def has_lidar(project):
     return os.path.exists(path) and "lidar_ply_file_path" in json.load(open(path))
 
 
+DOWNSCALES = (1, 2, 4, 8)  # image downsample factors offered (GUI, CLI)
+
+
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
@@ -288,7 +291,8 @@ def main():
     ap.add_argument("--iterations", type=int, help=f"training steps (default {DEFAULT_ITERATIONS})")
     ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
                     help="where training images are kept (default disk: low memory, for large datasets)")
-    ap.add_argument("--downscale", type=int, default=1, help="train on images downscaled by this factor (default 1)")
+    ap.add_argument("--downscale", type=int, default=1, choices=DOWNSCALES,
+                    help="train on images downscaled by this factor (default 1)")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()

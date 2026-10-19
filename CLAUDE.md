@@ -889,7 +889,7 @@ Why PatchMatch was slow:
 inside the CUDA dev container, where nerfstudio sits in its own venv at
 `/opt/nerfstudio`:
 - GUI: Splat tab → method, iterations, **Cache images on disk** (default on),
-  **Downsample factor** (default 1), then **Train + export splat**. The
+  **Downsample factor** (1 / 2 / 4 / 8, default 1), then **Train + export splat**. The
   progress bar shows the training step, there is a Stop button, and the
   result is reloaded into the View tab.
 - Shell: `scripts/splat PROJECT [--method splatfacto-big] [--iterations N] [--cache disk|cpu|gpu] [--downscale N] [ns-train args]`.
