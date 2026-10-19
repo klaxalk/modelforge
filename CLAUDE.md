@@ -890,7 +890,7 @@ Why PatchMatch was slow:
 inside the CUDA dev container, where nerfstudio sits in its own venv at
 `/opt/nerfstudio`:
 - GUI: Splat tab → method, iterations (0 = auto), **Cache images on disk** (default on),
-  **Downsample factor** (auto / 1 / 2 / 4 / 8), **Densification** (auto / default / mcmc),
+  **Downsample factor** (1 / 2 / 4 / 8, default 1), **Densification** (auto / default / mcmc),
   **Max gaussians** (0 = auto), **Camera pose refinement** (auto / off / SO3xR3 / SE3), then
   **Train + export splat**. The progress bar shows the training step, there is a Stop button,
   and the result is reloaded into the View tab.
@@ -903,20 +903,25 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
     showed it: 8,026,112 Gaussians at step 17,500 = its sparse cloud. Also, the means / camera
     learning rates decay over a fixed 30000 steps in nerfstudio's method config, and every eval
     image was rendered every 1000 steps.
-  - `survey`: cameras from transforms.json (or, before SfM, the poses.json priors with camera.json or
-    an assumed 80° HFOV); each camera's footprint on the ground (poses.json `ground_z`, else the
-    sparse points' 5th percentile z; rays end at 5× the camera height) → union area, overlap, median
-    GSD.
-  - `suggest`: iterations = 20 × training images in [30k, 300k]; Gaussians needed = area /
-    (2 px × GSD × factor)²; GPU fits ~0.35M per GB above 4 GB; downscale = the smallest factor that
-    fits (width ≥ 800 px); **mcmc** (budget = need at that factor, within the GPU estimate, ≥ the
-    sparse points) when full resolution does not fit, else default with the reset period
-    max(3000, 2 × (training images + 100)); splitting stops at 1/2 (mcmc 5/6); camera optimizer
-    SO3xR3. Explicit values win and the dependent ones follow.
+  - `survey`: cameras from transforms.json (or, before SfM, the poses.json priors: image count
+    only). **No ground plane** (the user: flights start in the air, terrain drops; arbitrary 3D
+    space): the scene is a random 10k subset of `sparse_pc.ply`. Each point counts the cameras it
+    projects into (in front, in frame, nearer than 4× that camera's median depth; no occlusion test)
+    → overlap = mean count; GSD = median over cameras of median point depth / focal; surface = Σ
+    footprints / overlap. Without sparse points the scene size is unknown.
+  - `suggest`: iterations = 20 × training images in [30k, 300k]; Gaussians needed = all image pixels
+    / (overlap × (2 px × factor)²); GPU fits ~0.35M per GB above 4 GB. **Full resolution** unless the
+    user picks a factor (the user prefers it; an automatic ×2 was dropped). **mcmc** (budget = need,
+    within the GPU estimate, ≥ the sparse points) when the need exceeds the GPU, else default with
+    the reset period max(3000, 2 × (training images + 100)); splitting stops at 1/2 (mcmc 5/6);
+    camera optimizer SO3xR3. Explicit values win and the dependent ones follow.
+  - Read-only on existing projects: fullrun_test (80 images) overlap 50×, 2.7 cm/px, ~0.8M needed →
+    default; karlak (500) 82×, 0.8 cm/px, ~12.7M → mcmc 7M. Without an occlusion test the overlap is
+    probably high, so the need is low.
   - `train_command(schedule=)` adds `--pipeline.model.strategy / max-gs-num / stop-split-at /
     reset-alpha-every / camera-optimizer.mode`, `--optimizers.{means,camera-opt,bilateral-grid}.scheduler.max-steps`;
     `--steps-per-eval-all-images 0` always. All flags checked against nerfstudio's own parser.
-  - The Splat tab shows the plan and why (images, ha, overlap, GSD, Gaussians needed vs. GPU,
+  - The Splat tab shows the plan and why (images, surface ha, overlap, GSD, Gaussians needed vs. GPU,
     steps); stats get `report.json["splat"]["schedule"]`. Heuristics, **not yet validated by a
     training run** on a large project.
   - Tests: `tests/test_splat_plan.py`.

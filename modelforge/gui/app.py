@@ -432,22 +432,21 @@ class App:
                      "memory. Off: all images are preloaded into GPU memory (nerfstudio's default; it falls back "
                      "to CPU memory above 500 images), a little faster for small projects.")
             self.g_splat_down = gui.add_dropdown(
-                "Downsample factor", options=("auto",) + tuple(str(f) for f in splat.DOWNSCALES),
-                initial_value="auto",
+                "Downsample factor", options=tuple(str(f) for f in splat.DOWNSCALES), initial_value="1",
                 hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
-                     "less detail. auto: the smallest factor at which the ground area (from the cameras' "
-                     "footprints and ground sampling distance) needs no more Gaussians than fit in GPU memory. "
-                     "The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
+                     "less detail. 1 = full resolution; when the scene needs more Gaussians than fit in GPU "
+                     "memory, auto densification switches to mcmc with a budget instead. The shrunk copies go "
+                     "to images_<factor>/ (an intermediate, removed by Clean).")
             self.g_splat_strategy = gui.add_dropdown(
                 "Densification", options=("auto",) + splat.STRATEGIES, initial_value="auto",
                 hint="How Gaussians are added. default: split / clone / prune by gradient, with the opacity reset "
                      "period scaled to the image count (splatfacto's fixed 3000 steps blocks densification "
                      "entirely from ~2900 training images). mcmc: a fixed budget of Gaussians relocated where "
                      "needed, for large areas. auto: mcmc when the area at full resolution needs more Gaussians "
-                     "than fit in GPU memory.")
+                     "than fit in GPU memory (scene size from the sparse points: overlap and GSD).")
             self.g_splat_maxg = gui.add_number(
                 "Max gaussians (M)", initial_value=0.0, min=0.0, step=0.5,
-                hint="mcmc budget in millions; 0 = auto: what the ground area needs at the downsample factor, "
+                hint="mcmc budget in millions; 0 = auto: what the scene needs at the downsample factor, "
                      "within the GPU memory estimate (~0.35M per GB above 4 GB).")
             self.g_splat_camopt = gui.add_dropdown(
                 "Camera pose refinement", options=("auto",) + splat.CAMERA_OPT, initial_value="auto",
@@ -1411,7 +1410,7 @@ class App:
             except (OSError, ValueError, KeyError) as e:
                 text = f"plan: not available yet ({e})"
             else:
-                text = ("**Plan** (auto values from the flight): ×" + str(p["downscale"]) + ", "
+                text = ("**Plan** (auto values from the cameras + sparse points): ×" + str(p["downscale"]) + ", "
                         f"{p['iterations']:,} steps, {p['strategy']}"
                         + (f" ≤{p['max_gaussians'] / 1e6:.1f}M" if p["max_gaussians"] else "")
                         + f", camera {p['camera_opt']}  \n" + "  \n".join("· " + n for n in p["notes"]))

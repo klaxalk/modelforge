@@ -1,4 +1,5 @@
-"""Splat training settings from the flight: image count, ground area, overlap and ground sampling distance.
+"""Splat training settings from the cameras and the sparse points: image count, overlap, scene surface
+and ground sampling distance (GSD).
 
 splatfacto's defaults are tuned for a few hundred images of an object-sized scene. For a drone survey:
   - densification: splatfacto pauses refinement for (training images + 100) steps after every opacity
@@ -8,16 +9,17 @@ splatfacto's defaults are tuned for a few hundred images of an object-sized scen
   - schedule: iterations grow with the image count (each image seen ~EPOCHS times), splitting stops
     halfway (MCMC: at 5/6, nerfstudio's ratio), and the position / camera learning-rate decay is
     stretched to the run (it is fixed at 30000 steps in nerfstudio's method config).
-  - budget: the cameras' ground footprints give the area and the ground sampling distance (GSD), so the
-    Gaussians needed at each downsample factor (one per PX_PER_GAUSSIAN^2 ground pixels) can be compared
-    with what fits in GPU memory; the smallest factor that fits is suggested, and MCMC with a cap when
-    the full resolution would not fit.
+  - budget: training runs at full resolution unless asked otherwise. The scene needs about
+    (all image pixels) / (overlap x PX_PER_GAUSSIAN^2) Gaussians at the training resolution; when that
+    exceeds what fits in GPU memory, MCMC keeps the count at the GPU's estimate.
   - camera optimizer: SO3xR3 lets training correct small pose errors.
 
-The cameras come from transforms.json (refined) or, before SfM, from poses.json (the flight priors, focal
-from camera.json or an assumed field of view). The ground is poses.json's ground_z (DJI / ROS 2 bag),
-else a low percentile of the sparse points. All heuristics; the Splat tab shows the numbers and every
-value can be overridden.
+No ground plane is assumed (the flight may start in the air, the terrain may drop anywhere): the scene is
+the sparse cloud (sparse_pc.ply, a random subset). Each point counts the cameras it projects into
+(in front, inside the frame, nearer than 4x that camera's median depth: a rough stand-in for occlusion),
+which gives the overlap; each camera's median point depth / focal is its GSD. The surface seen is
+sum(footprints) / overlap. Without sparse points (before SfM) only the image count is known.
+All heuristics; the Splat tab shows the numbers and every value can be overridden.
 """
 
 import json
@@ -29,14 +31,14 @@ import numpy as np
 
 EPOCHS = 20  # each training image seen ~this many times
 MIN_ITERATIONS, MAX_ITERATIONS = 30_000, 300_000
-PX_PER_GAUSSIAN = 2.0  # one Gaussian per this many ground pixels (per side) at the training resolution
+PX_PER_GAUSSIAN = 2.0  # one Gaussian per this many surface pixels (per side) at the training resolution
 GAUSSIANS_PER_GB = 350_000  # training memory incl. optimizer state and rendering, rough
 VRAM_RESERVE_GB = 4.0  # images, rasterization buffers, the CUDA context
 DEFAULT_VRAM_GB = 12.0  # when nvidia-smi is not available
 ASSUMED_HFOV_DEG = 80.0  # priors without a calibrated camera (DJI wide cameras: ~80-84 deg)
-MAX_RANGE_X_HEIGHT = 5.0  # footprint rays end at this many camera heights (oblique views, horizon)
+MAX_POINTS = 10_000  # sparse points sampled for the survey
+FAR_X_MEDIAN = 4.0  # points beyond this many times a camera's median depth don't count as seen
 TRAIN_FRACTION = 0.9  # nerfstudio-data's train_split_fraction
-DOWNSCALES = (1, 2, 4, 8)
 
 
 def vram_gb():
@@ -76,18 +78,18 @@ def _cameras(project):
     return C, R, fx, w, h, "flight priors"
 
 
-def _ground_z(project, C):
-    path = os.path.join(project, "poses.json")
-    if os.path.exists(path):
-        g = json.load(open(path)).get("ground_z")
-        if g is not None:
-            return float(g)
-    ply = os.path.join(project, "sparse_pc.ply")
-    if os.path.exists(ply):
-        import plyfile
-        v = plyfile.PlyData.read(ply)["vertex"]
-        return float(np.percentile(np.asarray(v["z"]), 5))
-    return float(C[:, 2].min()) - 10.0
+def _points(project, max_points, seed=0):
+    """A random subset of sparse_pc.ply (n x 3), or None."""
+    path = os.path.join(project, "sparse_pc.ply")
+    if not os.path.exists(path):
+        return None
+    import plyfile
+    v = plyfile.PlyData.read(path)["vertex"]
+    xyz = np.stack([np.asarray(v[k], float) for k in ("x", "y", "z")], 1)
+    xyz = xyz[np.isfinite(xyz).all(1)]
+    if len(xyz) > max_points:
+        xyz = xyz[np.random.default_rng(seed).choice(len(xyz), max_points, replace=False)]
+    return xyz
 
 
 def ply_count(path):
@@ -104,50 +106,45 @@ def ply_count(path):
     return 0
 
 
-def survey(project):
-    """Image count, ground area covered (m²), overlap (views per ground point), GSD (m / px at full
-    resolution, median over cameras), initial points and where the cameras came from."""
-    import cv2
+def survey(project, max_points=MAX_POINTS):
+    """Image count, overlap (cameras per sparse point), surface seen (m², sum of footprints / overlap),
+    GSD (m / px at full resolution, median over cameras), initial points and the camera source."""
     C, R, fx, w, h, source = _cameras(project)
-    gz = _ground_z(project, C)
-    u, v = np.meshgrid(np.linspace(0, w, 9), np.linspace(0, h, 9))
-    rays_c = np.stack([(u.ravel() - w / 2) / fx, (v.ravel() - h / 2) / fx, np.ones(u.size)], 1)
-    hulls, gsd = [], []
-    for c, r in zip(C, R):
-        height = c[2] - gz
-        if height <= 0:
-            continue
-        d = rays_c @ r.T  # world directions
-        t = np.where(d[:, 2] < -1e-9, -height / np.minimum(d[:, 2], -1e-9), np.inf)
-        dist = t * np.linalg.norm(d, axis=1)
-        keep = dist <= MAX_RANGE_X_HEIGHT * height
-        if keep.sum() < 3:
-            continue
-        pts = c[:2] + d[keep, :2] * t[keep, None]
-        hulls.append(cv2.convexHull(pts.astype(np.float32)).reshape(-1, 2))
-        gsd.append(np.median(dist[keep]) / fx)
     out = {"images": len(C), "train_images": math.ceil(TRAIN_FRACTION * len(C)), "source": source,
            "width": w, "height": h, "initial_points": ply_count(os.path.join(project, "sparse_pc.ply")),
            "area_m2": 0.0, "overlap": 0.0, "gsd_m": None}
-    if not hulls:
+    xyz = _points(project, max_points)
+    if xyz is None or len(xyz) < 10:
         return out
-    allp = np.concatenate(hulls)
-    lo, extent = allp.min(0), float((allp.max(0) - allp.min(0)).max()) or 1.0
-    cell = extent / 1024
-    grid = np.zeros((1026, 1026), np.uint8)
-    total = 0.0
-    for hl in hulls:
-        total += float(cv2.contourArea(hl))
-        cv2.fillConvexPoly(grid, np.round((hl - lo) / cell).astype(np.int32), 1)
-    area = float(grid.sum()) * cell * cell
-    out.update(area_m2=area, overlap=total / area if area else 0.0, gsd_m=float(np.median(gsd)))
+    seen = np.zeros(len(xyz), np.int64)
+    depths = []
+    for c, r in zip(C, R):
+        p = (xyz - c) @ r  # camera coordinates (OpenCV)
+        z = p[:, 2]
+        front = np.flatnonzero(z > 1e-9)
+        u = fx * p[front, 0] / z[front] + w / 2
+        v = fx * p[front, 1] / z[front] + h / 2
+        idx = front[(u >= 0) & (u < w) & (v >= 0) & (v < h)]
+        if len(idx) < 5:
+            continue
+        d = float(np.median(z[idx]))
+        depths.append(d)
+        seen[idx[z[idx] < FAR_X_MEDIAN * d]] += 1
+    if not depths or not seen.any():
+        return out
+    overlap = float(seen[seen > 0].mean())
+    depths = np.asarray(depths)
+    footprints = float(np.sum(w * h * (depths / fx) ** 2))
+    out.update(area_m2=footprints / overlap, overlap=overlap, gsd_m=float(np.median(depths) / fx),
+               cameras_seeing=len(depths))
     return out
 
 
-def needed_gaussians(s, downscale):
-    if not s.get("gsd_m"):
+def needed_gaussians(s, downscale=1):
+    """Gaussians the scene needs at a downsample factor: unique surface pixels / PX_PER_GAUSSIAN²."""
+    if not s.get("overlap"):
         return None
-    return int(s["area_m2"] / (PX_PER_GAUSSIAN * s["gsd_m"] * downscale) ** 2)
+    return int(s["images"] * s["width"] * s["height"] / (s["overlap"] * (PX_PER_GAUSSIAN * downscale) ** 2))
 
 
 def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None):
@@ -160,21 +157,14 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
     n = max(1, s["train_images"])
     iters = (int(min(MAX_ITERATIONS, max(MIN_ITERATIONS, math.ceil(EPOCHS * n / 1000) * 1000)))
              if auto(iterations) else int(iterations))
-    need = {f: needed_gaussians(s, f) for f in DOWNSCALES}
-    if not auto(downscale):
-        down = int(downscale)
-    elif need[1] is None:
-        down = 1
-    else:
-        down = next((f for f in DOWNSCALES if need[f] <= cap), DOWNSCALES[-1])
-        while down > 1 and s["width"] / down < 800:  # keep enough pixels to match against
-            down //= 2
+    down = 1 if auto(downscale) else int(downscale)  # full resolution unless asked
+    need = needed_gaussians(s, down)
     if auto(strategy):
-        strategy = "mcmc" if need[1] is not None and need[1] > cap else "default"
+        strategy = "mcmc" if need is not None and need > cap else "default"
     auto_budget = auto(max_gaussians)
     if strategy == "mcmc" and auto_budget:
-        # MCMC grows to its cap: what the area needs at that factor, within the GPU estimate
-        max_gaussians = max(min(cap, need[down] or cap), s.get("initial_points", 0), 500_000)
+        # MCMC grows to its cap: what the scene needs at that factor, within the GPU estimate
+        max_gaussians = max(min(cap, need or cap), s.get("initial_points", 0), 500_000)
     pause = n + 100  # splatfacto's pause after an opacity reset (steps)
     reset_steps = max(3000, 2 * pause)
     plan = {"iterations": iters, "downscale": down, "strategy": strategy,
@@ -185,14 +175,15 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
             "vram_gb": round(vram, 1), "cap": cap, "needed": need}
     notes = [f"{s['images']:,} images ({n:,} for training) from the {s['source']}"]
     if s.get("gsd_m"):
-        notes.append(f"ground {s['area_m2'] / 1e4:,.1f} ha, overlap {s['overlap']:.0f}×, "
-                     f"GSD {s['gsd_m'] * 100:.1f} cm/px at full resolution")
-        notes.append(f"~{need[down] / 1e6:.1f}M Gaussians at ×{down} (full resolution ~{need[1] / 1e6:.1f}M); "
-                     f"{vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M")
+        notes.append(f"surface ~{s['area_m2'] / 1e4:,.1f} ha seen {s['overlap']:.0f}× on average (sparse points), "
+                     f"GSD {s['gsd_m'] * 100:.1f} cm/px at full resolution (median)")
+        notes.append(f"~{need / 1e6:.1f}M Gaussians at ×{down}; {vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M")
+    else:
+        notes.append("no sparse points yet: the scene size is unknown (run SfM + export for the estimate)")
     notes.append(f"{iters:,} steps (~{iters / n:.0f} views per image), splitting until {plan['stop_split_at']:,}")
     if strategy == "mcmc":
         notes.append(f"MCMC: a fixed budget of {plan['max_gaussians'] / 1e6:.1f}M Gaussians")
-        if s.get("initial_points", 0) > min(cap, need[down] or cap) and auto_budget:
+        if s.get("initial_points", 0) > min(cap, need or cap) and auto_budget:
             notes.append(f"the sparse cloud ({s['initial_points'] / 1e6:.1f}M points) exceeds the estimate; "
                          "the budget is raised to it")
     elif pause > 3000 - 100:

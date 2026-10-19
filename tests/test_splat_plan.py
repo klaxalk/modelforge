@@ -9,30 +9,50 @@ import pytest
 from modelforge import splat, splat_plan
 
 
-def make_survey_project(path, nx=10, ny=10, step=20.0, height=50.0, w=1920, h=1080, fx=1000.0):
-    """Nadir cameras on a grid at `height` above ground z = 0 (transforms.json, OpenGL axes)."""
+def make_survey_project(path, nx=10, ny=10, step=20.0, height=50.0, w=1920, h=1080, fx=1000.0, ground=0.0):
+    """Nadir cameras on a grid at z = `height` (transforms.json, OpenGL axes) over sparse points on the
+    plane z = `ground` inside the grid's interior (sparse_pc.ply)."""
+    import plyfile
     frames = []
     for i in range(nx):
         for j in range(ny):
-            c2w = np.eye(4)
-            # identity: the OpenGL camera looks along its -z = world down (nadir), image up = north
+            c2w = np.eye(4)  # the OpenGL camera looks along its -z = world down (nadir), image up = north
             c2w[:3, 3] = (i * step, j * step, height)
             frames.append({"file_path": f"images/{i}_{j}.jpg", "transform_matrix": c2w.tolist()})
     json.dump({"fl_x": fx, "fl_y": fx, "cx": w / 2, "cy": h / 2, "w": w, "h": h, "frames": frames},
               open(os.path.join(path, "transforms.json"), "w"))
-    json.dump({"ground_z": 0.0, "images": []}, open(os.path.join(path, "poses.json"), "w"))
+    xy = np.random.default_rng(0).uniform(60, 120, (2000, 2))
+    v = np.zeros(len(xy), [("x", "f4"), ("y", "f4"), ("z", "f4")])
+    v["x"], v["y"], v["z"] = xy[:, 0], xy[:, 1], ground
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex")]).write(os.path.join(path, "sparse_pc.ply"))
     return path
 
 
-def test_survey_area_overlap_gsd(tmp_path):
+def test_survey_overlap_gsd(tmp_path):
     p = make_survey_project(str(tmp_path))
     s = splat_plan.survey(p)
-    fw, fh = 50.0 * 1920 / 1000, 50.0 * 1080 / 1000  # footprint 96 x 54 m
-    expect = (180 + fw) * (180 + fh)  # union of the grid's footprints
     assert s["images"] == 100 and s["train_images"] == 90 and s["source"] == "refined cameras"
-    assert abs(s["area_m2"] - expect) / expect < 0.03
-    assert abs(s["overlap"] - 100 * fw * fh / expect) < 0.5
-    assert 0.050 <= s["gsd_m"] < 0.060  # 50 m / 1000 px, slant range: median over the footprint's sample rays
+    assert s["initial_points"] == 2000
+    assert 11 < s["overlap"] < 15  # footprint 96 x 54 m over a 20 m grid: ~4.8 x 2.7 cameras per point
+    assert abs(s["gsd_m"] - 0.05) < 1e-6  # depth 50 m / 1000 px
+    assert splat_plan.needed_gaussians(s) == int(100 * 1920 * 1080 / (s["overlap"] * 4))
+
+
+def test_survey_assumes_no_ground_plane(tmp_path):
+    """The scene 100 m below the cameras' start (the flight began in the air, the terrain drops): the
+    GSD follows the sparse points, not a takeoff ground."""
+    s = splat_plan.survey(make_survey_project(str(tmp_path), ground=-100.0))
+    assert abs(s["gsd_m"] - 0.15) < 1e-6 and s["overlap"] > 30  # 3x the footprint per side
+
+
+def test_survey_without_points(tmp_path):
+    p = make_survey_project(str(tmp_path))
+    os.remove(os.path.join(p, "sparse_pc.ply"))
+    s = splat_plan.survey(p)
+    assert s["gsd_m"] is None and splat_plan.needed_gaussians(s) is None
+    plan = splat_plan.suggest(s, vram=24)
+    assert plan["strategy"] == "default" and plan["downscale"] == 1
+    assert any("no sparse points" in n for n in plan["notes"])
 
 
 def test_suggest_small_and_large():
@@ -46,8 +66,10 @@ def test_suggest_small_and_large():
     big = dict(small, images=8000, train_images=7200, width=3840, height=2160, area_m2=250_000.0, gsd_m=0.03)
     p = splat_plan.suggest(big, vram=24)
     assert p["iterations"] == 144_000 and p["strategy"] == "mcmc"  # 20 views per training image
-    assert p["needed"][p["downscale"]] <= p["cap"] and p["downscale"] > 1  # the smallest factor that fits
-    assert p["max_gaussians"] <= p["cap"] and p["stop_split_at"] == 120_000
+    assert p["downscale"] == 1 and p["needed"] > p["cap"]  # full resolution; the budget is the GPU's
+    assert p["max_gaussians"] == p["cap"] and p["stop_split_at"] == 120_000
+    p = splat_plan.suggest(big, vram=24, downscale=8)  # fewer pixels: the need shrinks with the factor²
+    assert p["needed"] == splat_plan.needed_gaussians(big, 8) == splat_plan.needed_gaussians(big) // 64
     # the default strategy: refinement needs step % reset period >= training images + 100
     p = splat_plan.suggest(big, vram=24, strategy="default")
     assert p["reset_alpha_every"] * 100 > 7200 + 100 + 1000 and p["max_gaussians"] is None

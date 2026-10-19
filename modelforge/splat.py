@@ -18,10 +18,11 @@ LiDAR depth supervision (lidar_depth=weight, projects with lidar/cloud.ply): tra
 splatfacto-big-lidar from modelforge/nsplugin (registered through nerfstudio's environment variables,
 nothing installed) with the lidar-data dataparser; its "[lidar] ..." depth error lines go to the report.
 
-Training plan (modelforge/splat_plan.py): iterations, downsample factor, densification strategy (default
-with a reset period scaled to the image count, or MCMC with a Gaussian budget), learning-rate decay length
-and camera pose refinement come from the project's cameras (count, ground area, GSD) and the GPU memory,
-unless given; splatfacto's fixed schedule never densifies from ~2900 training images on.
+Training plan (modelforge/splat_plan.py): iterations, densification strategy (default with a reset
+period scaled to the image count, or MCMC with a Gaussian budget), learning-rate decay length and camera
+pose refinement come from the project's cameras and sparse points (count, overlap, GSD) and the GPU
+memory, unless given; full resolution unless --downscale. splatfacto's fixed schedule never densifies
+from ~2900 training images on.
 
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
@@ -361,10 +362,10 @@ def main():
     ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
                     help="where training images are kept (default disk: low memory, for large datasets)")
     ap.add_argument("--downscale", type=int, choices=DOWNSCALES,
-                    help="train on images downscaled by this factor (default: from the GSD and GPU memory)")
-    ap.add_argument("--strategy", choices=STRATEGIES, help="densification (default: mcmc when the area needs "
+                    help="train on images downscaled by this factor (default 1: full resolution)")
+    ap.add_argument("--strategy", choices=STRATEGIES, help="densification (default: mcmc when the scene needs "
                     "more Gaussians than fit, else default with a reset period scaled to the image count)")
-    ap.add_argument("--max-gaussians", type=int, help="MCMC budget (default: from the area and GPU memory)")
+    ap.add_argument("--max-gaussians", type=int, help="MCMC budget (default: from the scene and GPU memory)")
     ap.add_argument("--camera-opt", choices=CAMERA_OPT, help="pose refinement while training (default SO3xR3)")
     ap.add_argument("--no-plan", action="store_true",
                     help="splatfacto's own defaults (30000 steps, no schedule) instead of the flight-based plan")

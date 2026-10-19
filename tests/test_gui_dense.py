@@ -30,8 +30,9 @@ def free_port():
 @pytest.fixture(scope="module")
 def project(tmp_path_factory):
     p = str(tmp_path_factory.mktemp("gui_dense"))
-    for name in ("poses.json", "images", "sparse"):
-        os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(p, name))
+    for name in ("poses.json", "images", "sparse", "transforms.json", "sparse_pc.ply"):
+        if os.path.exists(os.path.join(REAL, name)):
+            os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(p, name))
     shutil.copyfile(os.path.join(REAL, "report.json"), os.path.join(p, "report.json"))  # stages write to it
     make_workspace(p)
     dense.fusion(p)
@@ -94,7 +95,7 @@ def test_tab_defaults(app):
     assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)
     assert not app.g_dense_in_all.value  # the full pipeline's dense result is the splat mesh
-    assert app.g_splat_disk.value is True and app.g_splat_down.value == "auto"
+    assert app.g_splat_disk.value is True and app.g_splat_down.value == "1"
     app._refresh_splat_plan()  # auto values from the cameras, shown in the Splat tab
     t0 = time.time()
     while "Plan" not in app.g_splat_plan.content and time.time() - t0 < 30:
