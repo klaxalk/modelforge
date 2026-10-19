@@ -29,6 +29,7 @@ class SemanticPanel:
         self.app = app
         self.feats, self.encoder, self.rel, self.query = None, semantic.TextEncoder(), None, ""
         self.means, self.objs, self._markers, self._frames, self._spin = None, [], [], [], None
+        self.surface = None  # (distance to the mesh per Gaussian, mesh voxel, mesh path) or None
         with contextlib.nullcontext():  # the panel fills its own tab
             self.g_md = gui.add_markdown("")
             self.g_text_md = gui.add_markdown("")
@@ -48,6 +49,14 @@ class SemanticPanel:
                 "Threshold", min=0.5, max=0.95, step=0.01, initial_value=0.6,
                 hint="Relevance (0.5 = no better than generic words like 'object' or 'stuff', 1 = clearly the "
                      "query) above which a Gaussian counts as a match. Raise it when too much lights up.")
+            self.g_near = gui.add_checkbox(
+                "Near the mesh only", initial_value=True,
+                hint="Ignore matching Gaussians farther than the tolerance from the mesh (the mesh from the splat, "
+                     "else COLMAP's): floaters, haze and stray specks drop out, objects come out cleaner. Untick "
+                     "for things the mesh misses (distant terrain beyond its range, wires, glossy surfaces).")
+            self.g_tol = gui.add_number("Mesh tolerance (voxels)", initial_value=3.0, min=0.5, step=0.5,
+                                        hint="How far from the mesh a match may be, in the mesh's voxels (the "
+                                             "splat mesh's TSDF voxel, e.g. 11 cm).")
             self.g_mode = gui.add_dropdown("Show", options=MODES, initial_value=MODES[0],
                                            hint="highlight in red: the whole splat, matches tinted by relevance. "
                                                 "matches only: hide everything else.")
@@ -66,15 +75,15 @@ class SemanticPanel:
                                               hint="A bright turning cylinder around each object, with its rank.")
             self.g_min = gui.add_number("Min object size (Gaussians)", initial_value=30, min=1, step=10,
                                         hint="Smaller groups of matches are ignored as specks.")
-            for h in (self.g_thr, self.g_mode):
+            for h in (self.g_thr, self.g_mode, self.g_near, self.g_tol):
                 h.on_update(lambda _: self._redraw())
-            for h in (self.g_thr, self.g_markers, self.g_min):
+            for h in (self.g_thr, self.g_markers, self.g_min, self.g_near, self.g_tol):
                 h.on_update(lambda _: self._update_objects())
 
     # ------------------------------------------------------------ state
     def refresh(self):
         """Status of the project's features (after a project switch, a new splat or a compute)."""
-        self.feats, self.rel, self.means = None, None, None
+        self.feats, self.rel, self.means, self.surface = None, None, None, None
         self._set_objects([])
         st = semantic.status(self.app.path) if self.app.path else "none"
         why = semantic.available()
@@ -98,6 +107,7 @@ class SemanticPanel:
             if path == self.app.path:
                 self._features()
                 self._splat_means()
+                self._surface()
         except Exception:  # noqa: BLE001 - the search loads them again and reports errors
             traceback.print_exc()
 
@@ -157,6 +167,34 @@ class SemanticPanel:
         self._redraw()
 
     # ------------------------------------------------------------ objects
+    def _surface(self):
+        """Distances of the Gaussians to the mesh (computed once per splat + mesh, ~10 s; cached on disk)."""
+        if self.surface is None:
+            self.surface = semantic.surface_distance(self.app.path) or False
+        return self.surface or None
+
+    def _rel(self):
+        """The relevance in use: matches farther than the tolerance from the mesh count as 0 (Near the mesh
+        only, with a mesh). (relevance, Gaussians dropped above the threshold)."""
+        if self.rel is None:
+            return None, 0
+        srf = self._surface() if self.g_near.value else None
+        if srf is None or len(srf[0]) != len(self.rel):
+            return self.rel, 0
+        far = srf[0] > float(self.g_tol.value) * srf[1]
+        dropped = int(((self.rel >= self.g_thr.value) & far).sum())
+        return np.where(far, 0.0, self.rel), dropped
+
+    def _summary(self, objs=None):
+        rel, dropped = self._rel()
+        n = int((rel >= self.g_thr.value).sum())
+        text = f"**{self.query}**: {n:,} Gaussians above {self.g_thr.value:.2f}"
+        if dropped:
+            text += f" ({dropped:,} off the mesh ignored)"
+        elif self.g_near.value and self._surface() is None:
+            text += " (no mesh: Near the mesh only has nothing to prune with)"
+        return text + (f" · **{len(objs)} object(s)**" if objs is not None else "")
+
     def _splat_means(self):
         if self.means is None:
             import plyfile
@@ -169,7 +207,7 @@ class SemanticPanel:
             self._set_objects([])
             return
         try:
-            objs = semantic.objects(self._splat_means(), self.rel, float(self.g_thr.value),
+            objs = semantic.objects(self._splat_means(), self._rel()[0], float(self.g_thr.value),
                                     min_gaussians=int(self.g_min.value))
         except Exception as e:  # noqa: BLE001 - shown in the GUI
             traceback.print_exc()
@@ -177,8 +215,7 @@ class SemanticPanel:
             return
         self._set_objects(objs)
         if self.rel is not None:
-            self.g_result.content = (f"**{self.query}**: {int((self.rel >= self.g_thr.value).sum()):,} Gaussians above "
-                                     f"{self.g_thr.value:.2f} · **{len(objs)} object(s)**")
+            self.g_result.content = self._summary(objs)
 
     def _set_objects(self, objs):
         self.objs = objs
@@ -247,14 +284,14 @@ class SemanticPanel:
     def _redraw(self):
         self.app.redraw_splat_decorated()
         if self.rel is not None:
-            n = int((self.rel >= self.g_thr.value).sum())
-            self.g_result.content = f"**{self.query}**: {n:,} Gaussians above {self.g_thr.value:.2f}"
+            self.g_result.content = self._summary()
 
     def decorate(self, centers, cov, rgb, op, idx):
         """The splat arrays to send, with the current search applied (idx: Gaussians shown of the file)."""
-        if self.rel is None or len(self.rel) <= (idx.max() if len(idx) else 0):
+        rel = self._rel()[0]
+        if rel is None or len(rel) <= (idx.max() if len(idx) else 0):
             return centers, cov, rgb, op
-        r = self.rel[idx]
+        r = rel[idx]
         thr = float(self.g_thr.value)
         if self.g_mode.value == "matches only":
             keep = r >= thr

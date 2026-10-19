@@ -165,6 +165,61 @@ class Features:
         return out
 
 
+def search_mesh(project):
+    """(path, voxel m) of the mesh that prunes search results: the mesh from the splat (its TSDF voxel), else
+    COLMAP's Delaunay / Poisson mesh (voxel = median edge length); None without a mesh."""
+    sm = os.path.join(project, "splatmesh", "mesh.ply")
+    if os.path.exists(sm):
+        try:
+            voxel = float(json.load(open(os.path.join(project, "splatmesh", "stats.json")))["voxel_m"])
+        except (OSError, ValueError, KeyError):
+            voxel = None
+        return sm, voxel or _edge_length(sm)
+    for m in ("delaunay", "poisson"):
+        p = os.path.join(project, "dense", f"meshed-{m}.ply")
+        if os.path.exists(p):
+            return p, _edge_length(p)
+    return None
+
+
+def _edge_length(path):
+    import plyfile
+    d = plyfile.PlyData.read(path)
+    v = np.stack([d["vertex"][k] for k in ("x", "y", "z")], 1)
+    f = np.vstack(d["face"].data["vertex_indices"][:20000])
+    return float(np.median(np.linalg.norm(v[f[:, 0]] - v[f[:, 1]], axis=1)))
+
+
+def surface_distance(project):
+    """(distance m (N,) of every Gaussian centre to the nearest mesh vertex, mesh voxel m, mesh path), cached
+    in splat/semantic/surface.npz per splat + mesh (size + mtime); None without a mesh. The nearest vertex
+    stands in for the surface (vertices are ~1 voxel apart), via OpenCV's FLANN k-d tree."""
+    import cv2
+    import plyfile
+    mesh = search_mesh(project)
+    sp = splat_mesh.splat_path(project)
+    if mesh is None or not sp or not os.path.exists(sp):
+        return None
+    path, voxel = mesh
+    st_m, st_s = os.stat(path), os.stat(sp)
+    key = np.array([st_m.st_size, st_m.st_mtime_ns, st_s.st_size, st_s.st_mtime_ns], np.int64)
+    cache = os.path.join(project, DIR, "surface.npz")
+    if os.path.exists(cache):
+        c = np.load(cache)
+        if np.array_equal(c["key"], key):
+            return c["distance"].astype(np.float32), float(c["voxel"]), path
+    mv = plyfile.PlyData.read(path)["vertex"].data
+    V = np.ascontiguousarray(np.stack([mv["x"], mv["y"], mv["z"]], 1), np.float32)
+    sv = plyfile.PlyData.read(sp)["vertex"].data
+    G = np.ascontiguousarray(np.stack([sv["x"], sv["y"], sv["z"]], 1), np.float32)
+    index = cv2.flann_Index(V, dict(algorithm=1, trees=4))
+    _, d2 = index.knnSearch(G, 1, params=dict(checks=32))
+    d = np.sqrt(d2[:, 0]).astype(np.float32)
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    np.savez(cache, distance=d.astype(np.float16), voxel=np.float32(voxel), key=key)
+    return d, float(voxel), path
+
+
 def _components(keys):
     """Connected components (26-neighbourhood) of occupied voxels; keys (M, 3) int, unique. Labels (M,)."""
     M = len(keys)

@@ -1210,6 +1210,16 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   - kladno_dopravnik: "a car" → 1 object (5.5 m); "a machine" at 0.66 → the crusher (16 m, its
     conveyors) + 2 specks; "gravel pile" at 0.65 → 20 piles (neighbouring piles can merge: one 56 m).
 - A new search **goes to the best object at once** (in the browser that pressed Search).
+- **Near the mesh only** (default on, tolerance 3 mesh voxels; the user asked to prune with the mesh):
+  matches whose centre is farther than the tolerance from the mesh count as 0 for the highlight, the counts
+  and the objects. `semantic.search_mesh`: the splat mesh (its TSDF voxel) else COLMAP's Delaunay / Poisson
+  (median edge length); `surface_distance`: nearest mesh vertex per Gaussian (OpenCV FLANN, approximate,
+  ~10 s for 1M × 550k), cached in `splat/semantic/surface.npz` per splat + mesh (size + mtime), computed in
+  the background when a project opens. On kladno_dopravnik (splat mesh, 10.7 cm voxel) only 54 % of the
+  Gaussians lie within 3 voxels of the mesh (74 % within 1 m: floaters, haze, terrain beyond the mesh's
+  range); "a machine" at 0.66 → 1 object instead of 3 (944 floating matches ignored), "a car" loses 16 %
+  of its matches (glossy parts), "gravel pile" 20 → 18 objects. It cannot fix matches bleeding onto real
+  surfaces (the ground around the machine): that is the threshold's job.
 - **Preloading**: `main` calls `SemanticPanel.preload()`, which starts the text worker in the background when
   the GUI starts (~13 s; "text model: ready" in the tab); a search meanwhile waits for it. Opening a project
   with ready features also loads them and the splat positions in the background (`_warm`), so the first

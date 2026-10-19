@@ -62,7 +62,7 @@ def test_panel_decorates_the_drawn_splat(tmp_path):
     class V:
         def __init__(self, v):
             self.value = v
-    panel.g_thr, panel.g_mode = V(0.6), V("highlight in red")
+    panel.g_thr, panel.g_mode, panel.g_near, panel.surface = V(0.6), V("highlight in red"), V(False), None
     n = 6
     centers, cov, rgb, op = np.zeros((n, 3)), np.zeros((n, 3, 3)), np.full((n, 3), 0.5, np.float32), np.ones((n, 1))
     idx = np.arange(n)
@@ -117,3 +117,44 @@ def test_cylinder_and_best_view():
     pos = best_view(Snap, target, np.radians(60), 16 / 9, radius=8.0)  # a big object: pulled back to 20 m
     assert np.isclose(np.linalg.norm(pos - target), 20.0)
     assert best_view(Snap, np.array([500.0, 500.0, 0.0]), np.radians(60), 16 / 9, 1.0) is None
+
+
+def test_surface_distance_and_near_mesh_filter(tmp_path):
+    """Gaussians off the mesh surface are measured (cached per splat + mesh) and dropped from the matches."""
+    import plyfile
+    from modelforge.gui.semantic import SemanticPanel
+    p = str(tmp_path)
+    os.makedirs(os.path.join(p, "splat"))
+    os.makedirs(os.path.join(p, "splatmesh"))
+    g = np.linspace(0, 10, 41)  # a flat mesh grid z = 0, 0.25 m apart
+    X, Y = np.meshgrid(g, g)
+    verts = np.zeros(X.size, [("x", "f4"), ("y", "f4"), ("z", "f4")])
+    verts["x"], verts["y"] = X.ravel(), Y.ravel()
+    faces = np.zeros(2, [("vertex_indices", "i4", (3,))])
+    faces["vertex_indices"] = [[0, 1, 41], [1, 42, 41]]
+    plyfile.PlyData([plyfile.PlyElement.describe(verts, "vertex"), plyfile.PlyElement.describe(faces, "face")]) \
+        .write(os.path.join(p, "splatmesh", "mesh.ply"))
+    json.dump({"voxel_m": 0.25}, open(os.path.join(p, "splatmesh", "stats.json"), "w"))
+    sv = np.zeros(4, [("x", "f4"), ("y", "f4"), ("z", "f4")])
+    sv["x"], sv["y"], sv["z"] = [5, 5, 5, 5], [5, 5, 5, 5], [0.0, 0.5, 2.0, 30.0]  # on, near, off, a floater
+    plyfile.PlyData([plyfile.PlyElement.describe(sv, "vertex")]).write(os.path.join(p, "splat", "splat_enu.ply"))
+    assert semantic.search_mesh(p)[1] == 0.25
+    d, voxel, _ = semantic.surface_distance(p)
+    assert np.allclose(d, [0, 0.5, 2.0, 30.0], atol=0.05) and voxel == 0.25  # FLANN is approximate
+    assert os.path.exists(os.path.join(p, semantic.DIR, "surface.npz"))
+    assert np.allclose(semantic.surface_distance(p)[0], d, atol=0.01)  # from the cache (float16)
+
+    class V:
+        def __init__(self, v):
+            self.value = v
+
+    class App:
+        path = p
+    panel = SemanticPanel.__new__(SemanticPanel)
+    panel.app, panel.surface = App(), None
+    panel.rel = np.array([0.9, 0.9, 0.9, 0.9])
+    panel.g_thr, panel.g_near, panel.g_tol = V(0.6), V(True), V(3.0)  # 3 voxels = 0.75 m
+    rel, dropped = panel._rel()
+    assert list(rel) == [0.9, 0.9, 0.0, 0.0] and dropped == 2
+    panel.g_near = V(False)
+    assert list(panel._rel()[0]) == [0.9] * 4
