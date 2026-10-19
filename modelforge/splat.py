@@ -126,10 +126,15 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))]
 
 
-def prepare_downscaled(project, factor, on_line=print):
+def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):
     """PROJECT/images_<factor>/<name> for every transforms.json frame (nerfstudio's layout for
-    --downscale-factor). Sizes are floor(w / factor), as nerfstudio rescales the cameras."""
+    --downscale-factor). Sizes are floor(w / factor), as nerfstudio rescales the cameras.
+
+    JPEGs are decoded at reduced size (PIL draft: the DCT scales by 1/2, 1/4, 1/8 directly) in
+    `workers` threads; on_count(done, total) reports progress and `job` (jobs.Token) is checked
+    between images. Before, 8000 4K images took tens of minutes, silently and without Stop."""
     import json
+    from concurrent.futures import ThreadPoolExecutor
 
     from PIL import Image
     if factor <= 1:
@@ -137,8 +142,9 @@ def prepare_downscaled(project, factor, on_line=print):
     out = os.path.join(project, f"images_{factor}")
     os.makedirs(out, exist_ok=True)
     frames = json.load(open(os.path.join(project, "transforms.json")))["frames"]
-    made = 0
-    for f in frames:
+
+    def one(f):
+        jobs.check(job)
         src = os.path.join(project, f["file_path"])
         dst = os.path.join(out, os.path.basename(f["file_path"]))
         with Image.open(src) as im:
@@ -146,9 +152,18 @@ def prepare_downscaled(project, factor, on_line=print):
             if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
                 with Image.open(dst) as old:
                     if old.size == size:
-                        continue
-            im.convert("RGB").resize(size, Image.BICUBIC).save(dst, quality=95)
-            made += 1
+                        return 0
+            im.draft("RGB", size)  # JPEG: decode at >= size, a fraction of the full decode
+            im.convert("RGB").resize(size, Image.BICUBIC).save(dst + ".part.jpg", quality=95)
+        os.replace(dst + ".part.jpg", dst)  # a stopped run leaves no truncated image
+        return 1
+
+    made, step = 0, max(1, len(frames) // 50)
+    with ThreadPoolExecutor(workers) as pool:
+        for k, m in enumerate(pool.map(one, frames), 1):
+            made += m
+            if on_count and (k % step == 0 or k == len(frames)):
+                on_count(k, len(frames))
     on_line(f"splat: images_{factor}/ ready ({made} of {len(frames)} images written)")
     return out
 
@@ -216,9 +231,10 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
-        cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None):
+        cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
-    lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json)."""
+    lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json).
+    on_prepare(done, total): progress of writing the downscaled images (downscale > 1)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     reason = available()
@@ -243,7 +259,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         if q:
             lidar_log.append(q)
 
-    prepare_downscaled(project, int(downscale), on_line)
+    prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
     on_line(f"splat: training {method_dir}, cache {cache}, downscale {downscale}"
             + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "") + " "
             f"(viewer on http://localhost:{VIEWER_PORT})")

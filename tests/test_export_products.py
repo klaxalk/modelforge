@@ -109,3 +109,21 @@ def test_prepare_downscaled(tmp_path):
     assert Image.open(os.path.join(out, "f0.jpg")).size == (51, 30)  # floor, as nerfstudio rescales
     splat.prepare_downscaled(p, 2, lines.append)
     assert "0 of 2" in lines[-1]  # up to date: nothing rewritten
+
+
+def test_prepare_downscaled_progress_and_stop(tmp_path):
+    from modelforge import jobs
+    p = str(tmp_path)
+    os.makedirs(os.path.join(p, "images"))
+    for i in range(6):
+        Image.new("RGB", (160, 96), (i * 40, 50, 0)).save(os.path.join(p, "images", f"f{i}.jpg"))
+    with open(os.path.join(p, "transforms.json"), "w") as f:
+        json.dump({"frames": [{"file_path": f"images/f{i}.jpg"} for i in range(6)]}, f)
+    counts = []
+    out = splat.prepare_downscaled(p, 4, lambda m: None, on_count=lambda k, n: counts.append((k, n)))
+    assert counts[-1] == (6, 6) and Image.open(os.path.join(out, "f3.jpg")).size == (40, 24)
+    assert not [n for n in os.listdir(out) if ".part" in n]
+    token = jobs.Token()
+    token.cancel()
+    with pytest.raises(jobs.Cancelled):
+        splat.prepare_downscaled(p, 2, lambda m: None, job=token)

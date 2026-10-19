@@ -1366,6 +1366,10 @@ class App:
             self._on_log(m)
             if m.startswith("splat:"):  # also on the server console, for diagnosing the preview
                 print(m, flush=True)
+
+        def prepare(done, total):  # images_<factor>/ before training (thousands of images: minutes)
+            self.g_progress.value = 100.0 * done / total
+            self._job["detail"] = f"downscaling images ×{self.g_splat_down.value}: {done:,} / {total:,}"
         try:
             if self._kind() == "rosbag":  # the initial cloud with or without the LiDAR points
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
@@ -1382,7 +1386,8 @@ class App:
             splat.run(project, self.g_splat_method.value, iters, on_line=on_line, on_progress=progress,
                       job=self._token, cache="disk" if self.g_splat_disk.value else "gpu",
                       downscale=int(self.g_splat_down.value), preview_every=int(self.g_splat_every.value),
-                      on_snapshot=self._on_splat_snapshot if live else None, lidar_depth=lidar_depth)
+                      on_snapshot=self._on_splat_snapshot if live else None, lidar_depth=lidar_depth,
+                      on_prepare=prepare)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         finally:
             self._splat_live_on = False

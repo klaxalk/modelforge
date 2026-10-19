@@ -902,6 +902,12 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
   --downscale-factor N`, last on the command line), because nerfstudio
   otherwise auto-picks a leftover `images_2/` for images wider than 1600 px.
   `images_N/` is an intermediate (Clean removes it; re-extraction archives it).
+  - It decodes JPEGs at reduced size (PIL draft, DCT scaling by 1/2, 1/4, 1/8)
+    in 8 threads, shows "downscaling images ×N: k / n" in the state line and
+    honours Stop. Before, kladno_dira (8000 4K images) spent ~16 min here
+    silently, at 117 ms per image, and Stop waited for it; now 5 ms per image.
+  - Images are written as `.part.jpg`, then renamed, so a stopped run leaves
+    no truncated image that the up-to-date check would keep.
 
 **Live preview** (Splat tab, on by default):
 - The user wanted to watch the splat form in the GUI's 3D view.
