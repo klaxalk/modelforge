@@ -38,6 +38,9 @@ def test_snapshots_and_color_modes(app):
     app.load_snapshot("refined")
     assert "refined" in app.g_stats.content and "prior deviation" in app.g_stats.content
     assert len(app.cam_handles) == len(app.project.names)
+    assert not app.g_cams.value and not any(h.visible for h in app.cam_handles.values())  # off by default
+    app.g_cams.value = True
+    assert any(h.visible for h in app.cam_handles.values())
 
 
 def test_inspect(app):

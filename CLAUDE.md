@@ -1210,7 +1210,10 @@ Code layout:
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
     - It is one button-group row: ● / ○ / · Splat, Mesh, Points (sparse),
-      Dense (fused points), Plan, Orbit.
+      Cameras, Thumbs (camera thumbnails; available while Cameras is on),
+      Dense (fused points), Plan, Orbit, Fly.
+    - Points, Cameras, Thumbs and Prior cameras start off (the user asked):
+      with thousands of cameras the frustums hide the splat / mesh.
     - **Plan** is the Ingest flight plan (each source's track plus dots at the
       planned image positions). The user asked to hide it from the 3D view:
       its checkbox existed only in the Ingest tab. The quick bar, View
