@@ -801,6 +801,34 @@ class App:
         lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
         return (lo + hi) / 2, max(float(np.linalg.norm(hi - lo)), 1e-3)
 
+    def glide_to(self, client, position, look_at, seconds=1.2, rate_hz=30.0):
+        """Move a browser's camera smoothly (smoothstep) to position, looking at look_at, z up. Stops its
+        orbit / flight; returns at once (the glide runs in a thread)."""
+        if client is None:
+            return
+        self._stop_fly(client)
+        stop = self._orbits.pop(client.client_id, None)
+        if stop is not None:
+            stop.set()
+            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        p1, l1 = np.asarray(position, float), np.asarray(look_at, float)
+
+        def run():
+            try:
+                p0, l0 = np.array(client.camera.position, float), np.array(client.camera.look_at, float)
+                n = max(1, int(seconds * rate_hz))
+                for k in range(1, n + 1):
+                    a = k / n
+                    a = a * a * (3 - 2 * a)
+                    with client.atomic():
+                        client.camera.up_direction = (0.0, 0.0, 1.0)
+                        client.camera.position = tuple(p0 + (p1 - p0) * a)
+                        client.camera.look_at = tuple(l0 + (l1 - l0) * a)
+                    time.sleep(1.0 / rate_hz)
+            except Exception:  # the browser went away
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
     def recenter(self, client=None):
         """Center button (and on connect / project switch): look at the scene from the south, above it,
         far enough to see all of it. client None = every browser. Stops that browser's orbit / flight."""

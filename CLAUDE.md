@@ -1198,8 +1198,18 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   with the same `pip --no-deps --target` list), first on PYTHONPATH only for these subprocesses. Weights cache
   in `build/hf_cache` + `build/torch_hub` (`MODELFORGE_MODEL_CACHE`): C-RADIOv3-L 1 GB, SigLIP2-so400m
   4.3 GB. License: NVIDIA Open Model License.
-- Not yet: object instances / bounding boxes / camera jump (the follow-up the user asked for), tiling above
-  2048 px, distillation (option B).
+- **Objects** (the user asked for bright turning 3D markers): `semantic.objects` groups the Gaussians above
+  the threshold by 26-connected voxels (1/300 of the scene; `_components`: vectorized min-label propagation,
+  no scipy), drops groups under "Min object size" (30), ranks by summed relevance above the threshold; each:
+  centre, radius (95 % horizontal), z0 / z1. The panel lists them ("#1 · 5.5 m · 0.61 · 341 G"), draws a
+  bright yellow cylinder (two rings + 8 struts, screen-width lines) with a label per object, turning at
+  30°/s (one thread for the panel's lifetime: restarting it per redraw raced), and **◀ / Go / ▶** glide the
+  camera (`App.glide_to`, smoothstep 1.2 s) to the registered camera that saw the object best (in frame
+  with a margin, near, close to its axis; `best_view`), pulled back to ≥ 2.5 radii, looking at the object;
+  else an elevated view fitting it.
+  - kladno_dopravnik: "a car" → 1 object (5.5 m); "a machine" at 0.66 → the crusher (16 m, its
+    conveyors) + 2 specks; "gravel pile" at 0.65 → 20 piles (neighbouring piles can merge: one 56 m).
+- Not yet: tiling above 2048 px, distillation (option B).
 - Tests: `tests/test_semantic.py` (scoring, staleness, the panel's decoration; synthetic features).
 
 **Export** (`modelforge/export/products.py`, Export tab, or

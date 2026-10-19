@@ -165,6 +165,70 @@ class Features:
         return out
 
 
+def _components(keys):
+    """Connected components (26-neighbourhood) of occupied voxels; keys (M, 3) int, unique. Labels (M,)."""
+    M = len(keys)
+    lab = np.arange(M)
+    if M < 2:
+        return lab
+    lo = keys.min(0)
+    dims = keys.max(0) - lo + 3
+    lin = ((keys - lo + 1) * np.array([dims[1] * dims[2], dims[2], 1])).sum(1)
+    order = np.argsort(lin)
+    slin = lin[order]
+    a_idx, b_idx = [], []
+    for dx in (-1, 0, 1):  # half of the 26 neighbours: each edge once
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                if (dx, dy, dz) <= (0, 0, 0):
+                    continue
+                nb = lin + dx * dims[1] * dims[2] + dy * dims[2] + dz
+                pos = np.clip(np.searchsorted(slin, nb), 0, M - 1)
+                hit = slin[pos] == nb
+                a_idx.append(np.flatnonzero(hit))
+                b_idx.append(order[pos[hit]])
+    a_idx, b_idx = np.concatenate(a_idx), np.concatenate(b_idx)
+    while True:  # min-label propagation along the edges until nothing changes
+        m = np.minimum(lab[a_idx], lab[b_idx])
+        new = lab.copy()
+        np.minimum.at(new, a_idx, m)
+        np.minimum.at(new, b_idx, m)
+        new = new[new]  # pointer jumping
+        if np.array_equal(new, lab):
+            return lab
+        lab = new
+
+
+def objects(means, rel, thr, voxel=None, min_gaussians=30, max_objects=20):
+    """Object instances of a query: the Gaussians with relevance >= thr, grouped by 26-connected voxels (a
+    voxel of 1/300 of the scene's size unless given). Ranked by summed relevance above the threshold;
+    groups under min_gaussians are dropped. Each: center (weighted by relevance), radius (95 % of the
+    horizontal distances), z0 / z1 (2nd / 98th percentile height), count, score, mean relevance."""
+    sel = np.flatnonzero(rel >= thr)
+    if len(sel) < min_gaussians:
+        return []
+    if voxel is None:
+        lo, hi = np.percentile(means, 2, axis=0), np.percentile(means, 98, axis=0)
+        voxel = max(float(np.linalg.norm(hi - lo)) / 300.0, 1e-6)
+    p = means[sel]
+    keys, inv = np.unique(np.floor(p / voxel).astype(np.int64), axis=0, return_inverse=True)
+    comp = _components(keys)[inv.reshape(-1)]
+    out = []
+    for c in np.unique(comp):
+        m = comp == c
+        if m.sum() < min_gaussians:
+            continue
+        q, r = p[m], rel[sel][m]
+        w = r - thr + 1e-6
+        center = (q * w[:, None]).sum(0) / w.sum()
+        radius = float(np.percentile(np.linalg.norm(q[:, :2] - center[:2], axis=1), 95))
+        z0, z1 = np.percentile(q[:, 2], [2, 98])
+        out.append({"center": center, "radius": max(radius, voxel), "z0": float(z0), "z1": float(max(z1, z0 + voxel)),
+                    "count": int(m.sum()), "score": float(w.sum()), "relevance": float(r.mean())})
+    out.sort(key=lambda o: -o["score"])
+    return out[:max_objects]
+
+
 class TextEncoder:
     """A long-lived worker with the text model (load once: ~1 min; then a query takes milliseconds)."""
 

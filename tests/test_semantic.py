@@ -78,3 +78,42 @@ def test_panel_decorates_the_drawn_splat(tmp_path):
     sub = np.array([1, 3, 5])  # a subset of the file's Gaussians is drawn: scores follow the indices
     panel.g_mode = V("highlight in red")
     assert len(panel.decorate(centers[:3], cov[:3], rgb[:3], op[:3], sub)[2]) == 3
+
+
+def test_objects_are_separate_instances():
+    """Two blobs of matching Gaussians far apart + scattered matches = two objects, ranked by strength."""
+    rng = np.random.default_rng(0)
+    ground = np.c_[rng.uniform(0, 100, (5000, 2)), np.zeros(5000)]
+    car1 = rng.normal((20, 20, 0.8), (1.5, 0.8, 0.5), (400, 3))
+    car2 = rng.normal((70, 60, 0.8), (1.5, 0.8, 0.5), (200, 3))
+    means = np.vstack([ground, car1, car2])
+    rel = np.r_[rng.uniform(0.3, 0.55, 5000), np.full(400, 0.9), np.full(200, 0.8)]
+    rel[rng.choice(5000, 20, replace=False)] = 0.7  # scattered single matches: below min_gaussians
+    obs = semantic.objects(means, rel, 0.6)
+    assert len(obs) == 2
+    assert np.allclose(obs[0]["center"][:2], (20, 20), atol=0.5) and obs[0]["count"] > 370  # a few far outliers detach
+    assert np.allclose(obs[1]["center"][:2], (70, 60), atol=0.5)
+    assert 1.5 < obs[0]["radius"] < 4.5 and obs[0]["z0"] < 0.8 < obs[0]["z1"]
+    labels = semantic._components(np.array([[0, 0, 0], [1, 1, 1], [5, 5, 5], [6, 5, 5], [9, 0, 0]]))
+    assert labels[0] == labels[1] and labels[2] == labels[3] and len(set(labels)) == 3
+
+
+def test_cylinder_and_best_view():
+    from modelforge.gui import data as gdata
+    from modelforge.gui.semantic import best_view, cylinder_segments
+    seg = cylinder_segments(2.0, 3.0, n=24, struts=6)
+    assert seg.shape == (24 * 2 + 6, 2, 3)
+    assert np.allclose(np.linalg.norm(seg[:48, :, :2], axis=2), 2.0, atol=1e-5)  # the rings
+    assert set(np.round(seg[:, :, 2].ravel(), 5)) == {0.0, 3.0}
+
+    class Snap:
+        cams = gdata.Cameras.empty(3)
+    down = np.diag([1.0, -1.0, -1.0])  # OpenCV camera looking straight down
+    for i, c in enumerate([(0, 0, 30), (50, 0, 30), (3, 0, 10)]):
+        Snap.cams.centers[i], Snap.cams.R_wc[i] = c, down
+    target = np.array([2.0, 0.0, 0.0])
+    pos = best_view(Snap, target, np.radians(60), 16 / 9, radius=1.0)
+    assert np.allclose(pos, (3, 0, 10))  # the near camera that has it in view (not the one 50 m away)
+    pos = best_view(Snap, target, np.radians(60), 16 / 9, radius=8.0)  # a big object: pulled back to 20 m
+    assert np.isclose(np.linalg.norm(pos - target), 20.0)
+    assert best_view(Snap, np.array([500.0, 500.0, 0.0]), np.radians(60), 16 / 9, 1.0) is None
