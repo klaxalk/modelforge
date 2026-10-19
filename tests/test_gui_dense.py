@@ -161,6 +161,16 @@ def test_refresh_does_not_resend_unchanged_layers(app, project, monkeypatch):
     os.utime(p, (time.time() + 5, time.time() + 5))  # a new splat file
     app._refresh_dense()
     assert len(calls) == 3
+    app.g_splat_all.value = True  # All gaussians: redrawn without the subset limit
+    assert len(calls) == 4 and "splat:" in app.g_dense_md.content
+    from modelforge.gui import data as gdata
+    assert gdata.splat_count(p) == len(plyfile_vertices(p))
+    app.g_splat_all.value = False
+
+
+def plyfile_vertices(path):
+    import plyfile
+    return plyfile.PlyData.read(path)["vertex"].data
 
 
 def test_quick_bar(app):

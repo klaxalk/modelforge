@@ -95,3 +95,5 @@ def test_live_snapshot_matches_export(tmp_path):
         assert np.allclose(a, b, rtol=1e-4, atol=1e-5)
     step, n, live = gdata.load_live_splat(str(tmp_path / "live.npz"), str(tr), max_gaussians=100)
     assert n == 300 and len(live[0]) == 100  # subsampled for the browser
+    step, n, live = gdata.load_live_splat(str(tmp_path / "live.npz"), str(tr), max_gaussians=None)
+    assert len(live[0]) == 300  # View → All gaussians

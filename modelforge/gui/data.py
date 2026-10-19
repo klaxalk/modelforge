@@ -514,13 +514,28 @@ def load_textured_mesh(ply_path):
     return products.load_textured(ply_path) if n <= MAX_TEXTURED_FACES else None
 
 
-def load_splat(ply_path, max_gaussians=1_000_000, seed=0):
-    """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays."""
+SPLAT_SHOWN = 1_000_000  # a finished splat larger than this is shown as a random subset (View: All gaussians)
+LIVE_SPLAT_SHOWN = 500_000  # the same for live training snapshots
+
+
+def splat_count(ply_path):
+    """Number of Gaussians in a splat PLY, from its header."""
+    with open(ply_path, "rb") as f:
+        for line in f:
+            if line.startswith(b"element vertex"):
+                return int(line.split()[2])
+            if line.strip() == b"end_header":
+                break
+    return 0
+
+
+def load_splat(ply_path, max_gaussians=SPLAT_SHOWN, seed=0):
+    """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays (None: all)."""
     import plyfile
     return splat_arrays(plyfile.PlyData.read(ply_path)["vertex"].data, max_gaussians, seed)
 
 
-def load_live_splat(npz_path, transforms_path, max_gaussians=500_000, seed=0):
+def load_live_splat(npz_path, transforms_path, max_gaussians=LIVE_SPLAT_SHOWN, seed=0):
     """A training snapshot (modelforge.export.ckpt_dump) mapped to ENU, as viser arrays; (step, arrays).
     Band 0 only: the preview shows base colours, so no SH rotation is needed."""
     from modelforge.export import splat_to_enu
@@ -533,16 +548,16 @@ def load_live_splat(npz_path, transforms_path, max_gaussians=500_000, seed=0):
                  d["opacities"].reshape(n)]
     for i, k in enumerate(names):
         v[k] = cols[:, i]
-    if n > max_gaussians:  # subsample before the transform: cheaper, same result
+    if max_gaussians and n > max_gaussians:  # subsample before the transform: cheaper, same result
         v = v[np.sort(np.random.default_rng(seed).choice(n, max_gaussians, replace=False))]
     R, t, s = splat_to_enu.load_transform(transforms_path)
     return int(d["step"]), n, splat_arrays(splat_to_enu.transform_vertices(v, R, t, s), max_gaussians, seed)
 
 
-def splat_arrays(v, max_gaussians=1_000_000, seed=0):
-    """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities."""
+def splat_arrays(v, max_gaussians=SPLAT_SHOWN, seed=0):
+    """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities (None: all)."""
     idx = np.arange(len(v))
-    if len(v) > max_gaussians:
+    if max_gaussians and len(v) > max_gaussians:
         idx = np.sort(np.random.default_rng(seed).choice(len(v), max_gaussians, replace=False))
     v = v[idx]
     centers = np.stack([v["x"], v["y"], v["z"]], -1).astype(np.float32)

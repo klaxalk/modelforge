@@ -228,7 +228,14 @@ class App:
                                                 hint="splat/splat_enu.ply, in the same frame as the cameras and "
                                                      "mesh; shown as soon as training finishes (and live while it "
                                                      "trains).")
+                self.g_splat_all = gui.add_checkbox(
+                    "All gaussians", initial_value=False,
+                    hint=f"Show every Gaussian of the splat. Off: a random subset of at most "
+                         f"{gdata.SPLAT_SHOWN:,} (finished splat) or {gdata.LIVE_SPLAT_SHOWN:,} (live preview while "
+                         f"training), which keeps the browser responsive. Millions of Gaussians need a strong GPU "
+                         f"in the browser and take a while to send.")
                 self.g_dense_md = gui.add_markdown("")
+                self.g_splat_all.on_update(lambda _: self._splat_all_changed())
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
                 self.g_mesh_tex.on_update(lambda _: self._draw_mesh())
@@ -1398,11 +1405,12 @@ class App:
 
     def _on_splat_snapshot(self, step, npz, transforms):
         """A new training checkpoint: redraw the live splat in the View tab."""
-        step, n, arrays = gdata.load_live_splat(npz, transforms)
+        self._live_src = (npz, transforms)
+        step, n, arrays = gdata.load_live_splat(npz, transforms, self._splat_limit(gdata.LIVE_SPLAT_SHOWN))
         self._live_splat = arrays
         self._draw_live_splat()
-        msg = f"live splat: step {step:,}, {n:,} gaussians" + (f" ({len(arrays[0]):,} shown)" if len(arrays[0]) < n
-                                                                 else "")
+        msg = f"live splat: step {step:,}, {n:,} gaussians" + (
+            f" ({len(arrays[0]):,} shown; View → All gaussians for all)" if len(arrays[0]) < n else "")
         self._dense_status("splat", msg)
         self.g_splat_status.content = msg + " · View tab → Dense / splat → Splat"
         self._live_msg = msg + " (View tab)"
@@ -1692,17 +1700,30 @@ class App:
             self.server.scene.remove_by_name("/dense/mesh")
             self._dense_status("mesh", None)
 
+    def _splat_limit(self, default):
+        """How many Gaussians to send to the browser: None = all (View: All gaussians)."""
+        return None if self.g_splat_all.value else default
+
+    def _splat_all_changed(self):
+        src = getattr(self, "_live_src", None)
+        if getattr(self, "_splat_live_on", False) and src:  # reload the last live snapshot at the new size
+            step, n, self._live_splat = gdata.load_live_splat(*src, self._splat_limit(gdata.LIVE_SPLAT_SHOWN))
+        self._draw_splat()
+
     def _draw_splat(self):
         if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer
             self._draw_live_splat()
             return
-        key = self._file_key(self.dense["splat"]) if self.g_splat.value and self.dense["splat"] else None
+        key = ((self._file_key(self.dense["splat"]), self.g_splat_all.value)
+               if self.g_splat.value and self.dense["splat"] else None)
         if self._unchanged("splat", key):
             return
         if key is not None:
-            c, cov, rgb, op = gdata.load_splat(self.dense["splat"])
+            c, cov, rgb, op = gdata.load_splat(self.dense["splat"], self._splat_limit(gdata.SPLAT_SHOWN))
             self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
-            self._dense_status("splat", f"splat: {len(c):,} gaussians")
+            total = gdata.splat_count(self.dense["splat"])
+            self._dense_status("splat", f"splat: {total:,} gaussians" + (
+                f" ({len(c):,} shown; View → All gaussians for all)" if len(c) < total else ""))
         else:
             self.server.scene.remove_by_name("/dense/splat")
             self._dense_status("splat", None)
