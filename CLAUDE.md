@@ -915,6 +915,10 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
     within the GPU estimate, ≥ the sparse points) when the need exceeds the GPU, else default with
     the reset period max(3000, 2 × (training images + 100)); splitting stops at 1/2 (mcmc 5/6);
     camera optimizer SO3xR3. Explicit values win and the dependent ones follow.
+  - **Per method:** the plan's flags apply to splatfacto, splatfacto-big and their -lidar variants
+    (checked with nerfstudio's parser). splatfacto-big only differs by a lower split gradient (0.0005)
+    and cull opacity (0.005), so it grows more Gaussians without a cap: `GROWTH` 2×, i.e. it switches
+    to mcmc at half the need. Under mcmc both behave alike (no gradient threshold; cull 0.005 set).
   - Read-only on existing projects: fullrun_test (80 images) overlap 50×, 2.7 cm/px, ~0.8M needed →
     default; karlak (500) 82×, 0.8 cm/px, ~12.7M → mcmc 7M. Without an occlusion test the overlap is
     probably high, so the need is low.

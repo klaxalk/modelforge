@@ -443,7 +443,8 @@ class App:
                      "period scaled to the image count (splatfacto's fixed 3000 steps blocks densification "
                      "entirely from ~2900 training images). mcmc: a fixed budget of Gaussians relocated where "
                      "needed, for large areas. auto: mcmc when the area at full resolution needs more Gaussians "
-                     "than fit in GPU memory (scene size from the sparse points: overlap and GSD).")
+                     "than fit in GPU memory (scene size from the sparse points: overlap and GSD; splatfacto-big, "
+                     "which grows ~2× more Gaussians, at half that).")
             self.g_splat_maxg = gui.add_number(
                 "Max gaussians (M)", initial_value=0.0, min=0.0, step=0.5,
                 hint="mcmc budget in millions; 0 = auto: what the scene needs at the downsample factor, "
@@ -453,8 +454,8 @@ class App:
                 hint="splatfacto's camera optimizer: corrects small pose errors while training (rotation + "
                      "translation per image). auto = SO3xR3. off = keep the refined poses as they are.")
             self.g_splat_plan = gui.add_markdown("")
-            for g in (self.g_splat_iters, self.g_splat_down, self.g_splat_strategy, self.g_splat_maxg,
-                      self.g_splat_camopt):
+            for g in (self.g_splat_method, self.g_splat_iters, self.g_splat_down, self.g_splat_strategy,
+                      self.g_splat_maxg, self.g_splat_camopt):
                 g.on_update(lambda _: self._refresh_splat_plan())
             self.g_splat_lidar = gui.add_checkbox(
                 "Start from LiDAR points", initial_value=True,
@@ -1398,7 +1399,7 @@ class App:
         return splat_plan.suggest(self._splat_survey(project), iterations=int(self.g_splat_iters.value),
                                   downscale=self.g_splat_down.value, strategy=self.g_splat_strategy.value,
                                   max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
-                                  camera_opt=self.g_splat_camopt.value)
+                                  camera_opt=self.g_splat_camopt.value, method=self.g_splat_method.value)
 
     def _refresh_splat_plan(self):
         """The Splat tab's plan line, computed in the background (the survey reads every camera)."""

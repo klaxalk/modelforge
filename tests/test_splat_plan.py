@@ -62,6 +62,14 @@ def test_suggest_small_and_large():
     assert p["iterations"] == 30_000 and p["downscale"] == 1 and p["strategy"] == "default"
     assert p["reset_alpha_every"] == 30 and p["stop_split_at"] == 15_000 and p["max_gaussians"] is None
     assert p["camera_opt"] == "SO3xR3"
+    # splatfacto-big grows ~2x the Gaussians without a cap: it takes the capped mcmc at half the need
+    mid = dict(small, images=350)  # ~6.0M needed, under the 7M a 24 GB GPU fits
+    assert splat_plan.suggest(mid, vram=24)["strategy"] == "default"
+    for m in ("splatfacto-big", "splatfacto-big-lidar"):
+        p = splat_plan.suggest(mid, vram=24, method=m)
+        assert p["strategy"] == "mcmc" and p["max_gaussians"] == splat_plan.needed_gaussians(mid)
+        assert any("grows ~2×" in n for n in p["notes"])
+    assert splat_plan.suggest(small, vram=24, method="splatfacto-big")["strategy"] == "default"  # 3.5M x 2 fits
 
     big = dict(small, images=8000, train_images=7200, width=3840, height=2160, area_m2=250_000.0, gsd_m=0.03)
     p = splat_plan.suggest(big, vram=24)

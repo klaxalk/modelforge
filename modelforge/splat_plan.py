@@ -39,6 +39,10 @@ ASSUMED_HFOV_DEG = 80.0  # priors without a calibrated camera (DJI wide cameras:
 MAX_POINTS = 10_000  # sparse points sampled for the survey
 FAR_X_MEDIAN = 4.0  # points beyond this many times a camera's median depth don't count as seen
 TRAIN_FRACTION = 0.9  # nerfstudio-data's train_split_fraction
+# Gaussians the default (uncapped) strategy grows per Gaussian the scene needs: splatfacto-big splits at a
+# lower gradient (0.0005 vs 0.0008) and culls at a lower opacity (0.005 vs 0.1), so it switches to the
+# capped mcmc at half the need
+GROWTH = {"splatfacto": 1.0, "splatfacto-big": 2.0}
 
 
 def vram_gb():
@@ -147,10 +151,12 @@ def needed_gaussians(s, downscale=1):
     return int(s["images"] * s["width"] * s["height"] / (s["overlap"] * (PX_PER_GAUSSIAN * downscale) ** 2))
 
 
-def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None):
+def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None,
+            method="splatfacto"):
     """Settings for splat.train_command from a survey: iterations, downscale, strategy, max_gaussians,
     stop_split_at, reset_alpha_every, camera_opt, plus `notes` (why). Explicit arguments win over the
-    suggestion (None, 0 or "auto" = suggest); the dependent values follow them."""
+    suggestion (None, 0 or "auto" = suggest); the dependent values follow them. method: splatfacto or
+    splatfacto-big (also their -lidar variants): how fast the uncapped default strategy grows."""
     auto = lambda v: v in (None, 0, "", "auto")  # noqa: E731
     vram = vram or vram_gb() or DEFAULT_VRAM_GB
     cap = max(1_000_000, int((vram - VRAM_RESERVE_GB) * GAUSSIANS_PER_GB))
@@ -159,8 +165,9 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
              if auto(iterations) else int(iterations))
     down = 1 if auto(downscale) else int(downscale)  # full resolution unless asked
     need = needed_gaussians(s, down)
+    growth = GROWTH.get(method.removesuffix("-lidar"), 1.0)
     if auto(strategy):
-        strategy = "mcmc" if need is not None and need > cap else "default"
+        strategy = "mcmc" if need is not None and need * growth > cap else "default"
     auto_budget = auto(max_gaussians)
     if strategy == "mcmc" and auto_budget:
         # MCMC grows to its cap: what the scene needs at that factor, within the GPU estimate
@@ -177,7 +184,8 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
     if s.get("gsd_m"):
         notes.append(f"surface ~{s['area_m2'] / 1e4:,.1f} ha seen {s['overlap']:.0f}× on average (sparse points), "
                      f"GSD {s['gsd_m'] * 100:.1f} cm/px at full resolution (median)")
-        notes.append(f"~{need / 1e6:.1f}M Gaussians at ×{down}; {vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M")
+        notes.append(f"~{need / 1e6:.1f}M Gaussians at ×{down}; {vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M"
+                     + (f" ({method} grows ~{growth:g}× that without a cap)" if growth != 1 else ""))
     else:
         notes.append("no sparse points yet: the scene size is unknown (run SfM + export for the estimate)")
     notes.append(f"{iters:,} steps (~{iters / n:.0f} views per image), splitting until {plan['stop_split_at']:,}")

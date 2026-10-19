@@ -380,7 +380,8 @@ def main():
             from modelforge import splat_plan
             schedule = splat_plan.suggest(splat_plan.survey(project), iterations=args.iterations,
                                           downscale=args.downscale, strategy=args.strategy,
-                                          max_gaussians=args.max_gaussians, camera_opt=args.camera_opt)
+                                          max_gaussians=args.max_gaussians, camera_opt=args.camera_opt,
+                                          method=args.method)
             print("splat plan: " + "; ".join(schedule["notes"]), flush=True)
             iterations, downscale = schedule["iterations"], schedule["downscale"]
         run(project, args.method, iterations, extra, on_line=lambda m: print(m, flush=True), cache=args.cache,
