@@ -531,6 +531,10 @@ and the splat.
   - On franta with Camera frame `uav64/fcu`: without RPY the optical axis pointed straight up
     (median z +1.00), with 0, 90, 0 straight down (−1.00), 2216/2216 poses.
   - The Ingest tab warns when the images' frame is not in TF.
+  - Extraction streams: `_sharpest` yields a window's sharpest frame as soon as decoding passes the
+    window's end. Before, it decoded every window first and held all best frames (franta: 200 × 12 MP
+    ≈ 7 GB in the GUI process), so the progress sat at "decoding up to the first selected frame" and
+    then jumped to done. Test: `test_sharpest_streams_per_window`.
   - Tests: `test_extrinsic_rpy` (the test bag's forward mount reproduced from `base` + 0, 0, 0),
     `test_uncalibrated_camera_info`.
 - Not done yet:

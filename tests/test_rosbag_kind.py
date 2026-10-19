@@ -107,6 +107,32 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False):
     return truth
 
 
+def test_sharpest_streams_per_window(monkeypatch):
+    """Each window's sharpest frame comes out as soon as decoding has passed the window (progress while the
+    bag is read, one window's frames in memory), and it is the sharpest of its window."""
+    rng = np.random.default_rng(0)
+    read = []
+
+    def fake_iter(video, topic, indices):
+        for k in indices:
+            read.append(k)
+            sharpness = 1 + (k % 3 == 1)  # the middle frame of every 3 is the sharpest
+            img = (rng.random((40, 40, 3)) * 255 * sharpness / 2).astype(np.uint8) if sharpness > 1 else \
+                np.full((40, 40, 3), 128, np.uint8)
+            yield k, float(k), img
+    monkeypatch.setattr(ri.bag, "iter_images", fake_iter)
+
+    class Clip:
+        video, topic = "bag", "/img"
+    windows = [(0, 2), (3, 5), (6, 8), (9, 11)]
+    got, read_at = [], []
+    for k, rgb, sharp in ri._sharpest(Clip(), windows):
+        got.append(k)
+        read_at.append(len(read))
+    assert got == [1, 4, 7, 10]
+    assert read_at[:3] == [4, 7, 10]  # window 0 out after frame 3 was read, not after the whole bag
+
+
 def test_extrinsic_rpy(tmp_path):
     """A camera frame missing from TF: poses of its mount frame + Extrinsic RPY. The test bag mounts the
     optical frame on base looking forward (0.1 m ahead), so base + RPY 0, 0, 0 gives the true

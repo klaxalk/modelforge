@@ -284,18 +284,29 @@ def preview(plan, *args, **kwargs):
 
 
 def _sharpest(clip, windows):
-    """(frame, rgb, sharpness) per window: every image inside a window is decoded once."""
+    """(frame, rgb, sharpness) per window, in window order: every image inside a window is decoded once,
+    and a window's sharpest frame is yielded as soon as decoding has passed the window's end. So images
+    are written (and progress reported) while the bag is read, and only the open windows' best frames
+    are in memory; before, every window's best (200 full 12 MP frames: ~7 GB) was held until the end."""
     inside = sorted({k for a, b in windows for k in range(a, b + 1)})
-    best = {}
+    best, done = {}, 0  # windows[:done] are yielded
+
+    def flush(upto):  # yield the windows that end before frame `upto`, in order
+        nonlocal done
+        while done < len(windows) and windows[done][1] < upto:
+            if done in best:
+                yield best.pop(done)
+            done += 1
+
     for k, _, rgb in bag.iter_images(clip.video, clip.topic, inside):
+        yield from flush(k)
         wi = next(j for j, (a, b) in enumerate(windows) if a <= k <= b)
         g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         small = cv2.resize(g, (max(1, g.shape[1] // 4), max(1, g.shape[0] // 4)), interpolation=cv2.INTER_AREA)
         sharp = float(cv2.Laplacian(small, cv2.CV_64F).var())
         if wi not in best or sharp > best[wi][2]:
             best[wi] = (k, rgb, sharp)
-    for wi in sorted(best):
-        yield best[wi]
+    yield from flush(float("inf"))
 
 
 def accumulate_clouds(path, ros, t0, t1, log=print, max_scans=400):
