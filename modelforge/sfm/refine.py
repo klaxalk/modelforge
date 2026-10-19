@@ -75,24 +75,32 @@ def init_from_database(db_path, priors, names=None):
     return rec
 
 
-def refine_points(rec, loss_scale_px=1.0, max_iterations=50):
+POINT_BATCH = 100_000  # points per refine_points problem (~0.5 GB)
+
+
+def refine_points(rec, loss_scale_px=1.0, max_iterations=50, batch=POINT_BATCH):
     """Points-only BA: poses and intrinsics constant, so every point is its own 3x3 problem (sparse
-    normal Cholesky on a block-diagonal system, no Schur complement over thousands of cameras)."""
+    normal Cholesky on a block-diagonal system, no Schur complement over thousands of cameras).
+
+    Solved in batches of `batch` points: a config with variable points and no images gives only
+    constant-pose residuals for those points' tracks. One problem over all points ran out of memory
+    on 8000 images (kladno_dira: ~10M points, killed at 30 GB); a batch takes a few hundred MB."""
     opts = pycolmap.BundleAdjustmentOptions()
     opts.refine_focal_length = opts.refine_extra_params = opts.refine_principal_point = False
     opts.refine_rig_from_world = False
     opts.ceres.loss_function_type = pycolmap.LossFunctionType.CAUCHY
     opts.ceres.loss_function_scale = loss_scale_px
     opts.ceres.solver_options.max_num_iterations = max_iterations
-    config = pycolmap.BundleAdjustmentConfig()
-    for image_id in rec.reg_image_ids():
-        config.add_image(image_id)
-    ba = pycolmap.create_default_ceres_bundle_adjuster(opts, config, rec)
-    solver_options = pyceres.SolverOptions(opts.ceres.create_solver_options(config, ba.problem))
-    solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
-    summary = pyceres.SolverSummary()
-    pyceres.solve(solver_options, ba.problem, summary)
-    return summary
+    ids = list(rec.point3D_ids())
+    for k in range(0, len(ids), batch):
+        config = pycolmap.BundleAdjustmentConfig()
+        for point3D_id in ids[k:k + batch]:
+            config.add_variable_point(point3D_id)
+        ba = pycolmap.create_default_ceres_bundle_adjuster(opts, config, rec)
+        solver_options = pyceres.SolverOptions(opts.ceres.create_solver_options(config, ba.problem))
+        solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+        pyceres.solve(solver_options, ba.problem, pyceres.SolverSummary())
+        del ba
 
 
 def triangulate(rec, db_path, image_path, out_dir, rnd, refine=False):

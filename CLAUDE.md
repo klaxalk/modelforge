@@ -808,6 +808,11 @@ Known limitations:
       filter called directly: 3.3 min. The final triangulation refines its points
       (`refine.refine_points`, poses + intrinsics constant). fullrun_test (80 images): final
       error 0.475 / 1.229 → 0.457 / 1.066 px, poses unchanged, refine 47 → 38 s.
+    - `refine_points` solves in batches of 100k points (`POINT_BATCH`; a config with only
+      variable points gives constant-pose residuals). One problem over all points needs ~0.9 KB
+      per observation: on kladno_dira at 8000 images (~10M points) the GUI was OOM-killed at
+      30 GB in the final refine_points, after 4 h of refine. Batched results are identical
+      (fullrun_test: points within 1e-12); a batch peaks at ~0.5 GB.
     - Direct sparse Schur at any size: COLMAP's iterative Schur above 1000 images took 27–150 s
       per iteration on 4000 images, direct 11 s.
     - Relative priors skip pairs more than 10 images apart in capture order
