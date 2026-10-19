@@ -348,5 +348,10 @@ class TextEncoder:
             return np.array(json.loads(self.proc.stdout.readline()), np.float32)
 
     def close(self):
+        """Stop the worker and wait for it to exit (its GPU and RAM are free afterwards)."""
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()

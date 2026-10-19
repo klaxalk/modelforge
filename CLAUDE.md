@@ -1234,6 +1234,14 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   range); "a machine" at 0.66 → 1 object instead of 3 (944 floating matches ignored), "a car" loses 16 %
   of its matches (glossy parts), "gravel pile" 20 → 18 objects. It cannot fix matches bleeding onto real
   surfaces (the ground around the machine): that is the threshold's job.
+- **In the full pipeline** (the user asked): after splat + splat mesh, unless the Search tab's "Include in Run
+  full pipeline" is off; the History line: "900,283 of 1,018,377 Gaussians from 56 photos (c-radio_v3-l,
+  2048 px), 38 s".
+- **Unloading for jobs** (the user asked): `App.run_stage` calls `SemanticPanel.unload(stage)` for every
+  job (SfM, dense, splat, meshes, the semantic features, …): the text worker stops and waits to exit (~2.7 GB
+  RAM, ~1 GB GPU freed). It loads again in the background on the first keystroke in Query, or when
+  searching. viser does not report switching tabs (selection is client-side only), so typing is the
+  first sign the Search tab is in use.
 - **Preloading**: `main` calls `SemanticPanel.preload()`, which starts the text worker in the background when
   the GUI starts (~13 s; "text model: ready" in the tab); a search meanwhile waits for it. Opening a project
   with ready features also loads them and the splat positions in the background (`_warm`), so the first
@@ -1518,7 +1526,8 @@ Code layout:
       480 px). The user wanted them split side by side; a floating panel
       cannot be split into columns (only docked ones can), so they are two
       windows. Both start minimized.
-  - **Run full pipeline** (stage `all`) runs SfM → splat → splat mesh with the
+  - **Run full pipeline** (stage `all`) runs SfM → splat → splat mesh → semantic features (Search tab
+    "Include in Run full pipeline", default on; skipped without the RADIO packages) with the
     tabs' settings: the dense result is the mesh from the splat, as the user asked
     (2026-10-18). COLMAP's MVS follows only with the Dense tab's "Include in Run full
     pipeline" (off by default). A project without images is extracted first from

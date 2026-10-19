@@ -117,6 +117,17 @@ def test_refine_summary_tells_wrong_priors_from_little_overlap(app):
     assert "do not fit the images" in wrong and "too little overlap" in sparse
 
 
+def test_full_pipeline_includes_semantic(app):
+    """Run full pipeline ends with the semantic features when the Search tab says so (and RADIO is there);
+    the History line summarizes them."""
+    from modelforge import semantic as sem
+    assert app.semantic.g_in_all.value  # on by default
+    line = app._stage_summary("semantic", {"semantic": {"seen": 900283, "gaussians": 1018377, "photos": 56,
+                                                         "version": "c-radio_v3-l", "width": 2048, "seconds": 37.7}})
+    assert "900,283 of 1,018,377" in line and "56 photos" in line
+    assert sem.available() is None or "RADIO" in sem.available() or "nerfstudio" in sem.available()
+
+
 def test_tab_defaults(app):
     assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)

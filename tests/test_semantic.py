@@ -174,3 +174,31 @@ def test_auto_threshold():
     obs = semantic.objects(means, rel, thr)
     assert len(obs) == 1 and np.allclose(obs[0]["center"][:2], (50, 50), atol=0.5)
     assert semantic.auto_threshold(means, np.minimum(rel, 0.55)) == (0.55, "absent")
+
+
+def test_text_model_unloads_for_jobs_and_loads_on_typing(monkeypatch):
+    """A job stops the text worker; typing in Query starts it again (in the background)."""
+    from modelforge.gui.semantic import SemanticPanel
+
+    class V:
+        def __init__(self, v):
+            self.value, self.content = v, ""
+
+    class Proc:
+        def __init__(self):
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+    started = []
+    panel = SemanticPanel.__new__(SemanticPanel)
+    panel.encoder = semantic.TextEncoder()
+    panel.encoder.proc = Proc()
+    panel.encoder.close = lambda: setattr(panel.encoder.proc, "alive", False)
+    panel.g_text_md, panel.g_query = V(""), V("a ca")
+    panel.preload = lambda: started.append(1)
+    panel.search = lambda client=None: None
+    panel.unload("splat")
+    assert panel.encoder.proc is None and "unloaded for splat" in panel.g_text_md.content
+    panel._query_typed(None)
+    assert started == [1]

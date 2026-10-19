@@ -1056,6 +1056,7 @@ class App:
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         self.running = True
+        self.semantic.unload(stage)  # reconstructions get the memory; the text model loads again on demand
         self._token = jobs.Token()
         self.g_stop.disabled = False
         self._run_id = getattr(self, "_run_id", 0) + 1
@@ -1085,6 +1086,11 @@ class App:
                     seq = ["analyze", "keyframes"] + seq
                 if splat.available() is None:
                     seq += ["splat", "splatmesh"]  # the dense result is the mesh from the splat
+                    if self.semantic.g_in_all.value:  # Search tab: a searchable splat at the end
+                        if semantic.available() is None:
+                            seq.append("semantic")
+                        else:
+                            skipped.append(f"semantic features ({semantic.available()})")
                 else:
                     skipped.append(f"splat and splat mesh ({splat.available()})")
                 if self.g_dense_in_all.value:  # COLMAP's MVS only when asked (Dense tab)
@@ -1762,6 +1768,10 @@ class App:
                 return f"{r['frames']} frames → transforms.json"
             if st == "fusion":
                 return f"{r.get('points', r)}"
+            if st == "semantic":
+                r = rep["semantic"]
+                return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos ({r['version']}, "
+                        f"{r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "

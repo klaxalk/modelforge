@@ -6,7 +6,9 @@ Objects: the matches grouped into instances (semantic.objects), each marked by a
 struts, slowly turning about the vertical) with a label, listed in a dropdown; Go glides the camera to the
 photo viewpoint that saw the object best (looking at it), else to an elevated view that fits it. A new
 search goes to the best object at once. `preload` (called when the GUI starts) loads the text model in the
-background, so the first search does not wait for it."""
+background, so the first search does not wait for it. Every job (SfM, dense, splat, meshes, the features)
+unloads it (`unload`, ~2.7 GB RAM + ~1 GB GPU); it loads again on the first keystroke in Query (viser does
+not report switching tabs, typing is the first sign of using the tab) or at the latest when searching."""
 
 import contextlib
 import threading
@@ -39,6 +41,10 @@ class SemanticPanel:
                      "splat's Gaussians with an occlusion test: splat/semantic/ (the splat itself is unchanged). "
                      "About a minute for ~60 photos; the first run downloads the models (~5 GB).")
             self.g_compute.on_click(lambda _: self.app.run_stage("semantic"))
+            self.g_in_all = gui.add_checkbox(
+                "Include in Run full pipeline", initial_value=True,
+                hint="Run full pipeline computes the semantic features right after the splat (and the mesh from "
+                     "it), so a full run ends with a searchable splat. Skipped without the RADIO packages.")
             # multiline only to see Enter: viser's text box has no submit event, but a newline arrives
             self.g_query = gui.add_text("Query", initial_value="", multiline=True,
                                         hint="What to look for, in words: 'a car', 'gravel pile', 'a roof'. "
@@ -125,6 +131,19 @@ class SemanticPanel:
         return self.feats
 
     # ------------------------------------------------------------ search
+    def unload(self, reason=""):
+        """Stop the text worker (a reconstruction starts and needs the memory)."""
+        if self.encoder.proc is not None and self.encoder.proc.poll() is None:
+            self.encoder.close()
+            self.encoder.proc = None
+            self.g_text_md.content = (f"text model: unloaded for {reason or 'a job'} (loads again when you type a "
+                                      "query or search)")
+
+    def ensure_loaded(self):
+        """Load the text model in the background unless it is loaded or loading."""
+        if (self.encoder.proc is None or self.encoder.proc.poll() is not None) and not self.encoder.lock.locked():
+            self.preload()
+
     def preload(self):
         """Load the text model in the background (GUI start), so the first search is quick."""
         if semantic.available() is not None:
@@ -136,11 +155,13 @@ class SemanticPanel:
                 self.encoder.encode(["warm-up"])
                 self.g_text_md.content = "text model: ✅ ready"
             except Exception as e:  # noqa: BLE001 - shown in the GUI; a search retries
-                self.g_text_md.content = f"text model: ❌ {e}"
+                if self.encoder.proc is not None:  # (None: unloaded for a job meanwhile, not a failure)
+                    self.g_text_md.content = f"text model: ❌ {e}"
         threading.Thread(target=work, daemon=True).start()
 
     def _query_typed(self, client):
-        """Enter in the Query box (a newline) starts the search."""
+        """Enter in the Query box (a newline) starts the search; any typing loads the text model if needed."""
+        self.ensure_loaded()
         v = self.g_query.value
         if "\n" in v:
             self.g_query.value = " ".join(v.split()).strip()
