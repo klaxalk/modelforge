@@ -3,6 +3,8 @@ without metadata). Options: EXTRACTORS, max features, upright."""
 
 import json
 import os
+import sqlite3
+import threading
 import time
 
 import pycolmap
@@ -15,11 +17,32 @@ EXTRACTORS = {
 }
 
 
-def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift", camera_params=None):
+def _watch(db_path, total, progress, done, every=0.25):
+    """progress(images done, total, last image name) while COLMAP fills the database: extract_features
+    has no callback, but each image is committed as it finishes."""
+    last = -1
+    while not done.wait(every):
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.1)
+            try:
+                n = con.execute("SELECT COUNT(*) FROM keypoints").fetchone()[0]
+                row = con.execute("SELECT name FROM images ORDER BY image_id DESC LIMIT 1").fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:  # not created yet, or busy
+            continue
+        if n != last:
+            last = n
+            progress(n, total, row[0] if row else "")
+
+
+def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift", camera_params=None,
+            progress=None):
     """Write PROJECT/features.db (keypoints/descriptors only) for the images in poses.json.
 
     Matching works on a copy, so pairs can be re-matched without re-extracting.
     extractor: EXTRACTORS (learned ones such as ALIKED need COLMAP built with ONNX, which this image is not).
+    progress(done, total, name): images finished so far (polled from the database a few times a second).
     """
     if extractor not in EXTRACTORS:
         raise ValueError(f"extractor must be one of {tuple(EXTRACTORS)}")
@@ -43,9 +66,17 @@ def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True,
         extraction.sift.estimate_affine_shape = True
         extraction.use_gpu = False
     t0 = time.time()
-    pycolmap.extract_features(db_path, os.path.join(project, "images"), image_names=names,
-                              camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
-                              extraction_options=extraction)
+    done = threading.Event()
+    if progress:
+        threading.Thread(target=_watch, args=(db_path, len(names), progress, done), daemon=True).start()
+    try:
+        pycolmap.extract_features(db_path, os.path.join(project, "images"), image_names=names,
+                                  camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
+                                  extraction_options=extraction)
+    finally:
+        done.set()
+    if progress:
+        progress(len(names), len(names), names[-1] if names else "")
     db = pycolmap.Database.open(db_path)
     stats = {"images": db.num_images(), "keypoints": db.num_keypoints(), "cameras": db.num_cameras(),
              "extractor": extractor, "max_num_features": max_num_features, "upright": upright,

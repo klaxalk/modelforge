@@ -1494,7 +1494,8 @@ Code layout:
   - **Sparse**: "Run SfM (all)", or features, pairs, match, refine (live),
     export one at a time.
     - A state line: ⏳ running stage k/n with stage/total time and a detail
-      line (BA round and iteration; in a chunked refine "calibration round", "chunk k/n",
+      line (feature extraction: "image k / n · name", polled from features.db since
+      `pycolmap.extract_features` has no callback (`features._watch`); BA round and iteration; in a chunked refine "calibration round", "chunk k/n",
       "pose graph" or "polish … window k/n"), then ✅ finished + next step, or ❌ failed + error.
     - BA mode / chunk size / overlap / polish sweeps (see "Large projects: chunked refinement").
     - A **History** of finished stages with key numbers, and a **Log** of

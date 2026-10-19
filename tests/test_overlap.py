@@ -90,3 +90,22 @@ def test_read_overlap_and_apply_list(tmp_path):
     assert (n, total) == (3, 6) and sorted(os.listdir(os.path.join(p, "images"))) == names
     info = projects.subsample_info(p)
     assert info["setting"]["method"] == "keyframes" and info["setting"]["images_extracted"] == 6
+
+
+def test_feature_progress(tmp_path):
+    """features.extract reports images as COLMAP finishes them (it has no callback: the database is polled)."""
+    import numpy as np
+    from PIL import Image
+    from modelforge.sfm import features
+    os.makedirs(tmp_path / "images")
+    rng = np.random.default_rng(0)
+    ims = []
+    for i in range(12):
+        name = f"im_{i:02d}.jpg"
+        Image.fromarray(rng.integers(0, 255, (240, 320, 3), np.uint8)).save(tmp_path / "images" / name)
+        ims.append({"image": name})
+    json.dump({"images": ims}, open(tmp_path / "poses.json", "w"))
+    seen = []
+    stats = features.extract(str(tmp_path), progress=lambda k, n, name: seen.append((k, n, name)))
+    assert stats["images"] == 12 and seen[-1] == (12, 12, "im_11.jpg")
+    assert all(n == 12 for _, n, _ in seen) and [k for k, _, _ in seen] == sorted(k for k, _, _ in seen)

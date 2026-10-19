@@ -91,6 +91,23 @@ def test_run_mesh_stage_from_gui(app, project):
     assert os.path.exists(os.path.join(project, "dense", "preview-delaunay.ply"))
 
 
+def test_features_progress_in_the_state_line(app):
+    """Feature extraction shows "image k / n · name" while it runs (COLMAP's database is polled)."""
+    details = []
+    real = app._on_features_progress
+    app._on_features_progress = lambda k, n, name: (real(k, n, name), details.append(app._job["detail"]))
+    try:
+        app.run_stage("features")
+        t0 = time.time()
+        while app.running and time.time() - t0 < 300:
+            time.sleep(0.1)
+    finally:
+        app._on_features_progress = real
+    n = len(app.project.names)
+    assert "finished" in app.g_state.content, app.g_state.content
+    assert details and details[-1].startswith(f"image {n:,} / {n:,}") and "`" in details[-1]
+
+
 def test_tab_defaults(app):
     assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)

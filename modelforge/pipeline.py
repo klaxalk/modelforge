@@ -74,16 +74,17 @@ def known_camera(project):
     return json.load(open(path)) if os.path.exists(path) else None
 
 
-def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None):
+def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None, progress=None):
     """DJI: upright SIFT (the gimbal keeps the horizon level) and an OPENCV camera refined against the
     priors. Videos without metadata: oriented SIFT (handheld footage rolls) and a RADIAL camera (one
-    focal length: without priors, separate fx / fy drift apart on short sequences). upright None = by kind."""
+    focal length: without priors, separate fx / fy drift apart on short sequences). upright None = by kind.
+    progress(done, total, image name): features.extract's progress."""
     video = kind == "video"
     upright = (kind == "dji") if upright is None else upright
     cam = known_camera(project)  # ROS camera_info: fixed intrinsics
     model = cam["model"] if cam else ("RADIAL" if video else "OPENCV")
     stats = features.extract(project, max_num_features=max_features, upright=upright, extractor=extractor,
-                             camera_model=model, camera_params=cam["params"] if cam else None)
+                             camera_model=model, camera_params=cam["params"] if cam else None, progress=progress)
     stats["camera"] = {"model": model, "known": bool(cam)}
     log(f"features: {stats}")
     report.set("features", stats)

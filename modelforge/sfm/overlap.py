@@ -80,7 +80,13 @@ def analyze(project, kind="dji", window=WINDOW, token=None, log=print):
     t0 = time.time()
     report = pipeline.Report(ws)
     log(f"analysis: features of {len(poses['images'])} images")
-    pipeline.stage_features(ws, report, kind=kind)
+    step = [0]
+
+    def progress(k, n, name):  # a log line every ~10 %
+        if k >= step[0] or k == n:
+            log(f"analysis: features {k} / {n}")
+            step[0] = k + max(1, n // 10)
+    pipeline.stage_features(ws, report, kind=kind, progress=progress)
     jobs.check(token)
     pairs = sequential_pairs(poses["images"], window)
     with open(os.path.join(ws, "pairs.txt"), "w") as f:

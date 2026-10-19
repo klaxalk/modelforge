@@ -1066,7 +1066,8 @@ class App:
                 ts = time.time()
                 if st == "features":
                     pipeline.stage_features(project, report, self._kind(), self.g_extractor.value,
-                                            int(self.g_max_features.value), bool(self.g_upright.value))
+                                            int(self.g_max_features.value), bool(self.g_upright.value),
+                                            progress=self._on_features_progress)
                 elif st == "reconstruct":
                     pipeline.stage_reconstruct(project, report, progress=self._on_reconstruct_event,
                                                token=self._token, mapper=self.g_mapper.value)
@@ -1610,6 +1611,12 @@ class App:
                                                   opacities=op)
         else:
             self.server.scene.remove_by_name("/dense/splat_live")
+
+    def _on_features_progress(self, done, total, name):
+        """Feature extraction: image k / n and the image just finished, on the state line and the bar."""
+        self._job["detail"] = f"image {done:,} / {total:,} · `{name}`" if name else f"image {done:,} / {total:,}"
+        if self._job.get("label") == "features":  # the stage alone: the bar is this stage's
+            self.g_progress.value = 100.0 * done / max(total, 1)
 
     def _begin_stage(self, st, k, n):
         j = self._job
