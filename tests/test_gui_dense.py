@@ -234,10 +234,14 @@ def test_quick_bar(app):
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
     assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "○", "Cams": "○", "Thumbs": "·",
-                       "Resid": state()["Resid"], "Traj": state()["Traj"], "Plan": state()["Plan"], "Orbit": "○",
+                       "Resid": state()["Resid"], "Traj": state()["Traj"], "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
                        "Center": "⌖", "Fly": "○"}  # points, cameras, thumbs off
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
+    app._quick_click("Tiles", None)  # View: Tile boundaries
+    assert app.g_tiles_view.value and state()["Tiles"] == "●"
+    app._quick_click("Tiles", None)
+    assert not app.g_tiles_view.value and state()["Tiles"] == "○"
     app._quick_click("Mesh", None)
     assert app.g_mesh.value == "delaunay" and state()["Mesh"] == "●"
     app._quick_click("Mesh", None)

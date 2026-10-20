@@ -254,7 +254,7 @@ class App:
                          "(the training one orange). Without a tiled run yet: the cells it would use, with the "
                          "Splat tab's Photos per tile.")
                 self.g_dense_md = gui.add_markdown("")
-                self.g_tiles_view.on_update(lambda _: self._draw_tiles())
+                self.g_tiles_view.on_update(lambda _: (self._draw_tiles(), self._sync_quickbar()))
                 self.g_splat_all.on_update(lambda _: self._splat_all_changed())
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
@@ -1314,6 +1314,8 @@ class App:
                 ("Residuals", self.project is not None, self.g_corr.value),  # View: Prior → refined
                 ("Trajectory", self.project is not None, self.g_traj.value),  # View: camera / prior paths
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
+                ("Tiles", bool(self.path) and os.path.exists(os.path.join(self.path, "transforms.json")),
+                 self.g_tiles_view.value),  # View: Tile boundaries
                 ("Orbit", True, bool(self._orbits)),
                 ("Center", True, False),
                 ("Fly", self.project is not None, bool(self._flights)))
@@ -1334,7 +1336,7 @@ class App:
                 "", options=labels, order=1.0,
                 hint="Splat, Mesh, Dense (fused points), Points (sparse), Cams (cameras), Thumbs (their "
                      "thumbnails, with the cameras on), Resid (red prior → refined segments), Traj (trajectories), "
-                     "Plan (the Ingest flight plan); Orbit, Center (look at the whole scene), Fly (the camera "
+                     "Plan (the Ingest flight plan), Tiles (the splat tiles' boundaries); Orbit, Center (look at the whole scene), Fly (the camera "
                      "path). ● on, ○ off, · nothing yet. Same as the View tab.")
         long = {v: k for k, v in QUICK_SHORT.items()}
 
@@ -1371,6 +1373,8 @@ class App:
             self.g_dense_pts.value = not self.g_dense_pts.value
         elif name == "Plan":
             self._set_plan_visible(not self.ingest.g_show.value)
+        elif name == "Tiles":
+            self.g_tiles_view.value = not self.g_tiles_view.value
         elif name == "Orbit":
             self.toggle_orbit(client)
         elif name == "Fly":

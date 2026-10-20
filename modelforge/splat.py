@@ -525,7 +525,7 @@ def main():
     ap.add_argument("--tile-photos", type=int, default=None, help="about this many photos look into each tile (default 500)")
     ap.add_argument("--round-steps", type=int, default=None,
                     help="tiled runs: every tile advances this many steps per round, merged after each "
-                         "(default 6000; 0 = one tile after the other)")
+                         "(default 4000; 0 = one tile after the other)")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()

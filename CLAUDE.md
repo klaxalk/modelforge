@@ -1321,7 +1321,7 @@ helped little):
   margin (25 % of the cell's longer side), `images/` and `images_N/` as relative links to the project's; then
   `splat.run` with its own plan (`suggest(survey(tile), tiles="off")`: steps from its photos, the tab's explicit
   values apply per tile), one tile after the other, image cache auto per tile.
-- **Rounds** (`ROUND_STEPS` = 6000, Splat tab "Steps per round", CLI `--round-steps`, 0 = one tile after the other;
+- **Rounds** (`ROUND_STEPS` = 4000 (the user's default; 6000 at first), Splat tab "Steps per round", CLI `--round-steps`, 0 = one tile after the other;
   the user asked, to see the whole scene early and have it improve evenly): every tile advances that many steps per
   round (`splat.run(stop_at=)`: the trainer checkpoints and ends as on Stop, resume.json written, the splat so far
   exported, no exception) and continues from its checkpoint next round, so step, optimizer state and learning-rate /
@@ -1329,11 +1329,11 @@ helped little):
   (seconds). tiles.json: per tile `step`, status `pending` / `training` / `round` / `paused` / `partial` / `done`, the
   run's `round`. Every tile's dataset and plan are written up front, so progress counts the steps of all tiles. Cost:
   ~1.5–2 min per tile and round (restart, photo loading, export; ~50 s of it the export), so 30000 steps in rounds of
-  6000 on 6 tiles add ~45–60 min to ~2.5 h of training. The live preview replaces a tile's last-round part with its
+  4000 (8 rounds) on 6 tiles add ~70–100 min to ~2.5 h of training. The live preview replaces a tile's last-round part with its
   training one.
 - **View → Tile boundaries** (`splat_tiles.overlay`, `App._draw_tiles`): a red box per cell (clipped to the scene
   box, from the 2 % to the 98 % height of its sparse points), the training one orange, labels "tile k · N photos ·
-  status"; without a tiled run the planned cells with the tab's Photos per tile (computed in a thread).
+  status"; quick bar "Tiles"; without a tiled run the planned cells with the tab's Photos per tile (computed in a thread).
 - **Clean** (ENU): keep Gaussians with the centre in the cell and in the scene box (points' 1–99 % + margin)
   whose 3σ extent ≤ the margin (`clean`) → `tile_KK/splat/clean_enu.ply`. Smoke run (300 steps): ~45 % kept.
 - **Merge:** concatenation → `PROJECT/splat/splat_enu.ply` (export, splat mesh, semantic, View use it as before).
@@ -1719,12 +1719,12 @@ Code layout:
     - The choice is remembered in `ROOT/.modelforge_gui.json`.
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
-    - One button group in **two rows of 6** (the user found one row of 13, ~1250 px, too wide):
+    - One button group in **two rows of 7** (the user found one row of 13, ~1250 px, too wide):
       ● / ○ / · Splat, Mesh, Dense (fused points), Points (sparse), Cams, Thumbs (camera
       thumbnails; available while Cams is on) / Resid (View "Prior → refined": the red prior →
-      refined segments), Traj (View "Trajectories"), Plan, Orbit, ⌖ Center, Fly. Short labels
-      (`QUICK_SHORT`): viser gives every button the longest label's width (~72 px) and wraps, so
-      12 buttons at 6 per row make an even grid ~456 px wide.
+      refined segments), Traj (View "Trajectories"), Plan, Tiles (View "Tile boundaries"), Orbit, ⌖ Center,
+      Fly. Short labels (`QUICK_SHORT`): viser gives every button the longest label's width (~72 px) and
+      wraps; the panel is sized for ⌈n / 2⌉ per row (13 buttons: 7 + 6, ~528 px).
     - **⌖ Center** (also View tab "Center the view"; `App.recenter`): looks at the cameras + sparse
       points (2–98 % range, so stray far points don't count) from the south, above them. The same
       framing runs when a browser connects and on a project switch. The user lost the scene of a

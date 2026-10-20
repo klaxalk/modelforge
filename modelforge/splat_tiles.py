@@ -18,7 +18,7 @@ are in the project's ENU frame (one global SfM), so they join by concatenation (
   train      PROJECT/tiles/tile_KK/: transforms.json with the tile's frames, sparse_pc.ply cropped to the cell
              + margin, images/ and images_N/ as links to the project's; then splat.run with its own plan
              (splat_plan.suggest on the tile: steps from its photo count), one tile after the other. With an
-             rounds (ROUND_STEPS, default 6000): every tile advances that many steps per round (it ends with a
+             rounds (ROUND_STEPS, default 4000): every tile advances that many steps per round (it ends with a
              checkpoint, as on Stop, and continues from it next round), and the tiles are merged after each
              round, so the whole scene improves evenly and shows early.
   clean      in ENU: keep the Gaussians whose centre lies inside the cell (the margin is the neighbour's; it is
@@ -48,7 +48,7 @@ SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off t
 #                   up to ~2x the photos still train well, the user found)
 BALANCE = 0.3  # weight of being off balance (1 at the slack's end) against the cut's cost in median costs
 GAP_WIDTH = 0.02  # of the look-ats' extent: half the band of sparse points a candidate cut is charged for
-ROUND_STEPS = 6000  # steps every tile advances per round, merged after each (0: one tile after the other)
+ROUND_STEPS = 4000  # steps every tile advances per round, merged after each (0: one tile after the other)
 MARGIN = 0.25  # of the cell's longer side: initial points and the clean's reach beyond the cell
 MAX_POINTS = 50_000  # sparse points sampled for the partition
 DIR = "tiles"
