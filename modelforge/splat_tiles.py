@@ -209,6 +209,7 @@ def _write_live(project, parts, step):
     """The preview arrays (ENU, band 0) in ckpt_dump's format, with an identity transform."""
     v = np.concatenate(parts) if parts else np.zeros(0, dtype=[(k, "f4") for k in BAND0])
     path = os.path.join(project, LIVE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)  # splat/ does not exist before the first merge
     tmp = path + ".tmp.npz"
     np.savez(tmp, step=np.int64(step), means=np.stack([v["x"], v["y"], v["z"]], 1),
              scales=np.stack([v[f"scale_{i}"] for i in range(3)], 1), quats=np.stack([v[f"rot_{i}"] for i in range(4)], 1),
@@ -216,6 +217,7 @@ def _write_live(project, parts, step):
     os.replace(tmp, path)
     ident = os.path.join(project, IDENTITY)
     if not os.path.exists(ident):
+        os.makedirs(os.path.dirname(ident), exist_ok=True)
         json.dump({"transform": np.eye(4)[:3].tolist(), "scale": 1.0}, open(ident, "w"))
     return path, ident
 

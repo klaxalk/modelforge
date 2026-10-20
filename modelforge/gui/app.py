@@ -722,9 +722,14 @@ class App:
             self._show_project()
         self.projects.refresh()
 
+    def _forget_live_splat(self):
+        """Drop the last live snapshot: it belongs to another run (or project) and must not be redrawn."""
+        self._splat_live_on = False
+        self._live_splat = self._live_src = None
+
     def refresh_after_images_changed(self):
         """Another image set (Images used): the old run's live preview and History no longer apply."""
-        self._splat_live_on = False
+        self._forget_live_splat()
         self.server.scene.remove_by_name("/dense/splat_live")
         self._refresh_dense()
 
@@ -735,7 +740,7 @@ class App:
         with self.lock:
             self.path = path
             self._clear_scene()
-            self._splat_live_on = False  # a paused run's live preview belongs to the old project
+            self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self._show_project()
@@ -1670,6 +1675,9 @@ class App:
                 self._splat_live_on = False
                 self.server.scene.remove_by_name("/dense/splat_live")
             if live:  # the live layer stands in for the previous result while training
+                if not info:  # a new run: an earlier run's snapshot must not stand in for it
+                    self._live_splat = self._live_src = None
+                    self.server.scene.remove_by_name("/dense/splat_live")
                 self.server.scene.remove_by_name("/dense/splat")
                 self._unchanged("splat", None)
                 self._splat_live_on = True

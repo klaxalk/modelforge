@@ -100,3 +100,11 @@ def test_tiled_run_stop_resume(fake_ns, tmp_path):  # noqa: F811
     t = json.load(open(os.path.join(splat_tiles.tile_dir(project, 0), "transforms.json")))
     assert len(t["frames"]) == len(state["tiles"][0]["frames"])
     assert os.path.islink(os.path.join(splat_tiles.tile_dir(project, 0), "images"))
+
+
+def test_live_preview_before_splat_folder(tmp_path):
+    """The first tile's preview comes before any merge, so splat/ may not exist yet."""
+    v, _ = make_splat(np.random.default_rng(3), n=10, degree=0)
+    path, ident = splat_tiles._write_live(str(tmp_path), [splat_tiles._band0(v)], 500)
+    d = np.load(path)
+    assert int(d["step"]) == 500 and d["means"].shape == (10, 3) and os.path.exists(ident)
