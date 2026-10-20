@@ -71,7 +71,16 @@ def test_clean():
         v[f"scale_{i}"] = np.log(0.1)
     v["scale_2"][2] = np.log(20.0)  # 3 sigma = 60 m > margin 10 m: a background blob
     keep = splat_tiles.clean(v, (0, 0, 10, 10), 10.0, (-40, -40, 40, 40))
-    assert keep.tolist() == [True, False, False, True, False, True]  # out of cell, blob, out of the box
+    assert keep.tolist() == [True, False, False, True, False, True]  # out of the cell; a blob over the neighbours
+
+    # an outer tile (open to the west): background far out stays, also as a large blob; only the shared sides cut
+    v["x"] = [-150, -150, 5, -5, -1e4, -150]
+    v["y"] = [5, 5, 5, 5, 5, 95]
+    v["scale_0"][1] = np.log(30.0)  # 3 sigma = 90 m, 150 m away from the shared east side: kept
+    v["scale_0"][2] = np.log(30.0)  # the same blob 5 m from the shared side: it would cover the neighbour
+    v["scale_0"][5] = np.log(30.0)  # far west but 5 m from the shared north side
+    keep = splat_tiles.clean(v, (-np.inf, -np.inf, 10, 100), 10.0, (-40, -40, 40, 40))
+    assert keep.tolist() == [True, True, False, True, False, False]  # ..., -1e4: beyond the far limit
 
 
 def test_plan_switches_to_tiles():
@@ -109,9 +118,7 @@ def test_tiled_run_stop_resume(fake_ns, tmp_path):  # noqa: F811
 
     stats = splat.resume(project, on_line=lambda m: None, on_tile=lambda *a: None)
     merged = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
-    box = state["box"]
-    inside = (v["x"] >= box[0]) & (v["x"] < box[2]) & (v["y"] >= box[1]) & (v["y"] < box[3])
-    assert len(merged) == stats["num_gaussians"] == int(inside.sum())  # each Gaussian in exactly one cell
+    assert len(merged) == stats["num_gaussians"] == len(v)  # each Gaussian in exactly one cell (outer ones open)
     assert stats["tiles"] == 4 and all(t["status"] == "done" for t in stats["per_tile"])
     assert splat.resume_info(project) is None
     t = json.load(open(os.path.join(splat_tiles.tile_dir(project, 0), "transforms.json")))

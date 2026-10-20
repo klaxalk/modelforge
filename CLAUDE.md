@@ -1334,8 +1334,12 @@ helped little):
 - **View → Tile boundaries** (`splat_tiles.overlay`, `App._draw_tiles`): a red box per cell (clipped to the scene
   box, from the 2 % to the 98 % height of its sparse points), the training one orange, labels "tile k · N photos ·
   status"; quick bar "Tiles"; without a tiled run the planned cells with the tab's Photos per tile (computed in a thread).
-- **Clean** (ENU): keep Gaussians with the centre in the cell and in the scene box (points' 1–99 % + margin)
-  whose 3σ extent ≤ the margin (`clean`) → `tile_KK/splat/clean_enu.ply`. Smoke run (300 steps): ~45 % kept.
+- **Clean** (ENU), only at the sides shared with another tile (the user asked, 2026-10-20: outer tiles should keep
+  the view away from the scene): keep Gaussians with the centre in the cell (outer sides at infinity) whose 3σ reach
+  crosses no shared side by more than the margin (reach ≤ distance to the nearest shared side + margin: a large
+  background blob far out stays, none spreads over a neighbour); `FAR` (2 × the scene box's size beyond it) only
+  drops absurd outliers; no height cut (`clean`). Before: also the scene box and 3σ ≤ margin everywhere.
+  kladno_dira at round 2: +2–11 % kept per tile (2.03M → 2.08M) → `tile_KK/splat/clean_enu.ply`. Smoke run (300 steps): ~45 % kept.
 - **Merge:** concatenation → `PROJECT/splat/splat_enu.ply` (export, splat mesh, semantic, View use it as before).
 - **State:** `tiles/tiles.json` (cells, frames, status per tile). Pause / Stop act on the running tile; Stop merges
   the done + partial tiles; `splat/resume.json` `{"tiles": true, "tile": k, ...}` → `splat.resume_info / resume`

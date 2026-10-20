@@ -21,9 +21,10 @@ are in the project's ENU frame (one global SfM), so they join by concatenation (
              rounds (ROUND_STEPS, default 4000): every tile advances that many steps per round (it ends with a
              checkpoint, as on Stop, and continues from it next round), and the tiles are merged after each
              round, so the whole scene improves evenly and shows early.
-  clean      in ENU: keep the Gaussians whose centre lies inside the cell (the margin is the neighbour's; it is
-             trained by fewer views), drop those reaching beyond the margin (3 sigma; distant terrain and sky
-             learned as large blobs) and those outside the scene box (points' range + margin).
+  clean      in ENU, only at the sides shared with another tile: keep the Gaussians whose centre lies inside the
+             cell (the margin is the neighbour's; it is trained by fewer views) and whose 3 sigma reach crosses
+             no shared side by more than the margin. Outer tiles keep their view away from the scene (distant
+             terrain, horizon); FAR x the scene's size beyond it drops absurd outliers. No height cut.
   merge      the cleaned tiles concatenated -> PROJECT/splat/splat_enu.ply, as an untiled run writes it.
 
 Progress, Stop / Pause / Resume: per tile, through splat.run; PROJECT/tiles/tiles.json records the cells and the
@@ -49,6 +50,7 @@ SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off t
 BALANCE = 0.3  # weight of being off balance (1 at the slack's end) against the cut's cost in median costs
 GAP_WIDTH = 0.02  # of the look-ats' extent: half the band of sparse points a candidate cut is charged for
 ROUND_STEPS = 4000  # steps every tile advances per round, merged after each (0: one tile after the other)
+FAR = 2.0  # of the scene box's longer side beyond it: the clean's outlier limit (outer tiles keep their background)
 MARGIN = 0.25  # of the cell's longer side: initial points and the clean's reach beyond the cell
 MAX_POINTS = 50_000  # sparse points sampled for the partition
 DIR = "tiles"
@@ -233,12 +235,21 @@ def write_tile(project, k, tile, downscale=1):
 
 
 def clean(v, cell, margin, box):
-    """Mask of the Gaussians (structured ENU vertices) a tile keeps: centre in its cell and in the scene box,
-    3 sigma within the margin."""
-    xy = np.stack([np.asarray(v["x"], float), np.asarray(v["y"], float)], 1)
-    keep = _inside(xy, cell) & _inside(xy, box)
-    extent = 3 * np.exp(np.max(np.stack([np.asarray(v[f"scale_{i}"], float) for i in range(3)], 1), axis=1))
-    return keep & (extent <= margin)
+    """Mask of the Gaussians (structured ENU vertices) a tile keeps. Only the sides shared with another tile cut
+    (an outer tile keeps its view away from the scene: distant terrain, horizon): the centre lies in the cell (its
+    outer sides are at infinity) and the 3 sigma reach crosses no shared side by more than the margin (reach <=
+    distance to the nearest shared side + margin), so a large blob far out stays but none spreads over a
+    neighbour. Besides, a far limit drops absurd outliers: FAR x the scene box's size beyond it. No height cut."""
+    x, y = np.asarray(v["x"], float), np.asarray(v["y"], float)
+    xy = np.stack([x, y], 1)
+    x0, y0, x1, y1 = cell
+    shared = np.full(len(x), np.inf)  # distance to the nearest side shared with another tile
+    for side, d in ((x0, x - x0), (y0, y - y0), (x1, x1 - x), (y1, y1 - y)):
+        if np.isfinite(side):
+            shared = np.minimum(shared, d)
+    reach = 3 * np.exp(np.max(np.stack([np.asarray(v[f"scale_{i}"], float) for i in range(3)], 1), axis=1))
+    far = FAR * max(box[2] - box[0], box[3] - box[1])
+    return _inside(xy, cell) & (reach <= shared + margin) & _inside(xy, box, far)
 
 
 def _read(path):
