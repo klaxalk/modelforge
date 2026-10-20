@@ -17,6 +17,13 @@ splatfacto's defaults are tuned for a few hundred images of an object-sized scen
   - budget: the scene needs about (all image pixels) / (overlap x PX_PER_GAUSSIAN^2) Gaussians at the
     training resolution, a rough figure (karlak x1: 14M estimated, 2.0M grown) that sets MCMC's budget.
   - camera optimizer: SO3xR3 lets training correct small pose errors.
+  - scale: one nerfstudio unit = WORLD_UNIT_M. nerfstudio scales the poses by 1 / max |camera position|,
+    and splatfacto's position learning rate and its size thresholds (clone vs split below 0.01 units,
+    cull above 0.5) are in those units, so a 380 m flight (unit ~200 m) trained very differently from a
+    50 m one (unit ~28 m): held-out quality fell with more steps and the Gaussian count shrank at every
+    opacity reset. 10 m: dira2k (2000 photos) 12000 steps 14.9 -> 17.2 dB (LPIPS 0.94 -> 0.74; 4 m and
+    28 m worse), karlak 22.99 -> 23.24 dB (LPIPS 0.333 -> 0.301). Projects without metric scale (videos)
+    have their median scene depth at 10 units.
 
 No ground plane is assumed (the flight may start in the air, the terrain may drop anywhere): the scene is
 the sparse cloud (sparse_pc.ply, a random subset). Each point counts the cameras it projects into
@@ -45,6 +52,7 @@ FAR_X_MEDIAN = 4.0  # points beyond this many times a camera's median depth don'
 TRAIN_FRACTION = 0.9  # nerfstudio-data's train_split_fraction
 MAX_TRAIN_WIDTH = 2700  # auto downsample: the smallest factor that brings the photos to this width (4K -> x2)
 DOWNSCALES = (1, 2, 4, 8)
+WORLD_UNIT_M = 10.0  # one nerfstudio unit (fixed, instead of 1 / max |camera position|)
 
 
 def vram_gb():
@@ -161,7 +169,7 @@ def auto_downscale(width):
 def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None,
             method="splatfacto"):
     """Settings for splat.train_command from a survey: iterations, downscale, strategy, max_gaussians,
-    stop_split_at, reset_alpha_every, camera_opt, plus `notes` (why). Explicit arguments win over the
+    stop_split_at, reset_alpha_every, camera_opt, scale_factor, plus `notes` (why). Explicit arguments win over the
     suggestion (None, 0 or "auto" = suggest); the dependent values follow them. method: unused (kept for
     callers; all splatfacto variants take the same flags)."""
     auto = lambda v: v in (None, 0, "", "auto")  # noqa: E731
@@ -185,6 +193,7 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
             "stop_split_at": iters // 2 if strategy == "default" else iters * 5 // 6,
             "reset_alpha_every": math.ceil(reset_steps / 100),
             "camera_opt": "SO3xR3" if auto(camera_opt) else camera_opt,
+            "scale_factor": 1.0 / WORLD_UNIT_M,
             "vram_gb": round(vram, 1), "cap": cap, "needed": need}
     notes = [f"{s['images']:,} images ({n:,} for training) from the {s['source']}"]
     if s.get("gsd_m"):
@@ -197,6 +206,8 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
         notes.append(f"×{down}: {s['width']} px photos trained at {s['width'] // down} px (pick 1 for full "
                      "resolution: on 4K photos no better, 2.4× slower)")
     notes.append(f"{iters:,} steps (~{iters / n:.0f} views per image), splitting until {plan['stop_split_at']:,}")
+    notes.append(f"scene unit {WORLD_UNIT_M:g} m (learning rates and size thresholds in metres, not in "
+                 "fractions of the flight)")
     if strategy == "mcmc":
         notes.append(f"MCMC: a fixed budget of {plan['max_gaussians'] / 1e6:.1f}M Gaussians")
         if s.get("initial_points", 0) > min(cap, need or cap) and auto_budget:

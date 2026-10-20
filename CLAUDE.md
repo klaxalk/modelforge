@@ -1037,6 +1037,9 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
       **mcmc** only when chosen (budget = need, within the GPU estimate, ≥ the sparse points): it caused the
       near-camera fog. Before, auto switched to mcmc when the need exceeded the GPU (and splatfacto-big at half
       the need, `GROWTH`, removed).
+    - **scene unit 10 m** (`WORLD_UNIT_M`, plan `scale_factor` 0.1 → `--auto-scale-poses False --scale-factor 0.1`;
+      2026-10-20): nerfstudio's own unit is 1 / max |camera position|, and splatfacto's position learning rate and
+      size thresholds are in it, so large flights trained differently (see "Splat on dira2k").
     - splitting stops at 1/2 (mcmc 5/6); camera optimizer SO3xR3. Explicit values win and the dependent ones
       follow. Untested: default densification without a cap on thousands of images (kladno_dira); if it runs
       out of GPU memory, pick mcmc.
@@ -1269,9 +1272,26 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
   learning-rate decay (in nerfstudio units of 1 / max |camera position| ≈ 200 m here, 7× karlak; the unit-28-m
   test ran on the drift-broken model, so redo it: `schedule["scale_factor"]`) and the split stop. A 150-photo
   patch trains to 19.4 dB at 4000 steps. Moving machines (excavator) ghost between passes.
+- **Solved: the scene unit** (2026-10-20, global + drift model, held-out PSNR / SSIM / LPIPS, `build/splat_exp.py`):
+
+  | run | unit | final | Gaussians |
+  |---|---|---|---|
+  | g12k (12000 steps, the plan) | auto ≈ 198 m | 14.9 / 0.197 / 0.942 | 1.24M |
+  | g12k_lr10 (position LR ÷ 10 only) | auto | 15.5 / 0.201 / 0.914 | 1.17M |
+  | g12k_unit28 | 28 m | 17.0 / 0.278 / 0.782 | 1.21M |
+  | **g12k_unit10** | **10 m** | **17.2 / 0.289 / 0.743** | 1.25M |
+  | g12k_unit4 | 4 m | 17.0 / 0.281 / 0.743 | 1.23M |
+  | drift36k (36000) | auto | 12.9 / 0.185 / 0.977 | 0.58M (falling) |
+  | g36k_unit28 (36000) | 28 m | 16.9 / 0.262 / 0.626 | 2.2M (growing) |
+
+  The learning rate alone is a small part; the size thresholds (clone below 0.01 units = 2 m at auto scale, cull
+  above 0.5 = 100 m) matter more. With a fixed unit more steps help again (LPIPS 0.87 → 0.645 from 6k to 36k);
+  PSNR flattens near 16.5–17 dB (moving machines, light?). karlak at 10 m (ds2def18k_unit10): 22.99 / 0.700 / 0.333
+  → **23.24 / 0.714 / 0.301** in the same time; its auto unit was ~31 m (kladno_dopravnik 26, fullrun_test 27). →
+  The plan's default is now one unit = 10 m. Median scene depth as the unit would give dira 72 m: not supported.
 - Splat side, found on the way: nerfstudio scales poses by 1 / max |camera position| and splatfacto's thresholds
   (`densify_size_thresh`, `cull_scale_thresh`) and position learning rate are in those units (`scene_scale=1.0`);
-  `schedule["scale_factor"]` now fixes the scale (`--auto-scale-poses False --scale-factor`), untested as a default.
+  `schedule["scale_factor"]` fixes the scale (`--auto-scale-poses False --scale-factor`), now the default (10 m).
 
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):

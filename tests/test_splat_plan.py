@@ -103,7 +103,8 @@ def test_schedule_flags():
     assert int(val("--pipeline.model.max-gs-num")) == plan["max_gaussians"]
     assert val("--pipeline.model.camera-optimizer.mode") == "SO3xR3"
     assert val("--steps-per-eval-all-images") == "0"
-    assert cmd[-3:] == ["nerfstudio-data", "--downscale-factor", str(plan["downscale"])]
+    assert cmd[-7:] == ["nerfstudio-data", "--downscale-factor", str(plan["downscale"]),
+                        "--auto-scale-poses", "False", "--scale-factor", "0.1"]  # one unit = 10 m
     assert "--pipeline.model.strategy" not in splat.train_command("/p")  # no plan: splatfacto's own
     with pytest.raises(ValueError):
         splat.schedule_args(strategy="greedy")

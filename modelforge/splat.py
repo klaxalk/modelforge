@@ -425,7 +425,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         stats["resumed_from"] = load_dir
     if schedule:
         stats["schedule"] = {k: schedule.get(k) for k in ("strategy", "max_gaussians", "stop_split_at",
-                                                          "reset_alpha_every", "camera_opt") if schedule.get(k)}
+                                                          "reset_alpha_every", "camera_opt", "scale_factor")
+                             if schedule.get(k)}
     if lidar_depth is not None:
         stats["lidar_depth"] = {"weight": float(lidar_depth), "error": lidar_log[-1] if lidar_log else None,
                                 "history": lidar_log}
