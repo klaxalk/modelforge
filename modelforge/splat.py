@@ -322,13 +322,15 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None,
-        schedule=None, pause=None, load_dir=None):
+        schedule=None, pause=None, load_dir=None, stop_at=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
     schedule: densification / learning-rate settings from splat_plan.suggest (or None: splatfacto's).
     Stopping the job (job.cancel) asks the trainer for a checkpoint at the current step first; the run's
     settings go to splat/resume.json (see `resume`). With `pause` (threading.Event) set: Paused, nothing
     exported. Otherwise the partial splat is exported and converted as usual, then StoppedPartial.
     load_dir: continue from that checkpoint folder (used by `resume`).
+    stop_at: end at this step with a checkpoint (splat/resume.json, as a Stop) and export the splat so far, but
+    return normally with stats["stopped_at_step"] (splat tiles: the end of a round).
     lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1)."""
     from modelforge.export import splat_to_enu
@@ -355,6 +357,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         p = parse_progress(text)
         if p and on_progress:
             on_progress(*p)
+        if p and stop_at and p[0] >= stop_at and not os.path.exists(control):
+            open(control, "w").write("checkpoint")  # the trainer saves and ends by itself
         q = parse_lidar(text)
         if q:
             lidar_log.append(q)
@@ -384,19 +388,29 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
                         lidar_depth, schedule, load_dir)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
-    stopped_at = None
-    try:
-        _stream(cmd, line, job, env={"MF_SPLAT_CONTROL": control},
-                soft_stop=lambda: open(control, "w").write("checkpoint"))
-    except jobs.Cancelled:
+    stopped_at, reached = None, False
+
+    def checkpointed():  # the trainer's checkpoint on request -> resume.json; its step (None: none saved)
         try:
             done = json.load(open(control + ".done"))
         except (OSError, ValueError):
-            raise jobs.Cancelled("stopped before a checkpoint was saved") from None
-        stopped_at = int(done["step"])
-        json.dump(dict(settings, load_dir=done["dir"], step=stopped_at,
+            return None
+        json.dump(dict(settings, load_dir=done["dir"], step=int(done["step"]),
                        transforms_mtime=os.path.getmtime(os.path.join(project, "transforms.json"))),
                   open(os.path.join(project, RESUME), "w"), indent=1)
+        return int(done["step"])
+    try:
+        _stream(cmd, line, job, env={"MF_SPLAT_CONTROL": control},
+                soft_stop=lambda: open(control, "w").write("checkpoint"))
+        if stop_at:
+            stopped_at = checkpointed()
+            reached = stopped_at is not None
+            if reached:
+                on_line(f"splat: reached step {stopped_at:,}; exporting the splat so far")
+    except jobs.Cancelled:
+        stopped_at = checkpointed()
+        if stopped_at is None:
+            raise jobs.Cancelled("stopped before a checkpoint was saved") from None
         if pause is not None and pause.is_set():
             on_line(f"splat: paused at step {stopped_at:,}; Resume continues from there")
             raise Paused(f"paused at step {stopped_at:,} of {iterations or DEFAULT_ITERATIONS:,}") from None
@@ -436,7 +450,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     Report(project).set("splat", stats)
     on_line(f"splat: {dict(stats, lidar_depth={k: v for k, v in stats['lidar_depth'].items() if k != 'history'})}"
             if "lidar_depth" in stats else f"splat: {stats}")
-    if stopped_at is not None:
+    if stopped_at is not None and not reached:
         raise StoppedPartial(f"stopped at step {stopped_at:,} of {iterations or DEFAULT_ITERATIONS:,}; the partial "
                              "splat is exported (splat/splat_enu.ply) and Resume continues the training")
     return stats
@@ -509,6 +523,9 @@ def main():
     ap.add_argument("--tiles", choices=("auto", "on", "off"), default="auto",
                     help="train in tiles (modelforge/splat_tiles.py); auto: above 800 training images")
     ap.add_argument("--tile-photos", type=int, default=None, help="about this many photos look into each tile (default 500)")
+    ap.add_argument("--round-steps", type=int, default=None,
+                    help="tiled runs: every tile advances this many steps per round, merged after each "
+                         "(default 6000; 0 = one tile after the other)")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()
@@ -523,7 +540,8 @@ def main():
                                                        strategy=args.strategy, max_gaussians=args.max_gaussians,
                                                        camera_opt=args.camera_opt), extra,
                             on_line=lambda m: print(m, flush=True), cache=args.cache, lidar_depth=args.lidar_depth,
-                            photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE)
+                            photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
+                            round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps)
             return
         if args.no_plan:
             iterations, downscale, schedule = args.iterations, args.downscale or 1, None

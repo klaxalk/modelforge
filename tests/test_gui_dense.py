@@ -324,3 +324,22 @@ def test_fly_the_camera_path(app):
     app.toggle_fly(c)
     time.sleep(0.2)
     assert not app._flights
+
+
+def test_tile_boundaries(app, monkeypatch):
+    """View → Tile boundaries: planned cells (no tiled run) drawn as boxes with labels; off removes them."""
+    import time as _time
+    added = []
+    real = app.server.scene.add_line_segments
+    monkeypatch.setattr(app.server.scene, "add_line_segments",
+                        lambda name, *a, **k: (added.append((name, k.get("colors"))), real(name, *a, **k))[1])
+    app.g_splat_tile_photos.value = 30  # ~80 images -> 3 planned cells
+    app.g_tiles_view.value = True
+    t0 = _time.time()
+    while not any(n == "/tiles/boxes" for n, _ in added) and _time.time() - t0 < 30:
+        _time.sleep(0.1)
+    boxes = [c for n, c in added if n == "/tiles/boxes"][-1]
+    assert len(boxes) == 12 * 3 and "planned" in app.g_dense_md.content
+    app.g_tiles_view.value = False
+    assert "tiles" not in app.g_dense_md.content
+    app.g_splat_tile_photos.value = 500

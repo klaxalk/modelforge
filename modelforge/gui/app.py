@@ -247,7 +247,14 @@ class App:
                          f"{gdata.SPLAT_SHOWN:,} (finished splat) or {gdata.LIVE_SPLAT_SHOWN:,} (live preview while "
                          f"training), which keeps the browser responsive. Millions of Gaussians need a strong GPU "
                          f"in the browser and take a while to send.")
+                self.g_tiles_view = gui.add_checkbox(
+                    "Tile boundaries", initial_value=False,
+                    hint="Red boxes around the cells of a tiled splat (large flights; Splat tab → Tiles), from the "
+                         "ground to the top of each cell's sparse points, labelled with the tile's photos and state "
+                         "(the training one orange). Without a tiled run yet: the cells it would use, with the "
+                         "Splat tab's Photos per tile.")
                 self.g_dense_md = gui.add_markdown("")
+                self.g_tiles_view.on_update(lambda _: self._draw_tiles())
                 self.g_splat_all.on_update(lambda _: self._splat_all_changed())
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
@@ -460,11 +467,18 @@ class App:
             self.g_splat_tile_photos = gui.add_number(
                 "Photos per tile", initial_value=splat_tiles.PHOTOS_PER_TILE, min=100, max=2000, step=50,
                 hint="About this many cameras look into each cell (the scene is cut into ⌈photos / this⌉ cells, "
-                     "each cut moved up to 20 % off balance to where it splits the least: not through an orbited "
+                     "each cut moved up to 50 % off balance to where it splits the least: not through an orbited "
                      "object); a tile also gets the oblique photos from its neighbours that see it "
                      f"(≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view, or "
                      f"≥ {int(100 * splat_tiles.MIN_IN_CELL)} % looking just across its edge), so tiles hold more.")
+            self.g_splat_rounds = gui.add_number(
+                "Steps per round", initial_value=splat_tiles.ROUND_STEPS, min=0, step=1000,
+                hint="Tiled runs: every tile advances this many steps per round, continuing from its checkpoint "
+                     "(the same schedule as training it in one go), and the tiles are merged after each round, so "
+                     "the whole scene improves evenly. Each round costs ~1.5–2 min per tile (restart, photo "
+                     "loading, export): larger = less overhead. 0 = one tile after the other.")
             self.g_splat_plan = gui.add_markdown("")
+            self.g_splat_tile_photos.on_update(lambda _: self._draw_tiles())
             for g in (self.g_splat_method, self.g_splat_iters, self.g_splat_down, self.g_splat_strategy,
                       self.g_splat_maxg, self.g_splat_camopt, self.g_splat_tiles):
                 g.on_update(lambda _: self._refresh_splat_plan())
@@ -1648,9 +1662,10 @@ class App:
         self._live_msg = ""
         tile = {"text": ""}
 
-        def on_tile(k, n, steps):  # tiled run: a tile starts
+        def on_tile(k, n, steps, label=""):  # tiled run: a tile starts (label: its round)
             nonlocal iters
-            iters, tile["text"] = steps, f"tile {k + 1} / {n}: "
+            iters, tile["text"] = steps, f"{label + ' · ' if label else ''}tile {k + 1} / {n}: "
+            self._draw_tiles()  # its state changed
 
         def progress(step, pct):
             self.g_progress.value = pct
@@ -1699,7 +1714,8 @@ class App:
                                      max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
                                      camera_opt=self.g_splat_camopt.value),
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, on_tile=on_tile,
-                                photos=int(self.g_splat_tile_photos.value), **common)
+                                photos=int(self.g_splat_tile_photos.value),
+                                round_steps=int(self.g_splat_rounds.value), **common)
             else:
                 cache = self.g_splat_cache.value
                 if cache == "auto":
@@ -1955,6 +1971,7 @@ class App:
         self._refresh_splat_plan()
         self._sync_resume()
         self.semantic.refresh()
+        self._draw_tiles()
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):
@@ -2007,6 +2024,47 @@ class App:
                 self._refresh_export(msg)
         threading.Thread(target=work, daemon=True).start()
 
+    def _draw_tiles(self):
+        """View → Tile boundaries: a red box per tile cell (the run's tiles.json, else the planned cells). In a
+        thread: planning the cells reads the cameras and sparse points (seconds on thousands of photos)."""
+        self._tiles_gen = gen = getattr(self, "_tiles_gen", 0) + 1
+        if not self.g_tiles_view.value or not self.path or not os.path.exists(os.path.join(self.path, "transforms.json")):
+            self.server.scene.remove_by_name("/tiles")
+            self._dense_status("tiles", None)
+            return
+        path, photos = self.path, int(self.g_splat_tile_photos.value)
+
+        def work():
+            try:
+                cells, planned = splat_tiles.overlay(path, photos)
+            except Exception as e:  # noqa: BLE001 - e.g. no sparse points yet
+                self._dense_status("tiles", f"tiles: {e}")
+                return
+            if gen != self._tiles_gen:  # switched off or redrawn meanwhile
+                return
+            segs, cols = [], []
+            self.server.scene.remove_by_name("/tiles")
+            for c in cells:
+                x0, y0, x1, y1 = c["rect"]
+                d = 0.002 * max(x1 - x0, y1 - y0)  # inset: neighbours' shared walls both show
+                x0, y0, x1, y1 = x0 + d, y0 + d, x1 - d, y1 - d
+                z0, z1 = c["z"]
+                ring = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                for i in range(4):
+                    (a, b), (e, f) = ring[i], ring[(i + 1) % 4]
+                    segs += [[(a, b, z0), (e, f, z0)], [(a, b, z1), (e, f, z1)], [(a, b, z0), (a, b, z1)]]
+                col = (255, 160, 0) if c["status"] == "training" else (255, 40, 40)
+                cols += [[col, col]] * 12
+                self.server.scene.add_label(f"/tiles/label_{c['tile']}",
+                                            f"tile {c['tile'] + 1} · {c['photos']} photos · {c['status']}",
+                                            position=((x0 + x1) / 2, (y0 + y1) / 2, z1))
+            self.server.scene.add_line_segments("/tiles/boxes", np.array(segs, dtype=np.float32),
+                                                colors=np.array(cols, dtype=np.uint8), thickness=3.0,
+                                                thickness_units="screen")
+            self._dense_status("tiles", f"tiles: {len(cells)} " + (f"planned (Photos per tile {photos}; no tiled run "
+                                                                     "yet)" if planned else "of the tiled run"))
+        threading.Thread(target=work, daemon=True).start()
+
     def _dense_status(self, layer, text):
         """One status line per layer under View → Dense / splat (layers no longer overwrite each other)."""
         lines = getattr(self, "_dense_lines", {})
@@ -2015,7 +2073,7 @@ class App:
             lines[layer] = text
         else:
             lines.pop(layer, None)
-        order = ("available", "points", "mesh", "splat")
+        order = ("available", "points", "mesh", "splat", "tiles")
         self.g_dense_md.content = "  \n".join(lines[k] for k in order if k in lines)
 
     def _unchanged(self, layer, key):

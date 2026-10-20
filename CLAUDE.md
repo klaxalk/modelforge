@@ -1304,13 +1304,15 @@ helped little):
   longer axis (k parts → ⌊k/2⌋ + ⌈k/2⌉). Outer cells open to infinity.
   - **Where to cut** (`_cut`; 2026-10-20, the user saw an excavator the drone circled split between tiles 1 and 2 on
     kladno_dira, its far-side views missing from one): a plain median of the look-ats landed on the most
-    photographed spots, since an orbit puts many photos there. Now a cut may move up to `SIZE_SLACK` (20 %) of the
-    smaller side's photos off balance, and goes where it splits the least: sparse points within `GAP_WIDTH` (2 % of the
-    extent) of the line, each weighted by the photos seeing it, in the worst 4 × `GAP_WIDTH` stretch along the line
-    (summed over the whole line an object drowns in the ground); among cuts within 10 % of the cheapest the most
-    balanced. Look-at density alone did not work: an orbit's look-ats spread around the object, beyond it.
-    kladno_dira (2883 photos): the most viewed spot (~500 photos per point, tall: the excavator) was 12 m from a cut,
-    now 52 m; 6 tiles of 400–617 core photos (the plain median gave 8 of ~360: 2883 → 1441 → 720 → 360).
+    photographed spots, since an orbit puts many photos there. Now a cut may move up to `SIZE_SLACK` (50 %; the user:
+    tiles of up to ~2× the photos still train well) of the smaller side's photos off balance, and goes where it splits
+    the least: cost = sparse points within `GAP_WIDTH` (2 % of the extent) of the line, each weighted by the photos
+    seeing it, in the worst 4 × `GAP_WIDTH` stretch along the line (summed over the whole line an object drowns in the
+    ground); score = cost / median cost + `BALANCE` (0.3) × off-balance as a share of the slack. Look-at density alone
+    did not work: an orbit's look-ats spread around the object, beyond it. kladno_dira (2883 photos): the most viewed
+    spot (~500 photos per point, tall: the excavator) was 12 m from a cut, now ≥ 35 m; of the 20 most viewed 10 m
+    spots 1 lies within 8 m of a cut (`BALANCE` 0.5 / 1: 3); 6 tiles of 168–813 core photos, ≤ 1147 with neighbours
+    (the plain median gave 8 of ~360: 2883 → 1441 → 720 → 360).
   - A tile's photos: those looking into its cell + every photo with ≥ 25 % (`MIN_VISIBLE`) of its seen points
     inside it, or ≥ 10 % (`MIN_IN_CELL`) with its look-at within half the margin of the cell (far-side views of edge
     objects). kladno_dira: 4,763 photo slots (+12 % for the second rule; a "≥ 25 % in cell + margin" rule gave +37 %).
@@ -1319,6 +1321,19 @@ helped little):
   margin (25 % of the cell's longer side), `images/` and `images_N/` as relative links to the project's; then
   `splat.run` with its own plan (`suggest(survey(tile), tiles="off")`: steps from its photos, the tab's explicit
   values apply per tile), one tile after the other, image cache auto per tile.
+- **Rounds** (`ROUND_STEPS` = 6000, Splat tab "Steps per round", CLI `--round-steps`, 0 = one tile after the other;
+  the user asked, to see the whole scene early and have it improve evenly): every tile advances that many steps per
+  round (`splat.run(stop_at=)`: the trainer checkpoints and ends as on Stop, resume.json written, the splat so far
+  exported, no exception) and continues from its checkpoint next round, so step, optimizer state and learning-rate /
+  densification schedules run as in one go. The cleaned tiles are merged into `splat/splat_enu.ply` after each round
+  (seconds). tiles.json: per tile `step`, status `pending` / `training` / `round` / `paused` / `partial` / `done`, the
+  run's `round`. Every tile's dataset and plan are written up front, so progress counts the steps of all tiles. Cost:
+  ~1.5–2 min per tile and round (restart, photo loading, export; ~50 s of it the export), so 30000 steps in rounds of
+  6000 on 6 tiles add ~45–60 min to ~2.5 h of training. The live preview replaces a tile's last-round part with its
+  training one.
+- **View → Tile boundaries** (`splat_tiles.overlay`, `App._draw_tiles`): a red box per cell (clipped to the scene
+  box, from the 2 % to the 98 % height of its sparse points), the training one orange, labels "tile k · N photos ·
+  status"; without a tiled run the planned cells with the tab's Photos per tile (computed in a thread).
 - **Clean** (ENU): keep Gaussians with the centre in the cell and in the scene box (points' 1–99 % + margin)
   whose 3σ extent ≤ the margin (`clean`) → `tile_KK/splat/clean_enu.ply`. Smoke run (300 steps): ~45 % kept.
 - **Merge:** concatenation → `PROJECT/splat/splat_enu.ply` (export, splat mesh, semantic, View use it as before).

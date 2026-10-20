@@ -38,7 +38,7 @@ def test_partition(tmp_path):
     n = write_scene(str(tmp_path))
     tiles, box = splat_tiles.partition(str(tmp_path), photos=16)
     assert len(tiles) == 4 and sum(t["core"] for t in tiles) == n
-    assert all(12 <= t["core"] <= 20 for t in tiles)  # cuts move to cheap gaps within the size slack
+    assert all(8 <= t["core"] <= 24 for t in tiles)  # cuts move to cheap gaps within the size slack
     covered = sorted({i for t in tiles for i in t["frames"]})
     assert covered == list(range(n))  # every photo trains somewhere
     assert all(len(t["frames"]) > t["core"] for t in tiles)  # plus neighbours seeing the cell
@@ -99,7 +99,7 @@ def test_tiled_run_stop_resume(fake_ns, tmp_path):  # noqa: F811
     args = dict(iterations=30, downscale=1, camera_opt="off")
     with pytest.raises(splat.StoppedPartial, match="tile 2 / 4"):
         splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, on_progress=progress, job=job,
-                        cache="disk", photos=16)
+                        cache="disk", photos=16, round_steps=0)
     state = json.load(open(os.path.join(project, splat_tiles.STATE)))
     assert [t.get("status") for t in state["tiles"]] == ["done", "partial", None, None]
     info = splat.resume_info(project)
@@ -107,7 +107,7 @@ def test_tiled_run_stop_resume(fake_ns, tmp_path):  # noqa: F811
     partial = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
     assert 0 < len(partial) < 500  # tiles 1 + 2 merged
 
-    stats = splat.resume(project, on_line=lambda m: None, on_tile=lambda k, n, it: None)
+    stats = splat.resume(project, on_line=lambda m: None, on_tile=lambda *a: None)
     merged = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
     box = state["box"]
     inside = (v["x"] >= box[0]) & (v["x"] < box[2]) & (v["y"] >= box[1]) & (v["y"] < box[3])
@@ -125,3 +125,37 @@ def test_live_preview_before_splat_folder(tmp_path):
     path, ident = splat_tiles._write_live(str(tmp_path), [splat_tiles._band0(v)], 500)
     d = np.load(path)
     assert int(d["step"]) == 500 and d["means"].shape == (10, 3) and os.path.exists(ident)
+
+
+def test_rounds(fake_ns, tmp_path):  # noqa: F811
+    """round_steps: every tile advances that many steps per round from its own checkpoint, merged after each round;
+    Stop in a later round and Resume continue from there."""
+    project, bin_dir = fake_ns
+    write_scene(project)
+    tiles, lines, pct = [], [], []
+    args = dict(iterations=50, downscale=1, camera_opt="off")
+    job = jobs.Token()
+
+    def progress(step, p):
+        pct.append(p)
+        if len(tiles) == 6 and step >= 25 and not job.cancelled:  # round 2, tile 2: stop it while it trains
+            job.cancel()
+    with pytest.raises(splat.StoppedPartial, match="tile 2 / 4"):
+        splat_tiles.run(project, "splatfacto", args, on_line=lines.append, cache="disk", photos=16, round_steps=20,
+                        on_tile=lambda k, n, target, label: tiles.append((k, target, label)), job=job,
+                        on_progress=progress)
+    assert tiles[:4] == [(k, 20, "round 1 / 3") for k in range(4)]
+    assert any("round 1 / 3: all 4 tiles at step 20" in m for m in lines)
+    state = json.load(open(os.path.join(project, splat_tiles.STATE)))
+    assert [t["status"] for t in state["tiles"]] == ["round", "partial", "round", "round"]
+    assert state["tiles"][0]["step"] == 40 and 25 <= state["tiles"][1]["step"] < 40 and state["tiles"][2]["step"] == 20
+
+    tiles[:] = []
+    stats = splat.resume(project, on_line=lines.append, on_tile=lambda k, n, target, label: tiles.append((k, target, label)),
+                         on_progress=lambda s, p: pct.append(p))
+    assert tiles == [(1, 40, "round 2 / 3"), (2, 40, "round 2 / 3"), (3, 40, "round 2 / 3")] + \
+        [(k, 50, "round 3 / 3") for k in range(4)]
+    assert stats["tiles"] == 4 and all(t["status"] == "done" for t in stats["per_tile"])
+    args_last = json.load(open(os.path.join(bin_dir, "last_args.json")))
+    assert "--load-dir" in args_last  # later rounds continue the tile's checkpoint
+    assert splat.resume_info(project) is None
