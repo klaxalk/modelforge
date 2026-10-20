@@ -453,6 +453,9 @@ def resume_info(project):
         info = json.load(open(os.path.join(project, RESUME)))
     except (OSError, ValueError):
         return None
+    if info.get("tiles"):  # a tiled run (modelforge/splat_tiles.py)
+        from modelforge import splat_tiles
+        return splat_tiles.resume_info(project, info)
     if not glob.glob(os.path.join(info.get("load_dir", ""), "step-*.ckpt")):
         return None
     t = os.path.join(project, "transforms.json")
@@ -469,6 +472,10 @@ def resume(project, **kwargs):
     if info is None:
         raise RuntimeError("nothing to resume: no paused or stopped splat run with a checkpoint "
                            "(or transforms.json changed since)")
+    if info.get("tiles"):
+        from modelforge import splat_tiles
+        return splat_tiles.run(project, resume=True, **kwargs)
+    kwargs.pop("on_tile", None)  # GUI callers pass it for tiled runs
     return run(project, info["method"], info["iterations"], tuple(info["extra"]), cache=info["cache"],
                downscale=info["downscale"], lidar_depth=info["lidar_depth"], schedule=info["schedule"],
                load_dir=info["load_dir"], **kwargs)
@@ -496,6 +503,9 @@ def main():
                     help="continue the paused / stopped run (splat/resume.json) with its own settings")
     ap.add_argument("--no-plan", action="store_true",
                     help="splatfacto's own defaults (30000 steps, no schedule) instead of the flight-based plan")
+    ap.add_argument("--tiles", choices=("auto", "on", "off"), default="auto",
+                    help="train in tiles (modelforge/splat_tiles.py); auto: above 800 training images")
+    ap.add_argument("--tile-photos", type=int, default=None, help="photos looking into each tile (default 500)")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()
@@ -504,10 +514,17 @@ def main():
         if args.resume:
             resume(project, on_line=lambda m: print(m, flush=True))
             return
+        from modelforge import splat_plan, splat_tiles
+        if not args.no_plan and splat_tiles.wanted(splat_plan.survey(project)["train_images"], args.tiles):
+            splat_tiles.run(project, args.method, dict(iterations=args.iterations, downscale=args.downscale,
+                                                       strategy=args.strategy, max_gaussians=args.max_gaussians,
+                                                       camera_opt=args.camera_opt), extra,
+                            on_line=lambda m: print(m, flush=True), cache=args.cache, lidar_depth=args.lidar_depth,
+                            photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE)
+            return
         if args.no_plan:
             iterations, downscale, schedule = args.iterations, args.downscale or 1, None
         else:
-            from modelforge import splat_plan
             schedule = splat_plan.suggest(splat_plan.survey(project), iterations=args.iterations,
                                           downscale=args.downscale, strategy=args.strategy,
                                           max_gaussians=args.max_gaussians, camera_opt=args.camera_opt,

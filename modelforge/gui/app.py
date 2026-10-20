@@ -16,7 +16,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, semantic, splat, splat_mesh, splat_plan
+from modelforge import dense, jobs, pipeline, projects, semantic, splat, splat_mesh, splat_plan, splat_tiles
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -450,9 +450,20 @@ class App:
                 "Camera pose refinement", options=("auto",) + splat.CAMERA_OPT, initial_value="auto",
                 hint="splatfacto's camera optimizer: corrects small pose errors while training (rotation + "
                      "translation per image). auto = SO3xR3. off = keep the refined poses as they are.")
+            self.g_splat_tiles = gui.add_dropdown(
+                "Tiles", options=("auto", "on", "off"), initial_value="auto",
+                hint="Train a large flight in tiles: the scene is cut into cells on the ground, each trained as its "
+                     "own splat from the photos that see it (with its own steps and densification), then cropped "
+                     "to its cell and merged into one splat in the same frame. auto: above "
+                     f"{splat_tiles.TILE_ABOVE} training images (one splat over 2000 photos stayed blurry, worlds "
+                     "of a few hundred photos train well). Iterations, when set, apply per tile.")
+            self.g_splat_tile_photos = gui.add_number(
+                "Photos per tile", initial_value=splat_tiles.PHOTOS_PER_TILE, min=100, max=2000, step=50,
+                hint="Cameras looking into each cell; a tile also gets the oblique photos from its neighbours "
+                     f"that see it (≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view), so tiles hold more.")
             self.g_splat_plan = gui.add_markdown("")
             for g in (self.g_splat_method, self.g_splat_iters, self.g_splat_down, self.g_splat_strategy,
-                      self.g_splat_maxg, self.g_splat_camopt):
+                      self.g_splat_maxg, self.g_splat_camopt, self.g_splat_tiles):
                 g.on_update(lambda _: self._refresh_splat_plan())
             self.g_splat_lidar = gui.add_checkbox(
                 "Start from LiDAR points", initial_value=True,
@@ -1591,7 +1602,8 @@ class App:
         return splat_plan.suggest(self._splat_survey(project), iterations=int(self.g_splat_iters.value),
                                   downscale=self.g_splat_down.value, strategy=self.g_splat_strategy.value,
                                   max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
-                                  camera_opt=self.g_splat_camopt.value, method=self.g_splat_method.value)
+                                  camera_opt=self.g_splat_camopt.value, method=self.g_splat_method.value,
+                                  tiles=self.g_splat_tiles.value)
 
     def _refresh_splat_plan(self):
         """The Splat tab's plan line, computed in the background (the survey reads every camera)."""
@@ -1618,17 +1630,23 @@ class App:
             raise RuntimeError("nothing to resume (no checkpoint, or transforms.json changed since)")
         if info:
             iters, down = info["iterations"] or splat.DEFAULT_ITERATIONS, info["downscale"]
-            self._on_log(f"splat: resuming {info['method']} from step {info['step']:,} of {iters:,}")
+            self._on_log(f"splat: resuming {info['method']} from step {info['step']:,} of {iters:,}"
+                         + (f" in tile {info['tile'] + 1} / {info['of']}" if info.get("tiles") else ""))
         else:
             plan = self._splat_settings(project)
             iters, down = plan["iterations"], plan["downscale"]
             self._on_log("splat plan: " + "; ".join(plan["notes"]))
 
         self._live_msg = ""
+        tile = {"text": ""}
+
+        def on_tile(k, n, steps):  # tiled run: a tile starts
+            nonlocal iters
+            iters, tile["text"] = steps, f"tile {k + 1} / {n}: "
 
         def progress(step, pct):
             self.g_progress.value = pct
-            self._job["detail"] = f"training step {step:,} / {iters:,} ({pct:.1f} %)" + (
+            self._job["detail"] = f"{tile['text']}training step {step:,} / {iters:,} ({pct:.1f} %)" + (
                 f"  \n{self._live_msg}" if self._live_msg else "")
 
         def on_line(m):
@@ -1662,7 +1680,15 @@ class App:
                           preview_every=int(self.g_splat_every.value), pause=pause,
                           on_snapshot=self._on_splat_snapshot if live else None, on_prepare=prepare)
             if info:
-                splat.resume(project, **common)
+                splat.resume(project, on_tile=on_tile, **common)
+            elif plan["tiles"]:
+                splat_tiles.run(project, self.g_splat_method.value,
+                                dict(iterations=int(self.g_splat_iters.value), downscale=self.g_splat_down.value,
+                                     strategy=self.g_splat_strategy.value,
+                                     max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
+                                     camera_opt=self.g_splat_camopt.value),
+                                cache=self.g_splat_cache.value, lidar_depth=lidar_depth, on_tile=on_tile,
+                                photos=int(self.g_splat_tile_photos.value), **common)
             else:
                 cache = self.g_splat_cache.value
                 if cache == "auto":
@@ -1814,7 +1840,8 @@ class App:
             if st == "splat":
                 r = rep["splat"]
                 err = (r.get("lidar_depth") or {}).get("error")
-                return (f"{r['num_gaussians']:,} gaussians, {r['method']} {r['iterations']:,} it, "
+                return (f"{r['num_gaussians']:,} gaussians, {r['method']} {r['iterations']:,} it"
+                        + (f" in {r['tiles']} tiles" if r.get("tiles") else "") + ", "
                         f"training {_fmt_s(r['train_seconds'])}"
                         + (f", LiDAR depth error median {err['median_pct']:.1f} % / p90 {err['p90_pct']:.1f} %"
                            if err else ""))

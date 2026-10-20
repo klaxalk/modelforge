@@ -47,6 +47,7 @@ INTERMEDIATE = (
     ("dense/stereo", "PatchMatch depth/normal maps"),
     ("dense/preview-*.ply", "GUI mesh previews"),
     ("nerfstudio", "splatfacto training runs"),
+    ("tiles", "splat tiles (per-tile datasets and training runs; the merged splat is splat/splat_enu.ply)"),
     ("images_*", "downscaled frames for splat training"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("previous", "archived earlier extractions"),

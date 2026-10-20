@@ -203,6 +203,7 @@ modelforge/
 │   ├── dense.py        # COLMAP MVS stages
 │   ├── splat.py        # splatfacto train + export + ENU (runs /opt/nerfstudio CLIs)
 │   ├── splat_plan.py   # splat training plan from the cameras (area, GSD, image count) and GPU memory
+│   ├── splat_tiles.py  # large flights: splat per tile (cells by what the photos see), cropped + merged
 │   ├── evaluate.py     # splat quality on held-out images (PnP pose + export/splat_eval.py)
 │   ├── semantic.py     # semantic search: C-RADIOv3 features per Gaussian (sidecar) + text queries
 │   ├── subset_sweep.py # calibration sweep of image subsets (every N, keyframes) against held-out quality
@@ -1271,7 +1272,7 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
   camera optimizer (−0.7 dB at 4k). Suspects for the next session: what depends on the step count — the position
   learning-rate decay (in nerfstudio units of 1 / max |camera position| ≈ 200 m here, 7× karlak; the unit-28-m
   test ran on the drift-broken model, so redo it: `schedule["scale_factor"]`) and the split stop. A 150-photo
-  patch trains to 19.4 dB at 4000 steps. Moving machines (excavator) ghost between passes.
+  patch trains to 19.4 dB at 4000 steps. The site has no moving objects, steady light and fixed exposure (the user).
 - **Solved: the scene unit** (2026-10-20, global + drift model, held-out PSNR / SSIM / LPIPS, `build/splat_exp.py`):
 
   | run | unit | final | Gaussians |
@@ -1286,12 +1287,40 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
 
   The learning rate alone is a small part; the size thresholds (clone below 0.01 units = 2 m at auto scale, cull
   above 0.5 = 100 m) matter more. With a fixed unit more steps help again (LPIPS 0.87 → 0.645 from 6k to 36k);
-  PSNR flattens near 16.5–17 dB (moving machines, light?). karlak at 10 m (ds2def18k_unit10): 22.99 / 0.700 / 0.333
+  PSNR flattens near 16.5–17 dB: not moving objects or light (none, per the user); renders are blurry with needle-like Gaussians, ~1.2M for ~14 ha. karlak at 10 m (ds2def18k_unit10): 22.99 / 0.700 / 0.333
   → **23.24 / 0.714 / 0.301** in the same time; its auto unit was ~31 m (kladno_dopravnik 26, fullrun_test 27). →
   The plan's default is now one unit = 10 m. Median scene depth as the unit would give dira 72 m: not supported.
 - Splat side, found on the way: nerfstudio scales poses by 1 / max |camera position| and splatfacto's thresholds
   (`densify_size_thresh`, `cull_scale_thresh`) and position learning rate are in those units (`scene_scale=1.0`);
   `schedule["scale_factor"]` fixes the scale (`--auto-scale-poses False --scale-factor`), now the default (10 m).
+
+**Splat tiles** (`modelforge/splat_tiles.py`; the user asked, 2026-10-20: worlds of up to ~800 photos train
+well, dira2k's 2000 in one splat stayed blurry at ~17 dB with needle-like Gaussians, more Gaussians or steps
+helped little):
+- **When:** plan `tiles` (Splat tab "Tiles" auto / on / off, CLI `--tiles`): auto above 800 training images
+  (`TILE_ABOVE`). The plan note says so.
+- **Partition:** each camera's look-at point = median x/y of the sampled sparse points it sees (as
+  `splat_plan.survey`); recursive median splits along the longer axis until ≤ `PHOTOS_PER_TILE` (500, "Photos per
+  tile") cameras look into a cell; outer cells open to infinity. A tile's photos: those looking into its cell +
+  every photo with ≥ 25 % of its seen points inside it (oblique views from the neighbours). dira2k: 4 tiles of
+  740 / 784 / 822 / 662 photos, 2.7 s.
+- **Training:** `PROJECT/tiles/tile_KK/` = transforms.json with its frames, sparse_pc.ply cropped to the cell +
+  margin (25 % of the cell's longer side), `images/` and `images_N/` as relative links to the project's; then
+  `splat.run` with its own plan (`suggest(survey(tile), tiles="off")`: steps from its photos, the tab's explicit
+  values apply per tile), one tile after the other, image cache auto per tile.
+- **Clean** (ENU): keep Gaussians with the centre in the cell and in the scene box (points' 1–99 % + margin)
+  whose 3σ extent ≤ the margin (`clean`) → `tile_KK/splat/clean_enu.ply`. Smoke run (300 steps): ~45 % kept.
+- **Merge:** concatenation → `PROJECT/splat/splat_enu.ply` (export, splat mesh, semantic, View use it as before).
+- **State:** `tiles/tiles.json` (cells, frames, status per tile). Pause / Stop act on the running tile; Stop merges
+  the done + partial tiles; `splat/resume.json` `{"tiles": true, "tile": k, ...}` → `splat.resume_info / resume`
+  continue that tile, then the rest. The live preview shows the finished tiles (cleaned) + the training one
+  (cropped to its cell) through `splat/live_tiles.npz` and an identity transform. Progress "tile k / n: training
+  step …"; report.json `splat.tiles`, `per_tile`.
+- `tiles/` is an intermediate (Clean), archived on re-extraction.
+- Not done: seam fine-tune, visibility pruning of floaters, per-tile splat mesh / semantic (they run on the merged
+  splat), level of detail for very large merged splats.
+- Tests: `tests/test_splat_tiles.py` (partition on a synthetic grid, clean, plan switch, a tiled run with the fake
+  trainer: Stop in tile 2 → merged partial → Resume → every Gaussian of the scene box in exactly one tile).
 
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):

@@ -167,9 +167,10 @@ def auto_downscale(width):
 
 
 def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None,
-            method="splatfacto"):
+            method="splatfacto", tiles=None):
     """Settings for splat.train_command from a survey: iterations, downscale, strategy, max_gaussians,
-    stop_split_at, reset_alpha_every, camera_opt, scale_factor, plus `notes` (why). Explicit arguments win over the
+    stop_split_at, reset_alpha_every, camera_opt, scale_factor, tiles (train in tiles: modelforge/splat_tiles.py;
+    tiles = auto / on / off), plus `notes` (why). Explicit arguments win over the
     suggestion (None, 0 or "auto" = suggest); the dependent values follow them. method: unused (kept for
     callers; all splatfacto variants take the same flags)."""
     auto = lambda v: v in (None, 0, "", "auto")  # noqa: E731
@@ -216,5 +217,12 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
     elif pause > 3000 - 100:
         notes.append(f"opacity reset every {reset_steps:,} steps (splatfacto's 3,000 would block densification "
                      f"with {n:,} training images)")
+    from modelforge import splat_tiles
+    plan["tiles"] = splat_tiles.wanted(n, tiles)
+    if plan["tiles"]:
+        notes.append(f"**tiles** of ~{splat_tiles.PHOTOS_PER_TILE} photos (+ oblique views from the neighbours), "
+                     f"~{max(1, round(s['images'] / splat_tiles.PHOTOS_PER_TILE))} of them, each trained with its own "
+                     "plan (steps from its photos), then cropped to its cell and merged"
+                     + (f": one splat over {n:,} training images stays blurry" if n > splat_tiles.TILE_ABOVE else ""))
     plan["notes"] = notes
     return plan
