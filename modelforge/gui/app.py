@@ -423,7 +423,8 @@ class App:
                      "Gaussians then lack: 471 4K photos take 11.7 GB). cpu: decoded once in RAM. disk: decoded "
                      "in parallel workers at every step (only ~6 % slower on karlak; the only option when the "
                      "photos fit nowhere, e.g. thousands of 4K photos). auto: gpu if the photos take < 1/4 of the "
-                     "GPU memory, else cpu if they fit in half the free RAM, else disk.")
+                     "GPU memory, else cpu if twice their size (nerfstudio keeps two copies) fits in half the free "
+                     "RAM, else disk.")
             self.g_splat_down = gui.add_dropdown(
                 "Downsample factor", options=("auto",) + tuple(str(f) for f in splat.DOWNSCALES),
                 initial_value="auto",

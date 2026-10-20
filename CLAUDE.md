@@ -1178,8 +1178,10 @@ refinement off did not help):
   - **Image cache**: the GPU cache took 11.7 GB for 471 4K photos (and made full-res training run out of
     memory); the disk cache was only ~6 % slower (405 vs 381 s) — the long runs are slow because of 4K
     rendering with 4M Gaussians, not decoding. New Splat tab **Image cache: auto / gpu / cpu / disk**
-    (`splat.auto_cache`: gpu if the photos take < 1/4 of the GPU memory, else cpu if < 1/2 the free RAM,
-    else disk; karlak → cpu, kladno_dopravnik → gpu). CLI `--cache auto` (default).
+    (`splat.auto_cache`: gpu if the photos take < 1/4 of the GPU memory, else cpu if **twice** their size is
+    < 1/2 the free RAM, else disk; karlak ×1 → disk, ×2 → gpu). CLI `--cache auto` (default). cpu holds the
+    photos twice (trainer + the data workers' shared memory): with the first rule (1×) 2000 photos at 1920 px
+    (12.4 GB decoded) took 11.7 + 12.1 GB and the kernel OOM-killed the training (dira2k, 2026-10-20).
   - The semantic text worker held 3.8 GB of GPU memory (moved to the GPU before halving); fixed (half, then
     `.cuda()`, then `empty_cache`).
 - **The user's practical result** (2026-10-20): karlak at **downsample ×2, 30000 steps** looked **good**. That

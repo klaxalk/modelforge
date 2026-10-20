@@ -56,10 +56,12 @@ CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps me
 
 
 def auto_cache(project, downscale=1):
-    """Image cache for training: gpu when the decoded photos take < 1/4 of the GPU memory, else cpu when they fit
-    in half the available RAM, else disk. gpu took 11.7 GB of the 24 GB on karlak (471 4K photos), crowding the
-    Gaussians out (training ran out of memory); the speed differs little (karlak, 6000 steps: disk 405 s, gpu
-    381 s: nerfstudio decodes in parallel workers). Returns (mode, decoded GB)."""
+    """Image cache for training: gpu when the decoded photos take < 1/4 of the GPU memory, else cpu when twice
+    their size fits in half the available RAM, else disk. gpu took 11.7 GB of the 24 GB on karlak (471 4K photos),
+    crowding the Gaussians out (training ran out of memory). cpu holds the photos twice (the trainer's copy + the
+    data workers' shared memory): 2000 photos at 1920 px (12.4 GB decoded) took 11.7 + 12.1 GB and the kernel
+    killed the training on a 31 GB machine. The speed differs little (karlak, 6000 steps: disk 405 s, gpu 381 s:
+    nerfstudio decodes in parallel workers). Returns (mode, decoded GB)."""
     import json
     from modelforge import splat_plan
     t = json.load(open(os.path.join(project, "transforms.json")))
@@ -72,7 +74,7 @@ def auto_cache(project, downscale=1):
         avail = 0.0
     if gb < 0.25 * vram:
         return "gpu", gb
-    if gb < 0.5 * avail:
+    if 2 * gb < 0.5 * avail:
         return "cpu", gb
     return "disk", gb
 VIEWER_PORT = 7007
