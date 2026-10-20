@@ -18,7 +18,8 @@ After each BA the residuals are computed exactly as the Ceres functors define th
              floored, because the poses also feel the priors (no spiral to zero);
   flag       priors beyond chi2_6 at `outlier_quantile` lose their term next round;
 Multi-video projects also get a position offset per source (update_source_offsets),
-estimated after every round's BA, starting with round 0.
+estimated after every round's BA, starting with round 0. Within a source, a smooth position
+drift over time (update_drift) does the same for revisits of one long flight.
 """
 
 import copy
@@ -82,6 +83,11 @@ class PriorModel:
     estimate_systematic: bool = True
     estimate_source_offsets: bool = True  # multi-video projects: per-source position offset
     source_offsets: dict = field(default_factory=dict)  # source -> ENU offset [m] added to its priors
+    # within one source: ENU offset [m] linear in time between knots every drift_knot_s, added to the priors
+    # (update_drift; long flights drift by metres, so revisits triangulate as offset copies)
+    estimate_drift: bool = True
+    drift_knot_s: float = 30.0
+    drift: dict = field(default_factory=dict)  # source -> (knot times [s], K x 3 offsets [m])
     boresight: np.ndarray = field(default_factory=lambda: np.zeros(3))  # rad, camera frame
     dt: float = 0.0  # s
     abs_rejected: set = field(default_factory=set)  # image names
@@ -104,6 +110,9 @@ class PriorModel:
                 "boresight_norm_deg": round(float(np.degrees(np.linalg.norm(self.boresight))), 3),
                 "dt_ms": round(self.dt * 1000, 1),
                 "source_offsets_m": {str(k): np.round(v, 3).tolist() for k, v in sorted(self.source_offsets.items())},
+                "drift_m": {str(k): {"knots": len(t), "max": round(float(np.abs(o).max()), 3) if len(o) else 0.0,
+                                     "range_z": round(float(np.ptp(o[:, 2])), 3) if len(o) else 0.0}
+                            for k, (t, o) in sorted(self.drift.items())},
                 "abs_rejected": sorted(self.abs_rejected), "rel_rejected": len(self.rel_rejected)}
 
 
@@ -114,7 +123,7 @@ def corrected_priors(priors, model):
     for name, p in priors.items():
         R = B @ p.R_cw
         C = p.center + (p.velocity if p.velocity is not None else 0.0) * model.dt
-        C = C + model.source_offsets.get(p.source, 0.0)
+        C = C + model.source_offsets.get(p.source, 0.0) + drift_at(model, p.source, p.time)
         out[name] = Prior.from_pose(p.name, p.frame, p.pts, R, C, p.velocity, p.source, p.order, p.time)
     return out
 
@@ -192,7 +201,8 @@ def _estimate_systematic(model, rec, priors_raw):
     V = np.array([priors_raw[n].velocity for n in names])
     # world-frame position error C_param - C_prior = -R^T r_pos
     D = np.array([-_pose(rec, rec.find_image_with_name(n))[0].T @ raw_abs[n][1] for n in names])
-    D -= np.array([model.source_offsets.get(priors_raw[n].source, np.zeros(3)) for n in names])
+    D -= np.array([model.source_offsets.get(priors_raw[n].source, np.zeros(3))
+                   + drift_at(model, priors_raw[n].source, priors_raw[n].time) for n in names])
     keep = np.ones(len(names), bool)
     for _ in range(2):  # fit, drop the worst 20 %, refit
         v, d = V[keep].ravel(), D[keep].ravel()
@@ -258,20 +268,22 @@ def _point_ids(image):
     return np.array([p.point3D_id if p.has_point3D() else -1 for p in image.points2D], np.int64)
 
 
-def split_point_edges(rec, priors, db_path):
-    """Per source pair (a, b), a < b: X_a - X_b over verified cross-source matches whose
-    keypoints have different 3D points (n_split), and the count already merged."""
+def _split_pairs(rec, priors, db_path, same_source):
+    """Verified image pairs (same_source: within a source, else across sources) as (image a, image b,
+    X_a - X_b for every inlier match whose keypoints have different 3D points, merged count)."""
     import pycolmap
     reg = {i: rec.image(i) for i in rec.reg_image_ids()}
     src = {i: priors[im.name].source for i, im in reg.items() if im.name in priors}
-    ids, xyz = {}, {pid: p.xyz for pid, p in rec.points3D.items()}
+    ids = {}
+    pids = np.fromiter(rec.points3D.keys(), np.int64, rec.num_points3D())
+    xyz = np.array([rec.points3D[int(k)].xyz for k in pids]).reshape(-1, 3)
+    sort = np.argsort(pids)
     db = pycolmap.Database.open(db_path)
     pair_ids, geoms = db.read_two_view_geometries()
     db.close()
-    edges = {}
     for pid, g in zip(pair_ids, geoms):
         i1, i2 = pycolmap.pair_id_to_image_pair(pid)
-        if i1 not in src or i2 not in src or src[i1] == src[i2]:
+        if i1 not in src or i2 not in src or (src[i1] == src[i2]) != same_source:
             continue
         m = np.asarray(g.inlier_matches)
         if not len(m):
@@ -281,12 +293,23 @@ def split_point_edges(rec, priors, db_path):
                 ids[i] = _point_ids(reg[i])
         p1, p2 = ids[i1][m[:, 0]], ids[i2][m[:, 1]]
         both = (p1 >= 0) & (p2 >= 0)
-        if src[i1] > src[i2]:
-            i1, i2, p1, p2 = i2, i1, p2, p1
-        e = edges.setdefault((src[i1], src[i2]), {"diffs": [], "merged": 0})
-        e["merged"] += int(np.sum(both & (p1 == p2)))
         split = both & (p1 != p2)
-        e["diffs"] += [xyz[a] - xyz[b] for a, b in zip(p1[split], p2[split])]
+        x1 = xyz[sort[np.searchsorted(pids, p1[split], sorter=sort)]] if split.any() else np.zeros((0, 3))
+        x2 = xyz[sort[np.searchsorted(pids, p2[split], sorter=sort)]] if split.any() else np.zeros((0, 3))
+        yield reg[i1], reg[i2], x1 - x2, int(np.sum(both & (p1 == p2)))
+
+
+def split_point_edges(rec, priors, db_path):
+    """Per source pair (a, b), a < b: X_a - X_b over verified cross-source matches whose
+    keypoints have different 3D points (n_split), and the count already merged."""
+    edges = {}
+    for im1, im2, d, merged in _split_pairs(rec, priors, db_path, same_source=False):
+        s1, s2 = priors[im1.name].source, priors[im2.name].source
+        if s1 > s2:
+            s1, s2, d = s2, s1, -d
+        e = edges.setdefault((s1, s2), {"diffs": [], "merged": 0})
+        e["merged"] += merged
+        e["diffs"] += list(d)
     return {k: {"n_split": len(v["diffs"]), "merged": v["merged"],
                 "median": np.median(np.array(v["diffs"]), axis=0) if v["diffs"] else np.zeros(3)}
             for k, v in edges.items()}
@@ -324,18 +347,7 @@ def _solve_offsets(edges, ref):
 
 def _shift_cameras(rec, priors, inc):
     """Move the cameras of each source by its offset increment (C += d)."""
-    for image_id in rec.reg_image_ids():
-        img = rec.image(image_id)
-        p = priors.get(img.name)
-        if p is None or p.source not in inc:
-            continue
-        frame = rec.frame(img.frame_id)
-        params = np.array(frame.rig_from_world.params)
-        R = _pose(rec, img)[0]
-        params[4:] -= R @ inc[p.source]  # t = -R C
-        pose = frame.rig_from_world
-        pose.params = params
-        frame.rig_from_world = pose
+    _shift_images(rec, {n: inc[p.source] for n, p in priors.items() if p.source in inc})
 
 
 def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
@@ -363,6 +375,125 @@ def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
             "offsets_m": {str(s): np.round(d, 3).tolist() for s, d in sorted(model.source_offsets.items())},
             "edges": {f"{a}-{b}": {"n_split": e["n_split"], "merged": e["merged"],
                                    "median_m": np.round(e["median"], 3).tolist()} for (a, b), e in edges.items()}}
+
+
+# --- one long flight: smooth position drift over time ----------------------------------
+# GNSS / barometric altitude drift over a long flight (kladno_dira, 30 min: 1-3.4 m between passes over the
+# same ground). Each time segment follows its own prior, so a revisit triangulates as a new, offset copy of the
+# scene that COLMAP cannot merge (3 m ~ 200 px at 50 m), and the reprojection error does not show it. The
+# split points between images of one source measure the drift difference between their capture times.
+
+DRIFT_MIN_SPLIT = 20  # split matches an image pair needs to count
+DRIFT_HUBER_M = 0.5  # robust scale of a pair's median difference
+DRIFT_SMOOTH = 1.0  # weight of the differences between neighbouring knots
+DRIFT_RIDGE = 0.05  # weight pulling each knot's increment to 0 (knots no pair constrains)
+
+
+def drift_at(model, source, t):
+    """Drift offset [m] of a source at time(s) t (linear between knots, constant beyond)."""
+    d = model.drift.get(source)
+    if d is None or t is None:
+        return np.zeros(3) if np.ndim(t) == 0 else np.zeros((len(t), 3))
+    return _interp(*d, t)
+
+
+def _interp(knots, off, t):
+    return np.stack([np.interp(t, knots, off[:, k]) for k in range(3)], -1)
+
+
+def _hat(t, knots):
+    """Linear-interpolation weights (n x K) of times t on knots."""
+    eye = np.eye(len(knots))
+    return np.stack([np.interp(t, knots, eye[k]) for k in range(len(knots))], -1)
+
+
+def _solve_drift(ti, tj, diff, n, knots, times):
+    """Increments (K x 3): o(t_j) - o(t_i) = diff per pair (weight sqrt(n), Huber), neighbouring knots alike
+    (first differences: a stretch without revisits stays flat; second differences extrapolated noisy slopes
+    across the gaps of a calibration subset into metres), a small ridge, and the mean over the source's
+    images = 0 (the priors keep the absolute position)."""
+    K = len(knots)
+    A = _hat(tj, knots) - _hat(ti, knots)
+    w0 = np.sqrt(np.minimum(n, 400.0))
+    rows = [np.eye(K) * DRIFT_RIDGE, _hat(times, knots).mean(0, keepdims=True) * 1e3]
+    D1 = np.zeros((K - 1, K))
+    for k in range(K - 1):
+        D1[k, k:k + 2] = (1.0, -1.0)
+    rows.append(D1 * DRIFT_SMOOTH * np.sqrt(len(ti) / K))
+    fixed = np.vstack(rows)
+    w = w0.copy()
+    for _ in range(5):  # IRLS (Huber on the pair residual norm)
+        M = np.vstack([A * w[:, None], fixed])
+        b = np.vstack([diff * w[:, None], np.zeros((len(fixed), 3))])
+        x = np.linalg.lstsq(M, b, rcond=None)[0]
+        r = np.linalg.norm(A @ x - diff, axis=1)
+        w = w0 * np.sqrt(np.minimum(1.0, DRIFT_HUBER_M / np.maximum(r, 1e-9)))
+    return x
+
+
+def update_drift(model, rec, priors_raw, db_path, min_split=DRIFT_MIN_SPLIT):
+    """One drift update after a BA (or a triangulation): per source, the increments of a position offset
+    linear in time between knots every model.drift_knot_s, from the split points between its images (as
+    update_source_offsets does across sources); the cameras are shifted with them, so the next
+    triangulation merges the copies. A source without revisits measures ~0 and keeps 0 (the ridge)."""
+    if not model.estimate_drift:
+        return None
+    reg_names = {rec.image(i).name for i in rec.reg_image_ids()}
+    by_src = {}
+    for n, p in priors_raw.items():
+        if n in reg_names and p.time is not None:
+            by_src.setdefault(p.source, []).append(p.time)
+    pairs = {}
+    for im1, im2, d, merged in _split_pairs(rec, priors_raw, db_path, same_source=True):
+        if len(d) < min_split:
+            continue
+        p1, p2 = priors_raw[im1.name], priors_raw[im2.name]
+        pairs.setdefault(p1.source, []).append((p1.time, p2.time, np.median(d, axis=0), len(d), merged))
+    inc_by_image, rep = {}, {}
+    for s, times in by_src.items():
+        times = np.asarray(times, float)
+        t0, t1 = float(times.min()), float(times.max())
+        if s not in model.drift:
+            K = max(2, int(np.ceil((t1 - t0) / model.drift_knot_s)) + 1)
+            model.drift[s] = (np.linspace(t0, t1, K), np.zeros((K, 3)))
+        knots, off = model.drift[s]
+        P = pairs.get(s, [])
+        if not P:  # nothing split (or no revisits): keep the drift
+            rep[str(s)] = {"pairs": 0, "increment_max_m": 0.0, "drift_max_m": round(float(np.abs(off).max()), 3)}
+            continue
+        ti, tj = np.array([q[0] for q in P]), np.array([q[1] for q in P])
+        diff, n = np.array([q[2] for q in P]), np.array([q[3] for q in P], float)
+        x = _solve_drift(ti, tj, diff, n, knots, times)
+        model.drift[s] = (knots, off + x)
+        for i in rec.reg_image_ids():
+            p = priors_raw.get(rec.image(i).name)
+            if p is not None and p.source == s and p.time is not None:
+                inc_by_image[p.name] = _interp(knots, x, p.time)
+        far = np.abs(ti - tj) > model.drift_knot_s
+        rep[str(s)] = {"pairs": len(P), "split": int(n.sum()), "merged": int(sum(q[4] for q in P)),
+                       "far_pairs": int(far.sum()),
+                       "far_split_median_m": np.round(np.median(np.linalg.norm(diff[far], axis=1)), 3).item()
+                       if far.any() else None,
+                       "increment_max_m": round(float(np.abs(x).max()), 3),
+                       "drift_max_m": round(float(np.abs(off + x).max()), 3),
+                       "drift_range_z_m": round(float(np.ptp((off + x)[:, 2])), 3)}
+    _shift_images(rec, inc_by_image)
+    return {"knots_s": model.drift_knot_s, "sources": rep}
+
+
+def _shift_images(rec, inc_by_name):
+    """Move cameras by per-image increments (C += d)."""
+    for image_id in rec.reg_image_ids():
+        img = rec.image(image_id)
+        d = inc_by_name.get(img.name)
+        if d is None:
+            continue
+        frame = rec.frame(img.frame_id)
+        params = np.array(frame.rig_from_world.params)
+        params[4:] -= _pose(rec, img)[0] @ d  # t = -R C
+        pose = frame.rig_from_world
+        pose.params = params
+        frame.rig_from_world = pose
 
 
 def copy_model(model):

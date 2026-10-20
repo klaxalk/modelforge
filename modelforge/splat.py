@@ -208,7 +208,9 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
     # auto-picking a leftover images_2/ for images wider than 1600 px
     parser = "nerfstudio-data" if lidar_depth is None else "lidar-data"
-    return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))]
+    scale = (schedule or {}).get("scale_factor")  # world units -> nerfstudio's (else 1 / max |camera position|)
+    scale_args = ["--auto-scale-poses", "False", "--scale-factor", f"{float(scale):.8g}"] if scale else []
+    return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args
 
 
 def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):

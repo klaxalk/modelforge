@@ -887,7 +887,9 @@ Known limitations:
   Sparse tab "BA mode" (auto / global / chunked), "Chunk size", "Chunk overlap", "Polish sweeps";
   CLI `--ba-mode --chunk-size --chunk-overlap --polish-sweeps`. `modelforge/sfm/chunked.py`,
   `pipeline._refine_chunks`.
-  - **auto = chunked from 1000 images on.** `stage_refine` then:
+  - **auto = chunked from 2500 images on** (was 1000 until 2026-10-20: on dira2k, 2000 images, the chunked refine
+    left revisits 0.24 m apart (p90 0.88), global BA 0.05 m (p90 0.15) at 67 vs 24 min, 7.2 vs 3.9 GB; see "Large
+    flights: SfM splits revisits"). `stage_refine` then:
     1. calibrates intrinsics + prior model on a subset (`refine.calibration_subset`: 5 runs of 60
        consecutive images spread over the flight; rounds 0–1, global BA; snapshots `calib_N`);
     2. cuts the capture order into chunks (500 images, 100 shared with the next) and runs each
@@ -1213,6 +1215,63 @@ refinement off did not help):
   - Run them with `python build/splat_exp.py VARIANT ...` (`--eval-snaps VARIANT` scores a stopped run's
     snapshots) in the container (results append to
     `build/karlak_exp/results.json`); variants are defined in VARIANTS there.
+
+**Large flights: SfM splits revisits into offset copies** (found 2026-10-20 on `data/dira2k`: every 4th of
+kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 × 380 m; SfM 26 min, chunked refine,
+2000/2000, 0.535 px):
+- **Symptom:** every splat failed: held-out PSNR ~13 dB / LPIPS ~1.0 (fog), also on *training* views and in
+  nerfstudio's own `ns-eval` (15.1 dB at 4000 steps), the Gaussian count shrinking 2.6M → 0.69M. Not the evaluation,
+  the camera optimizer, the image cache or nerfstudio's scene scale (each ruled out by a 4000-step run). A patch of
+  150 consecutive photos trains fine alone (19.4 dB at 4000 steps), but the same area is bad (11–14 dB) inside the
+  full run. Probably the user's earlier "bad splat of a 500 × 500 m world whose small parts trained fine".
+- **Cause:** 1.29M of 1.33M sparse points are seen only within 60 frames of capture order: when the drone returns
+  over the same ground it is triangulated again as a new copy, and the copies sit **1–3.4 m apart in height**
+  (2 m cells seen by photos of different 250-frame groups, median dz up to 3.4 m, p10 1.8 m). Each time segment
+  follows its own drifted prior (altitude drift over the flight); 3 m ≈ 200 px at 50 m, far beyond COLMAP's track
+  merging, and the chunked refine's pose graph carries no revisits. The reprojection error cannot show it.
+- The matches exist: 5,912 verified pairs > 300 frames apart, 1.33M inliers (database.db).
+- **Fix: position drift over time** (`robust.update_drift`, `PriorModel.drift`; CLI `--no-drift`): per source an ENU
+  offset linear in time between knots every 30 s (`drift_knot_s`), added to the priors like the per-source offsets
+  (`corrected_priors`, also subtracted in the δt estimate). Measured from the split points between images of one
+  source (`_split_pairs`, shared with `split_point_edges`): one equation per image pair with ≥ 20 split matches,
+  o(t_j) − o(t_i) = median(X_i − X_j), weight √n (≤ 20), Huber 0.5 m (IRLS); first differences between knots
+  (a stretch without revisits stays flat), a small ridge, and the mean over the source's images = 0 (GPS keeps the
+  absolute position). The cameras are shifted by the increments, so the next triangulation merges the copies.
+  - Where: global refine after each round's BA from round 1 (round 0's focal is ~2× off); not in chunks (throwaway
+    model copies) and **not on the calibration subset**: its separate blocks leave the gaps unconstrained, and the
+    first version (second differences) extrapolated noise there into 4.7 m of fake drift that the chunks then
+    followed (revisit split 4.9 m). Chunked refine: after the pose graph, up to 3 passes of triangulate all →
+    update_drift → shift (`pipeline.DRIFT_PASSES`, stop below 5 cm), then the polish with the corrected priors.
+  - GUI: state line "drift pass k", refine History "position drift up to X m removed", View stats per source.
+  - Tests: `test_multi_source.py::test_drift_is_recovered` (two passes over a synthetic scene, 0.8 units of drift:
+    split 0.68 measured in the first update, merged after it, cameras within 3 cm up to the gauge),
+    `test_drift_without_revisits_stays_zero`.
+  - **dira2k:** drift passes split median 2.42 → 0.61 → 0.41 m (increments still ≤ 1 m at the 3-pass limit),
+    drift ≤ 3.1 m, height range 5 m over 33 min (a 4 m dip around minutes 18–20, agreed on by many pairs). Points
+    linking images > 250 frames apart 1.5 % → 6.1 %; height offset between 250-image groups over the same 2 m
+    cells: median of group pairs 1.69 → **0.14 m** (max 3.40 → 1.10); per cell |dz| median 1.77 → 0.42 m. Final
+    0.574 px (was 0.535), 1.32M points. Splat at 4000 steps: 15.3 → 16.5 dB held-out (ns-eval 15.1 → 16.5), and
+    the render now lines up with the photo (before: structure in the wrong place); the rest is under-training.
+  - Not converged in 3 passes (0.4 m left): faster drift than 30 s knots, or false matches on repetitive gravel.
+  - **Chunked vs global on dira2k (with drift):** final revisit split (image pairs > 60 s apart, ≥ 20 split
+    matches; `build/split_check.py`) median / p90: no drift 2.56 / 3.95 m (22 % of their matches merged), chunked
+    0.24 / 0.88 m (64 %), **global 0.05 / 0.15 m (80 %)**, at the measurement's floor (pairs < 60 s: 0.06 m).
+    Finer knots would only reach ~0.13 m: the windowed polish holds everything else fixed and cannot pull two
+    passes together, a global BA can (its drift stayed ≤ 0.5 m). Global: 67 min, 7.2 GB; chunked 24 min, 3.9 GB.
+    → BA mode auto now chunks from 2500 images (was 1000). Larger projects still need a cheap final global step
+    (idea: `refine.local_ba(global_pass=True)` on thinned points after the drift passes; untested).
+- **Splat on dira2k, still open** (held-out PSNR / LPIPS, ×2, default densification): 4000 steps (camera optimizer
+  off): no drift 15.3 / 0.97, chunked + drift 16.5 / 0.92, global + drift 17.0 / 0.86; renders now line up with
+  the photos. But longer plan runs get **worse**: 12000 steps 14.9 (chunked and global alike), 36000 steps 12.9;
+  already behind at equal steps (12k run at step 3000: 13.9 vs the 4k run at 2000: 15.8), the Gaussian count
+  falling at every opacity reset (2.3M → 0.63M over 36k). Ruled out: the opacity reset (none: 13.8, 2.7M), the
+  camera optimizer (−0.7 dB at 4k). Suspects for the next session: what depends on the step count — the position
+  learning-rate decay (in nerfstudio units of 1 / max |camera position| ≈ 200 m here, 7× karlak; the unit-28-m
+  test ran on the drift-broken model, so redo it: `schedule["scale_factor"]`) and the split stop. A 150-photo
+  patch trains to 19.4 dB at 4000 steps. Moving machines (excavator) ghost between passes.
+- Splat side, found on the way: nerfstudio scales poses by 1 / max |camera position| and splatfacto's thresholds
+  (`densify_size_thresh`, `cull_scale_thresh`) and position learning rate are in those units (`scene_scale=1.0`);
+  `schedule["scale_factor"]` now fixes the scale (`--auto-scale-poses False --scale-factor`), untested as a default.
 
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):

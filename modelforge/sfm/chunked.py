@@ -30,7 +30,11 @@ from modelforge.sfm.refine import center_of
 class Chunked:
     size: int = 500  # images per chunk
     overlap: int = 100  # images shared by consecutive chunks
-    min_images: int = 1000  # BA mode "auto": chunked from this many images on
+    # BA mode "auto": chunked from this many images on. Chunks + pose graph + windowed polish never pull two passes
+    # over the same ground together the way one global BA does (dira2k, 2000 images, revisit split median /
+    # p90: chunked 0.24 / 0.88 m, global 0.05 / 0.15 m), so global runs as long as it is affordable (dira2k:
+    # 67 min, 7.2 GB vs chunked 24 min, 3.9 GB; 4000 images: > 30 min for round 0 alone, ~20 GB)
+    min_images: int = 2500
     edge_steps: tuple = (1, 4, 16, 64)  # pose-graph edges i -> i + step within a chunk
     # pose-graph edge sigmas: a + b * baseline (position), c (rotation); far below the priors'
     # 0.7 m / 0.7 deg, so the chunks' shapes win, but finite, so overlapping chunks can agree

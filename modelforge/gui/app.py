@@ -45,7 +45,7 @@ STAGE_HINTS = {
              "on CPU (~12 min for 2400 pairs).",
     "refine": "Start every camera at its prior, then 3 rounds of triangulate + bundle adjustment with "
               "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min for 300 images. "
-              "From 1000 images (BA mode auto): calibration on a subset, chunks, a pose graph, a polish sweep.",
+              "From 2500 images (BA mode auto): calibration on a subset, chunks, a pose graph, a polish sweep.",
     "reconstruct": "Videos without metadata: incremental SfM (COLMAP mapper) from the images alone, then the model "
                    "is oriented up and scaled (no metric scale). Live count of registered images; Stop works.",
     "export": "Write transforms.json + sparse_pc.ply (nerfstudio dataset, ENU world) from sparse/refined. Seconds.",
@@ -341,7 +341,9 @@ class App:
                      "the intrinsics and the prior model are calibrated on 300 images spread over the flight; then "
                      "each chunk of consecutive images is refined on its own (its matches only, so memory does not "
                      "grow with the project), a pose graph (cameras only, no points) joins the chunks under the "
-                     "priors, and one sweep of windows polishes all images. auto: chunked from 1000 images on.")
+                     "priors, and one sweep of windows polishes all images. auto: chunked from 2500 images on "
+                     "(global BA pulls revisits of a long flight together better: on 2000 images 0.05 m between "
+                     "passes vs 0.24 m chunked, but 67 vs 24 min).")
             self.g_chunk_size = gui.add_number(
                 "Chunk size (images)", initial_value=chunked.Chunked.size, min=100, step=100,
                 hint="Images per chunk in a chunked refine; consecutive chunks share the overlap.")
@@ -999,6 +1001,10 @@ class App:
             for k, o in pm.get("source_offsets_m", {}).items():
                 lines.append(f"source {int(k) + 1} offset: {np.linalg.norm(o):.2f} m "
                              f"(E {o[0]:+.2f}, N {o[1]:+.2f}, U {o[2]:+.2f})")
+            for k, d in pm.get("drift_m", {}).items():
+                if d["max"] >= 0.05:
+                    lines.append(f"source {int(k) + 1} position drift: up to {d['max']:.2f} m "
+                                 f"(height range {d['range_z']:.2f} m, {d['knots']} knots)")
         self.g_stats.content = "  \n".join(lines)
 
     def _prior_model(self, snapshot):
@@ -1779,6 +1785,12 @@ class App:
                 cap = r.get("ba", {}).get("max_iterations")
                 if its and cap:
                     mode += f" · BA iterations {', '.join(map(str, its))} / {cap}"
+                drifts = [v["drift"] for k, v in sorted(r.items()) if isinstance(v, dict) and v.get("drift")]
+                drifts += r.get("chunked", {}).get("drift") or []
+                if drifts:  # the last estimate: revisits of a long flight brought together
+                    dm = max((d.get("drift_max_m", 0.0) for d in drifts[-1]["sources"].values()), default=0.0)
+                    if dm >= 0.05:
+                        mode += f" · position drift up to {dm:.2f} m removed (revisits merged)"
                 return (f"{f['reg_images']} cameras, {f['points3D']:,} points, error median {e['median']} px "
                         f"(p90 {e['p90']}), prior deviation median {d['median']} m (max {d['max']}){mode}")
             if st == "reconstruct":
@@ -1835,6 +1847,10 @@ class App:
         if phase == "posegraph":
             self._job["detail"] = f"pose graph: {ev['cameras']} cameras, {ev['edges']:,} edges …"
             self.g_progress.value = 86.0
+        elif phase == "drift":
+            self._job["detail"] = (f"drift pass {ev['pass'] + 1} (≤ {ev['passes']}): triangulating all images and "
+                                   "measuring revisits …")
+            self.g_progress.value = 87.0
         elif phase == "triangulate":
             self._job["detail"] = f"{step}: triangulating …"
             if "chunks" not in ev:

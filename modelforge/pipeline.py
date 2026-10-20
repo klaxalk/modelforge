@@ -206,7 +206,7 @@ BA_MODES = ("auto", "global", "chunked")
 def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iterations, skip, refine_intrinsics,
             write=True, ctx_extra=None, skip_round=None):
     """Refinement rounds [(i, Round)]: triangulate (poses fixed) -> global prior BA -> source offsets ->
-    prior-model calibration. Writes sparse/<prefix>_i[_tri] (write=False: a scratch triangulation
+    drift (not in a chunk: its model is a throwaway copy) -> prior-model calibration. Writes sparse/<prefix>_i[_tri] (write=False: a scratch triangulation
     folder, no snapshots, and no "round_done" events: a chunk). Returns (rec, the last Round that
     ran, {"<prefix>_i": stats})."""
     db_path = os.path.join(project, "database.db")
@@ -238,10 +238,15 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
             os.makedirs(out, exist_ok=True)
             rec.write(out)
         offsets = robust.update_source_offsets(model, rec, pri, db_path)
+        # not in round 0 (focal length still ~2x off: its split points measure nonsense) and not on the
+        # calibration subset (separate blocks: the gaps between them are unconstrained; a chunked refine
+        # estimates the drift over all images after the pose graph)
+        drift = (robust.update_drift(model, rec, pri, db_path)
+                 if write and prefix != "calib" and i >= model.start_round else None)
         ev = refine.evaluate(rec, pri)
         calib = robust.update(model, rec, pri) if i >= model.start_round else {"model": model.summary(), "skipped": True}
         results[f"{prefix}_{i}"] = {"thresholds": vars(rnd), "after_triangulation": tri, "ba": ba, "after_ba": ev,
-                                    "prior_model": calib, "source_offsets": offsets,
+                                    "prior_model": calib, "source_offsets": offsets, "drift": drift,
                                     "seconds": round(time.time() - t0, 1)}
         log(f"{ctx['name']} ({rnd.max_reproj_px:g}px): tri {tri['points3D']} pts, median "
             f"{tri['point_error_px'].get('median')}px -> BA {ba['iterations']}/{max_iterations} it ({ba['termination']}, "
@@ -250,6 +255,8 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
             f"rot {ev['prior_deviation']['rotation_deg']}, focal {ev['camera']['params'][0]}")
         if offsets:
             log(f"   source offsets ({offsets['method']}): {offsets['offsets_m']}")
+        if drift:
+            log(f"   drift: {_drift_line(drift)}")
         m = calib["model"]
         if not calib.get("skipped") and write:
             log(f"   prior model: scales {calib.get('scales')} | abs {m['abs_sigmas']} rel {m['rel_sigmas']} | "
@@ -258,6 +265,17 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
         if write:
             emit({"phase": "round_done", **ctx, "rec": rec, "eval": ev, "ba": ba, "max_iterations": max_iterations})
     return rec, last, results
+
+
+def _drift_line(drift):
+    return "; ".join(f"source {s}: {d['pairs']} pairs" + (
+        f", far split median {d['far_split_median_m']} m, increment ≤ {d['increment_max_m']} m, "
+        f"drift ≤ {d['drift_max_m']} m (z range {d['drift_range_z_m']} m)" if d["pairs"] else "")
+        for s, d in drift["sources"].items())
+
+
+DRIFT_PASSES = 3  # chunked: triangulate all + drift update, until the increments are below DRIFT_DONE_M
+DRIFT_DONE_M = 0.05
 
 
 def _pose(rec, image_id):
@@ -323,6 +341,21 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
     rnd = rounds[-1][1]
     stats = {"chunks": per_chunk, "pose_graph": pg, "chunk_size": cfg.size, "overlap": cfg.overlap,
              "rejected_priors": len(rejected)}
+    # revisits: the chunks and the pose graph never relate passes over the same ground at different times,
+    # so with a drifting prior they triangulate as offset copies; measure and remove the drift globally
+    if model.estimate_drift and not (skip is not None and skip.is_set()):
+        stats["drift"] = []
+        for k in range(DRIFT_PASSES):
+            emit({"phase": "drift", "pass": k, "passes": DRIFT_PASSES})
+            rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
+            jobs.check(token)
+            dr = robust.update_drift(model, rec, pri, db_path)
+            stats["drift"].append(dr)
+            log(f"refine: drift pass {k + 1}: {_drift_line(dr)}")
+            inc = max((d.get("increment_max_m", 0.0) for d in dr["sources"].values()), default=0.0)
+            if inc < DRIFT_DONE_M:
+                break
+        corrected = robust.corrected_priors(pri, model)
     if cfg.polish_sweeps and not (skip is not None and skip.is_set()):
         emit({"phase": "triangulate", "round": 0, "rounds": 1, "stage": "polish", "name": "posegraph", "rec": rec})
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
@@ -518,7 +551,7 @@ def main():
                          "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
     ap.add_argument("--ba-mode", default="auto", choices=BA_MODES,
                     help="refine BA: global (all images at once), chunked (chunks on their own + a pose graph + a polish "
-                         "sweep, after calibrating the intrinsics on a subset), auto (chunked from 1000 images on; default)")
+                         "sweep, after calibrating the intrinsics on a subset), auto (chunked from 2500 images on; default)")
     ap.add_argument("--chunk-size", type=int, default=chunked.Chunked.size, help="images per chunk (default 500)")
     ap.add_argument("--chunk-overlap", type=int, default=chunked.Chunked.overlap,
                     help="images shared by consecutive chunks (default 100)")
@@ -540,6 +573,8 @@ def main():
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
     ap.add_argument("--no-calibration", action="store_true", help="keep the initial prior sigmas")
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
+    ap.add_argument("--no-drift", action="store_true",
+                    help="do not estimate the position drift over time (revisits of one long flight)")
     args = ap.parse_args()
     unknown = [s for s in args.stages.split(",") if s not in STAGES and s not in GROUPS]
     if unknown:
@@ -559,7 +594,7 @@ def main():
         stage_match(args.project, report, args.ratio, args.guided, args.min_inliers)
     if "refine" in stages:
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
-                                  estimate_systematic=not args.no_systematic)
+                                  estimate_systematic=not args.no_systematic, estimate_drift=not args.no_drift)
         rec = stage_refine(args.project, report, pri, model=model, max_iterations=args.ba_iterations,
                            ba_mode=args.ba_mode, chunks=chunked.Chunked(size=args.chunk_size, overlap=args.chunk_overlap,
                                                                          polish_sweeps=args.polish_sweeps))
