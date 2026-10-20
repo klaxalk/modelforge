@@ -5,8 +5,8 @@ its pins (viser 1.0.0, opencv 4.10, numpy<2) clash with ours; this module runs i
 subprocesses:
   train    ns-train <method> --data PROJECT --output-dir PROJECT/nerfstudio
            (loads our sparse_pc.ply as initial points; viewer on :7007 while training).
-           Images are cached on disk by default (cache="disk": nothing preloaded into RAM or
-           GPU memory, for large datasets); downscale N trains on PROJECT/images_N/, made here.
+           Images are cached by auto_cache: GPU memory when small, else decoded in RAM, else disk;
+           downscale N trains on PROJECT/images_N/, made here.
   export   ns-export gaussian-splat -> PROJECT/splat/splat.ply (nerfstudio's normalized frame)
   convert  modelforge.export.splat_to_enu -> PROJECT/splat/splat_enu.ply (ENU, aligned with
            the refined cameras and the COLMAP mesh)
@@ -44,6 +44,7 @@ import threading
 import time
 
 from modelforge import jobs
+from modelforge.splat_plan import DOWNSCALES  # image downsample factors offered (GUI, CLI)
 
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
@@ -52,6 +53,28 @@ DEFAULT_LIDAR_DEPTH = 0.2  # weight of the LiDAR depth loss (relative depth erro
 _LIDAR = re.compile(r"\[lidar\] step (\d+): depth error median ([\d.]+)% p90 ([\d.]+)% within 5% ([\d.]+)%")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
 CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps memory use flat
+
+
+def auto_cache(project, downscale=1):
+    """Image cache for training: gpu when the decoded photos take < 1/4 of the GPU memory, else cpu when they fit
+    in half the available RAM, else disk. gpu took 11.7 GB of the 24 GB on karlak (471 4K photos), crowding the
+    Gaussians out (training ran out of memory); the speed differs little (karlak, 6000 steps: disk 405 s, gpu
+    381 s: nerfstudio decodes in parallel workers). Returns (mode, decoded GB)."""
+    import json
+    from modelforge import splat_plan
+    t = json.load(open(os.path.join(project, "transforms.json")))
+    gb = len(t["frames"]) * (t["w"] // downscale) * (t["h"] // downscale) * 3 / 1e9
+    vram = splat_plan.vram_gb() or splat_plan.DEFAULT_VRAM_GB
+    try:
+        avail = next(int(line.split()[1]) for line in open("/proc/meminfo")
+                     if line.startswith("MemAvailable")) / 1e6
+    except (OSError, StopIteration, ValueError):
+        avail = 0.0
+    if gb < 0.25 * vram:
+        return "gpu", gb
+    if gb < 0.5 * avail:
+        return "cpu", gb
+    return "disk", gb
 VIEWER_PORT = 7007
 # nerfstudio's progress table rows: "29910 (99.70%)   12.345 ms   1 s, 230.21 ms ..."
 _PROGRESS = re.compile(r"^\s*(\d+)\s+\((\d+(?:\.\d+)?)%\)")
@@ -88,6 +111,8 @@ def _env(extra=None):
     # torch >= 2.6 loads weights_only by default, which rejects nerfstudio 1.1.5 checkpoints
     # (numpy scalars inside); they are our own, written by ns-train in this project
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    # karlak at 4K: 5.8 GB of 22 GB reserved but unusable (fragmentation) when training ran out of memory
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     for k in ("VIRTUAL_ENV", "PYTHONPATH"):  # keep /opt/venv and the repo out of its imports
         env.pop(k, None)
     env["PYTHONPATH"] = PLUGIN_DIR  # only the nerfstudio plugin (splatfacto-lidar)
@@ -114,9 +139,6 @@ def has_lidar(project):
     import json
     path = os.path.join(project, "transforms.json")
     return os.path.exists(path) and "lidar_ply_file_path" in json.load(open(path))
-
-
-DOWNSCALES = (1, 2, 4, 8)  # image downsample factors offered (GUI, CLI)
 
 
 STRATEGIES = ("default", "mcmc")  # gsplat densification: split/clone/prune, or MCMC with a fixed budget
@@ -457,12 +479,12 @@ def main():
     ap.add_argument("project")
     ap.add_argument("--method", choices=METHODS, default="splatfacto")
     ap.add_argument("--iterations", type=int, help="training steps (default: from the project's size)")
-    ap.add_argument("--cache", choices=CACHE_MODES, default="disk",
-                    help="where training images are kept (default disk: low memory, for large datasets)")
+    ap.add_argument("--cache", choices=("auto",) + CACHE_MODES, default="auto",
+                    help="where training images are kept (default auto: gpu if small, else cpu RAM, else disk)")
     ap.add_argument("--downscale", type=int, choices=DOWNSCALES,
-                    help="train on images downscaled by this factor (default 1: full resolution)")
-    ap.add_argument("--strategy", choices=STRATEGIES, help="densification (default: mcmc when the scene needs "
-                    "more Gaussians than fit, else default with a reset period scaled to the image count)")
+                    help="train on images downscaled by this factor (default: to ~2K, i.e. 2 for 4K photos)")
+    ap.add_argument("--strategy", choices=STRATEGIES, help="densification (default: default, with a reset period "
+                    "scaled to the image count; mcmc built up near-camera fog on large scenes)")
     ap.add_argument("--max-gaussians", type=int, help="MCMC budget (default: from the scene and GPU memory)")
     ap.add_argument("--camera-opt", choices=CAMERA_OPT, help="pose refinement while training (default SO3xR3)")
     ap.add_argument("--resume", action="store_true",
@@ -487,7 +509,8 @@ def main():
                                           method=args.method)
             print("splat plan: " + "; ".join(schedule["notes"]), flush=True)
             iterations, downscale = schedule["iterations"], schedule["downscale"]
-        run(project, args.method, iterations, extra, on_line=lambda m: print(m, flush=True), cache=args.cache,
+        cache = args.cache if args.cache != "auto" else auto_cache(project, downscale)[0]
+        run(project, args.method, iterations, extra, on_line=lambda m: print(m, flush=True), cache=cache,
             downscale=downscale, lidar_depth=args.lidar_depth, schedule=schedule)
     except (RuntimeError, ValueError, Stopped) as e:
         sys.exit(f"error: {e}")

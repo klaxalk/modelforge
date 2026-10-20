@@ -62,6 +62,24 @@ def keep_mask(depth, alpha, min_alpha, edge_tol):
     return (alpha >= min_alpha) & (depth > 0) & (rel < edge_tol)
 
 
+def prune_blocks(vbg, min_weight):
+    """Erase the voxel blocks none of whose voxels reached min_weight views: marching cubes skips them anyway,
+    but allocates for every block (karlak: 389k blocks did not fit in 11 GB). Returns the number erased."""
+    import open3d.core as o3c
+    hm = vbg.hashmap()
+    active = hm.active_buf_indices().to(o3c.int64)
+    if active.shape[0] == 0:
+        return 0
+    w = torch.utils.dlpack.from_dlpack(vbg.attribute("weight").to_dlpack())  # (capacity, 8, 8, 8, 1)
+    idx = torch.utils.dlpack.from_dlpack(active.to_dlpack())
+    weak = w[idx].reshape(len(idx), -1).amax(1) < min_weight
+    if not bool(weak.any()):
+        return 0
+    keys = torch.utils.dlpack.from_dlpack(hm.key_tensor().to_dlpack())[idx[weak]].contiguous()
+    hm.erase(o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keys)))
+    return int(weak.sum())
+
+
 def main():
     inp, out_dir, params = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3]))
     t0 = time.time()
@@ -118,7 +136,24 @@ def main():
                           trunc_voxel_multiplier=4.0)
             print(f"[tsdf] view {i + 1} / {n}", flush=True)
     print("[tsdf] marching cubes", flush=True)
-    mesh = vbg.extract_triangle_mesh(weight_threshold=params["min_weight"]).to_legacy()
+    # torch's cached render memory goes back first: on karlak (471 views, 2.1M Gaussians) Open3D's CUDA
+    # marching cubes ran out of GPU memory without this (a failed CUDA allocation leaves Open3D's CUDA state
+    # broken, so it cannot be retried, and moving a large grid to the CPU crashed Open3D 0.20)
+    del g
+    torch.cuda.empty_cache()
+    n_blocks = vbg.hashmap().size()
+    pruned = prune_blocks(vbg, params["min_weight"])
+    free, total = torch.cuda.mem_get_info()
+    print(f"[tsdf] {n_blocks:,} voxel blocks, {pruned:,} pruned (no voxel seen by {params['min_weight']} views); GPU "
+          f"memory free {free / 1e9:.1f} of {total / 1e9:.1f} GB", flush=True)
+    try:
+        mesh = vbg.extract_triangle_mesh(weight_threshold=params["min_weight"]).to_legacy()
+    except RuntimeError as e:  # Open3D's CUDA state is broken now: say why and leave without its teardown
+        if "CUDA" not in str(e):
+            raise
+        print(f"[tsdf] not enough GPU memory for marching cubes over {n_blocks - pruned:,} voxel blocks at "
+              f"{voxel * 100:.1f} cm: use a coarser quality (or a larger voxel)", flush=True)
+        os._exit(2)
     raw_faces = len(mesh.triangles)
     if raw_faces:
         clusters, counts, _ = mesh.cluster_connected_triangles()

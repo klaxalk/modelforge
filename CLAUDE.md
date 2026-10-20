@@ -1006,7 +1006,7 @@ Why PatchMatch was slow:
 inside the CUDA dev container, where nerfstudio sits in its own venv at
 `/opt/nerfstudio`:
 - GUI: Splat tab → method, iterations (0 = auto), **Cache images on disk** (default on),
-  **Downsample factor** (1 / 2 / 4 / 8, default 1), **Densification** (auto / default / mcmc),
+  **Downsample factor** (auto / 1 / 2 / 4 / 8, default auto), **Densification** (auto / default / mcmc),
   **Max gaussians** (0 = auto), **Camera pose refinement** (auto / off / SO3xR3 / SE3), then
   **Train + export splat**. The progress bar shows the training step, there is a Stop button,
   and the result is reloaded into the View tab.
@@ -1026,24 +1026,30 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
     → overlap = mean count; GSD = median over cameras of median point depth / focal; surface = Σ
     footprints / overlap. Without sparse points the scene size is unknown.
   - `suggest`: iterations = 20 × training images in [30k, 300k]; Gaussians needed = all image pixels
-    / (overlap × (2 px × factor)²); GPU fits ~0.35M per GB above 4 GB. **Full resolution** unless the
-    user picks a factor (the user prefers it; an automatic ×2 was dropped). **mcmc** (budget = need,
-    within the GPU estimate, ≥ the sparse points) when the need exceeds the GPU, else default with
-    the reset period max(3000, 2 × (training images + 100)); splitting stops at 1/2 (mcmc 5/6);
-    camera optimizer SO3xR3. Explicit values win and the dependent ones follow.
+    / (overlap × (2 px × factor)²), rough (karlak ×1: 14M estimated, 2.0M grown by default densification);
+    GPU fits ~0.35M per GB above 4 GB. **Since 2026-10-20 (the karlak investigation, below; the user asked):**
+    - downsample auto = the smallest factor that trains at ≤ 2700 px width (`MAX_TRAIN_WIDTH`,
+      `auto_downscale`): ×2 for 4K, ×1 up to 2.7K. Before, full resolution was the default (the user had
+      preferred it); on karlak 4K was no better than ×2 even scored at 4K, in 2.4× the time. Pick 1 for it.
+    - densification auto = **default** always, with the reset period max(3000, 2 × (training images + 100));
+      **mcmc** only when chosen (budget = need, within the GPU estimate, ≥ the sparse points): it caused the
+      near-camera fog. Before, auto switched to mcmc when the need exceeded the GPU (and splatfacto-big at half
+      the need, `GROWTH`, removed).
+    - splitting stops at 1/2 (mcmc 5/6); camera optimizer SO3xR3. Explicit values win and the dependent ones
+      follow. Untested: default densification without a cap on thousands of images (kladno_dira); if it runs
+      out of GPU memory, pick mcmc.
   - **Per method:** the plan's flags apply to splatfacto, splatfacto-big and their -lidar variants
     (checked with nerfstudio's parser). splatfacto-big only differs by a lower split gradient (0.0005)
-    and cull opacity (0.005), so it grows more Gaussians without a cap: `GROWTH` 2×, i.e. it switches
-    to mcmc at half the need. Under mcmc both behave alike (no gradient threshold; cull 0.005 set).
-  - Read-only on existing projects: fullrun_test (80 images) overlap 50×, 2.7 cm/px, ~0.8M needed →
-    default; karlak (500) 82×, 0.8 cm/px, ~12.7M → mcmc 7M. Without an occlusion test the overlap is
-    probably high, so the need is low.
+    and cull opacity (0.005), so it grows more Gaussians. Under mcmc both behave alike (no gradient
+    threshold; cull 0.005 set).
+  - Now on existing projects: fullrun_test (1080p) ×1, karlak / kladno_dopravnik / kladno_dira (4K) ×2,
+    all default densification; kladno_dira 144,000 steps with the reset every 14,600.
   - `train_command(schedule=)` adds `--pipeline.model.strategy / max-gs-num / stop-split-at /
     reset-alpha-every / camera-optimizer.mode`, `--optimizers.{means,camera-opt,bilateral-grid}.scheduler.max-steps`;
     `--steps-per-eval-all-images 0` always. All flags checked against nerfstudio's own parser.
   - The Splat tab shows the plan and why (images, surface ha, overlap, GSD, Gaussians needed vs. GPU,
-    steps); stats get `report.json["splat"]["schedule"]`. Heuristics, **not yet validated by a
-    training run** on a large project.
+    steps); stats get `report.json["splat"]["schedule"]`. Validated on karlak (471 images) by the
+    held-out experiments below; not on thousands of images.
   - Tests: `tests/test_splat_plan.py`.
 - Disk cache = nerfstudio `--pipeline.datamanager.cache-images disk`: images
   stay on disk and are streamed by worker processes, for large datasets. Off
@@ -1130,6 +1136,82 @@ training should pause and resume):
 - Each checkpoint is ~0.75 GB per million Gaussians (it includes optimizer
   state), so very small intervals slow training.
 
+**Splat quality on large scenes: the karlak investigation** (2026-10-20; the user: splats of larger scenes
+look smudgy / low-res while the sparse model is sharp, and seem to get worse with more training; camera pose
+refinement off did not help):
+- **Setup** (`build/splat_exp.py`, gitignored; workspace `build/karlak_exp/`): a copy of karlak (471 4K
+  keyframes of 2000 extracted, "normal" density; SfM 0.52 px). **24 held-out photos** = extracted frames
+  between the keyframes (never trained on), located by PnP (`evaluate.pose_holdout`, cached in
+  `located.json`); a snapshot every 1000–2000 steps (live.npz → ENU ply, band 0 only) scored with
+  `evaluate.run(splat_path=, located=, report=False)`; the final splat with all SH bands too.
+- **Results** (held-out, final splat with SH, rendered at 1920 px; camera optimizer off; MCMC unless noted):
+
+  | run | steps | Gaussians | PSNR | SSIM | LPIPS ↓ | train |
+  |---|---|---|---|---|---|---|
+  | base6k (the user's settings, GPU cache) | 6000 | 2.09M | 22.01 | 0.643 | 0.481 | 381 s |
+  | fullres6k (num_downscales 0) | 6000 | 1.99M | 21.40 | 0.617 | 0.539 | 1280 s |
+  | depth6k (SfM points as depth targets, splatfacto-lidar 0.2, disk cache) | 6000 | 2.20M | 21.62 | 0.638 | 0.486 | 405 s |
+  | base18k4m (budget 4M) | 18000 | 3.54M | 22.78 | 0.683 | 0.395 | 4815 s |
+  | **ds2def18k** (×2 = 1920 px, **default** densification, splitting to 9000) | 18000 | 1.90M | **22.99** | **0.700** | **0.333** | **672 s** |
+  | def18k (full 4K, default densification, splitting to 9000) | 18000 | 1.99M | 22.79 | 0.690 | 0.358 | 1614 s |
+
+  Band-0 snapshot curves (PSNR / LPIPS) at steps 8k / 12k / 18k: base18k4m 20.06 / 0.559, 20.73 / 0.481,
+  21.30 / 0.415; ds2_18k4m (×2, MCMC 4M, stopped at 12k) 20.37 / 0.522, 21.25 / 0.429, –; ds2def18k 20.93 /
+  0.475, 21.41 / 0.400, 21.54 / 0.363. Per held-out photo, ds2def18k has the best LPIPS of all 5 runs on 21 of 24 (vs base18k4m: 20 of 24).
+
+- **Findings:**
+  - **More training is better on average**: base18k4m's held-out curve rises steadily (LPIPS 0.63 at 4k → 0.42
+    at 18k); a dip around step 6000 (the switch to full resolution + the budget filling) looks like "worse".
+  - **But floaters ("fog") build up in front of some viewpoints**: held-out frame 3612 (8 m, pitch −48°) went
+    PSNR 17.8 → **9.5** from 6k to 18k: semi-transparent Gaussians hanging near the camera path, explaining
+    other training views, hide this one. This is the user's "worse with more training".
+  - **Quality depends on the flight part**: low passes looking down (~8 m, pitch −90…−48°; millimetre GSD)
+    are poor (LPIPS 0.65–0.83: smudged, needle-like Gaussians), near-horizontal views ~9 m good (0.16–0.3).
+    One Gaussian budget for the whole scene starves the high-detail parts.
+  - **splatfacto's coarse-to-fine schedule helps**: training at full resolution from step 0 was worse and 3.4×
+    slower. A 6000-step run reaches full resolution only at its end (num_downscales 2, every 3000 steps).
+  - **Short runs are under-densified**: MCMC grows at most 5 % per 100 steps until stop_split_at, so 6000
+    steps end at ~2.1–2.6M, far below the 7M budget.
+  - **GPU memory at 4K**: ~0.2M Gaussians per GB (rendering buffers grow with resolution), not the 0.35M the
+    plan assumed: the 7M budget ran out of memory at step ~6000 (4.41M, 21.9 GB, 5.8 GB of it fragmentation);
+    4M fits. splat.py now sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+  - **Image cache**: the GPU cache took 11.7 GB for 471 4K photos (and made full-res training run out of
+    memory); the disk cache was only ~6 % slower (405 vs 381 s) — the long runs are slow because of 4K
+    rendering with 4M Gaussians, not decoding. New Splat tab **Image cache: auto / gpu / cpu / disk**
+    (`splat.auto_cache`: gpu if the photos take < 1/4 of the GPU memory, else cpu if < 1/2 the free RAM,
+    else disk; karlak → cpu, kladno_dopravnik → gpu). CLI `--cache auto` (default).
+  - The semantic text worker held 3.8 GB of GPU memory (moved to the GPU before halving); fixed (half, then
+    `.cuda()`, then `empty_cache`).
+- **The user's practical result** (2026-10-20): karlak at **downsample ×2, 30000 steps** looked **good**. That
+  run: 1920 px, the plan's **default** densification (at ×2 the estimated need fits the GPU, so no MCMC; reset
+  period scaled, splitting to 15000), camera optimizer SO3xR3, disk cache, 1.81M Gaussians, 1451 s (24 min).
+  It differs from the smudgy runs in resolution, steps **and** strategy (they were MCMC), so MCMC itself is a
+  suspect (it relocates Gaussians into low-opacity spots: a plausible source of the near-camera fog).
+- **MCMC is the fog** (2026-10-20, `ds2def18k`): ×2 with default densification beats every MCMC run, including
+  full-res 4K MCMC over the same 18000 steps (LPIPS 0.333 vs 0.395), with half the Gaussians in 1/7 of the time.
+  The fog frame 3612 is fine with it: PSNR 19.5 / LPIPS 0.448 (MCMC 18k: 9.5 / 0.830; MCMC 6k: 17.8). At equal
+  ×2 resolution MCMC was behind at every snapshot (12k: LPIPS 0.429 vs 0.400). ×2 alone already helps (ds2 MCMC
+  at 12k ≈ full-res MCMC at 18k), but the evaluation renders at 1920 px, which favours ×2 runs.
+- **Full 4K with default densification** (`def18k`): no fog either (frame 3612: 19.5 dB), GPU memory peaked at
+  only 8.4 GB, but it grew to just 2.0M Gaussians (the plan's ~14M "need" is far off for default densification:
+  its gradient threshold is resolution-normalized) and is **no better than ×2 even scored at 4K**. Band-0 final
+  snapshots, PSNR / SSIM / LPIPS at 1920 px → 3840 px: ds2def18k 21.54 / 0.668 / 0.363 → 21.29 / 0.705 / 0.438;
+  def18k 21.41 / 0.662 / 0.385 → 21.32 / 0.712 / 0.452; base18k4m (MCMC) 21.30 / 0.660 / 0.415 → 21.18 / 0.711
+  / 0.471. So 4K training costs 2.4× the time for nothing here, unless more Gaussians are allowed to grow.
+- **TODO:**
+  1. DONE 2026-10-20: the plan's defaults are now default densification and ×2 for 4K (see "Training plan").
+     Possible next experiment: full 4K default with a lower
+     split gradient threshold (splatfacto-big's 0.0005) so 4K detail gets more Gaussians (8.4 GB peak leaves
+     room).
+  2. `depth18k4m`: depth supervision from the SfM points over 18000 steps — does it stop the fog (frame 3612)?
+     Less pressing now that default densification has no fog.
+  3. Other defaults: splat plan budget at 4K (~0.2M / GB), iterations vs image count, floater
+     control (depth supervision, opacity / scale regularization, near-camera pruning), possibly ×2 for large
+     projects; and for very large projects (8000 photos) per-tile splats (CityGS / VastGaussian style).
+  - Run them with `python build/splat_exp.py VARIANT ...` (`--eval-snaps VARIANT` scores a stopped run's
+    snapshots) in the container (results append to
+    `build/karlak_exp/results.json`); variants are defined in VARIANTS there.
+
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):
 an alternative to COLMAP's dense mesh, asked for by the user (who suggested an ESDF over the splat;
@@ -1147,6 +1229,12 @@ export).
   - Output `PROJECT/splatmesh/`: `mesh.ply` (vertex colours, ENU), `preview.ply` (≤ 300k faces,
     quadric decimation), `stats.json`; stats also in `report.json["splat_mesh"]`.
   - Quality = the voxel as pixels at the median depth: coarse 8, medium 4 (default), fine 2.
+- **GPU memory at marching cubes** (karlak, 471 views, 2.1M Gaussians, 9.5 cm voxel: 389k voxel blocks;
+  Open3D's CUDA marching cubes ran out of the ~11 GB free after fusing): torch's cached render memory is
+  released first, and blocks none of whose voxels reached `min_weight` views are erased (`prune_blocks`;
+  136k of 389k there), after which it fit (2.25M faces). Retrying after a CUDA out-of-memory does not work
+  (Open3D's CUDA state is broken: "illegal memory access"), and moving a large grid to the CPU crashed
+  Open3D 0.20 (segfault), so an out-of-memory now ends with a clear message (coarser quality).
 - **Open3D gotcha:** the legacy `ScalableTSDFVolume` (Open3D 0.20 in the nerfstudio venv)
   returns no surface at all, even for a synthetic wall integrated 5 times. The tensor
   `VoxelBlockGrid` works; its `extract_triangle_mesh` defaults to weight ≥ 3 (views).

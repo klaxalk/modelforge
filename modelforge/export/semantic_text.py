@@ -18,9 +18,12 @@ def main():
     model = torch.hub.load("NVlabs/RADIO", "radio_model", version=version, adaptor_names=[adaptor], progress=False,
                            skip_validation=True, trust_repo=True)
     ad = model.adaptors[adaptor]
-    text_model = ad.text_model.cuda().eval().half() if torch.cuda.is_available() else ad.text_model.eval()
+    # half precision before moving it: .cuda().half() peaked in full precision and torch kept ~3.8 GB reserved
+    text_model = ad.text_model.eval().half().cuda() if torch.cuda.is_available() else ad.text_model.eval()
     ad.text_model = text_model
     del model  # the vision backbone is not needed here
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     dev = next(text_model.parameters()).device
     print("ready", flush=True)
     for line in sys.stdin:

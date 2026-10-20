@@ -5,13 +5,17 @@ splatfacto's defaults are tuned for a few hundred images of an object-sized scen
   - densification: splatfacto pauses refinement for (training images + 100) steps after every opacity
     reset, and resets every 30 x 100 = 3000 steps, so with ~2900+ training images refinement never runs
     (gsplat DefaultStrategy: refine only while step % reset_every >= pause). The reset period is scaled
-    to 2 x the pause here; or MCMC is used, which has no reset pause and keeps a hard Gaussian cap.
+    to 2 x the pause here. MCMC (no reset pause, a hard Gaussian cap) only when asked: on karlak it built up
+    semi-transparent "fog" near the camera path (a held-out view fell to 9.5 dB PSNR) and smudged detail,
+    while default densification did not, with half the Gaussians in 1/3 to 1/7 of the time.
   - schedule: iterations grow with the image count (each image seen ~EPOCHS times), splitting stops
     halfway (MCMC: at 5/6, nerfstudio's ratio), and the position / camera learning-rate decay is
     stretched to the run (it is fixed at 30000 steps in nerfstudio's method config).
-  - budget: training runs at full resolution unless asked otherwise. The scene needs about
-    (all image pixels) / (overlap x PX_PER_GAUSSIAN^2) Gaussians at the training resolution; when that
-    exceeds what fits in GPU memory, MCMC keeps the count at the GPU's estimate.
+  - resolution: photos are trained at ~2K (MAX_TRAIN_WIDTH; 4K -> x2). On karlak (471 4K photos) full 4K
+    with default densification grew no more Gaussians than x2 (2.0M vs 1.9M: its split threshold is
+    resolution-independent) and was no better even scored at 4K, in 2.4x the time.
+  - budget: the scene needs about (all image pixels) / (overlap x PX_PER_GAUSSIAN^2) Gaussians at the
+    training resolution, a rough figure (karlak x1: 14M estimated, 2.0M grown) that sets MCMC's budget.
   - camera optimizer: SO3xR3 lets training correct small pose errors.
 
 No ground plane is assumed (the flight may start in the air, the terrain may drop anywhere): the scene is
@@ -39,10 +43,8 @@ ASSUMED_HFOV_DEG = 80.0  # priors without a calibrated camera (DJI wide cameras:
 MAX_POINTS = 10_000  # sparse points sampled for the survey
 FAR_X_MEDIAN = 4.0  # points beyond this many times a camera's median depth don't count as seen
 TRAIN_FRACTION = 0.9  # nerfstudio-data's train_split_fraction
-# Gaussians the default (uncapped) strategy grows per Gaussian the scene needs: splatfacto-big splits at a
-# lower gradient (0.0005 vs 0.0008) and culls at a lower opacity (0.005 vs 0.1), so it switches to the
-# capped mcmc at half the need
-GROWTH = {"splatfacto": 1.0, "splatfacto-big": 2.0}
+MAX_TRAIN_WIDTH = 2700  # auto downsample: the smallest factor that brings the photos to this width (4K -> x2)
+DOWNSCALES = (1, 2, 4, 8)
 
 
 def vram_gb():
@@ -151,23 +153,27 @@ def needed_gaussians(s, downscale=1):
     return int(s["images"] * s["width"] * s["height"] / (s["overlap"] * (PX_PER_GAUSSIAN * downscale) ** 2))
 
 
+def auto_downscale(width):
+    """The smallest downsample factor that trains the photos at <= MAX_TRAIN_WIDTH."""
+    return next((f for f in DOWNSCALES if width / f <= MAX_TRAIN_WIDTH), DOWNSCALES[-1])
+
+
 def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None,
             method="splatfacto"):
     """Settings for splat.train_command from a survey: iterations, downscale, strategy, max_gaussians,
     stop_split_at, reset_alpha_every, camera_opt, plus `notes` (why). Explicit arguments win over the
-    suggestion (None, 0 or "auto" = suggest); the dependent values follow them. method: splatfacto or
-    splatfacto-big (also their -lidar variants): how fast the uncapped default strategy grows."""
+    suggestion (None, 0 or "auto" = suggest); the dependent values follow them. method: unused (kept for
+    callers; all splatfacto variants take the same flags)."""
     auto = lambda v: v in (None, 0, "", "auto")  # noqa: E731
     vram = vram or vram_gb() or DEFAULT_VRAM_GB
     cap = max(1_000_000, int((vram - VRAM_RESERVE_GB) * GAUSSIANS_PER_GB))
     n = max(1, s["train_images"])
     iters = (int(min(MAX_ITERATIONS, max(MIN_ITERATIONS, math.ceil(EPOCHS * n / 1000) * 1000)))
              if auto(iterations) else int(iterations))
-    down = 1 if auto(downscale) else int(downscale)  # full resolution unless asked
+    down = auto_downscale(s["width"]) if auto(downscale) else int(downscale)
     need = needed_gaussians(s, down)
-    growth = GROWTH.get(method.removesuffix("-lidar"), 1.0)
     if auto(strategy):
-        strategy = "mcmc" if need is not None and need * growth > cap else "default"
+        strategy = "default"
     auto_budget = auto(max_gaussians)
     if strategy == "mcmc" and auto_budget:
         # MCMC grows to its cap: what the scene needs at that factor, within the GPU estimate
@@ -184,10 +190,12 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
     if s.get("gsd_m"):
         notes.append(f"surface ~{s['area_m2'] / 1e4:,.1f} ha seen {s['overlap']:.0f}× on average (sparse points), "
                      f"GSD {s['gsd_m'] * 100:.1f} cm/px at full resolution (median)")
-        notes.append(f"~{need / 1e6:.1f}M Gaussians at ×{down}; {vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M"
-                     + (f" ({method} grows ~{growth:g}× that without a cap)" if growth != 1 else ""))
+        notes.append(f"~{need / 1e6:.1f}M Gaussians at ×{down} (rough); {vram:.0f} GB GPU fits ~{cap / 1e6:.1f}M")
     else:
         notes.append("no sparse points yet: the scene size is unknown (run SfM + export for the estimate)")
+    if auto(downscale) and down > 1:
+        notes.append(f"×{down}: {s['width']} px photos trained at {s['width'] // down} px (pick 1 for full "
+                     "resolution: on 4K photos no better, 2.4× slower)")
     notes.append(f"{iters:,} steps (~{iters / n:.0f} views per image), splitting until {plan['stop_split_at']:,}")
     if strategy == "mcmc":
         notes.append(f"MCMC: a fixed budget of {plan['max_gaussians'] / 1e6:.1f}M Gaussians")

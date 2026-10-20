@@ -417,25 +417,28 @@ class App:
                 hint="Training steps; 0 = auto: ~20 views per training image, at least 30000 (splatfacto's "
                      "default) and at most 300000. The learning-rate decay and the densification schedule "
                      "follow the value. Use a few thousand for a quick check.")
-            self.g_splat_disk = gui.add_checkbox(
-                "Cache images on disk", initial_value=True,
-                hint="On: images stay on disk and are streamed by worker processes, so large datasets fit in "
-                     "memory. Off: all images are preloaded into GPU memory (nerfstudio's default; it falls back "
-                     "to CPU memory above 500 images), a little faster for small projects.")
+            self.g_splat_cache = gui.add_dropdown(
+                "Image cache", options=("auto",) + tuple(reversed(splat.CACHE_MODES)), initial_value="auto",
+                hint="Where the training photos are kept. gpu: decoded in GPU memory (costs GPU memory the "
+                     "Gaussians then lack: 471 4K photos take 11.7 GB). cpu: decoded once in RAM. disk: decoded "
+                     "in parallel workers at every step (only ~6 % slower on karlak; the only option when the "
+                     "photos fit nowhere, e.g. thousands of 4K photos). auto: gpu if the photos take < 1/4 of the "
+                     "GPU memory, else cpu if they fit in half the free RAM, else disk.")
             self.g_splat_down = gui.add_dropdown(
-                "Downsample factor", options=tuple(str(f) for f in splat.DOWNSCALES), initial_value="1",
-                hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory, "
-                     "less detail. 1 = full resolution; when the scene needs more Gaussians than fit in GPU "
-                     "memory, auto densification switches to mcmc with a budget instead. The shrunk copies go "
-                     "to images_<factor>/ (an intermediate, removed by Clean).")
+                "Downsample factor", options=("auto",) + tuple(str(f) for f in splat.DOWNSCALES),
+                initial_value="auto",
+                hint="Train on images shrunk by this factor (2 = half width and height): faster and less memory. "
+                     "auto: to ~2K width, i.e. 2 for 4K photos, 1 up to 2.7K. On karlak (471 4K photos) full "
+                     "resolution grew no more Gaussians and was no sharper, even viewed at 4K, in 2.4× the time. "
+                     "The shrunk copies go to images_<factor>/ (an intermediate, removed by Clean).")
             self.g_splat_strategy = gui.add_dropdown(
                 "Densification", options=("auto",) + splat.STRATEGIES, initial_value="auto",
                 hint="How Gaussians are added. default: split / clone / prune by gradient, with the opacity reset "
                      "period scaled to the image count (splatfacto's fixed 3000 steps blocks densification "
                      "entirely from ~2900 training images). mcmc: a fixed budget of Gaussians relocated where "
-                     "needed, for large areas. auto: mcmc when the area at full resolution needs more Gaussians "
-                     "than fit in GPU memory (scene size from the sparse points: overlap and GSD; splatfacto-big, "
-                     "which grows ~2× more Gaussians, at half that).")
+                     "needed. auto = default: on karlak mcmc built up semi-transparent fog in front of some "
+                     "viewpoints and smudged detail; default densification did not, with half the Gaussians in "
+                     "a fraction of the time. Pick mcmc to hold a hard Gaussian cap (GPU memory).")
             self.g_splat_maxg = gui.add_number(
                 "Max gaussians (M)", initial_value=0.0, min=0.0, step=0.5,
                 hint="mcmc budget in millions; 0 = auto: what the scene needs at the downsample factor, "
@@ -1654,7 +1657,11 @@ class App:
             if info:
                 splat.resume(project, **common)
             else:
-                splat.run(project, self.g_splat_method.value, iters, cache="disk" if self.g_splat_disk.value else "gpu",
+                cache = self.g_splat_cache.value
+                if cache == "auto":
+                    cache, gb = splat.auto_cache(project, down)
+                    self._on_log(f"splat: image cache {cache} ({gb:.1f} GB of decoded photos)")
+                splat.run(project, self.g_splat_method.value, iters, cache=cache,
                           downscale=down, lidar_depth=lidar_depth, schedule=plan, **common)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         except splat.Paused:

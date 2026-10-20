@@ -132,7 +132,8 @@ def test_tab_defaults(app):
     assert app.g_upright.value and not app.g_mapper.visible  # DJI project: upright SIFT, refine (no mapper)
     assert gapp.DENSE_QUALITY[app.g_dense_quality.value] == "superfast"  # the default (320 px)
     assert not app.g_dense_in_all.value  # the full pipeline's dense result is the splat mesh
-    assert app.g_splat_disk.value is True and app.g_splat_down.value == "1"
+    assert app.g_splat_cache.value == "auto" and app.g_splat_down.value == "auto"
+    assert app.g_splat_strategy.value == "auto"
     app._refresh_splat_plan()  # auto values from the cameras, shown in the Splat tab
     t0 = time.time()
     while "Plan" not in app.g_splat_plan.content and time.time() - t0 < 30:

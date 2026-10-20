@@ -99,13 +99,15 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     return out
 
 
-def run(project, holdout, width=1920, log=print):
-    """Pose, render and score the held-out images; stats to report.json["evaluation"] and returned."""
+def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True):
+    """Pose, render and score the held-out images; stats to report.json["evaluation"] (report=True) and
+    returned. splat_path: another ENU splat than splat/splat_enu.ply (e.g. a training snapshot); located:
+    pose_holdout's result, to locate the images once for several splats."""
     import pycolmap
     from modelforge import splat, splat_mesh
     from modelforge.pipeline import Report
     t0 = time.time()
-    located = pose_holdout(project, holdout, log=log)
+    located = located or pose_holdout(project, holdout, log=log)
     if not located:
         raise RuntimeError("no held-out image could be located in the model")
     rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
@@ -118,7 +120,7 @@ def run(project, holdout, width=1920, log=print):
     ws = os.path.join(project, "evaluation")
     names = list(located)
     inp = os.path.join(ws, "eval_input.npz")
-    g = splat_mesh.load_splat(os.path.join(project, "splat", "splat_enu.ply"))
+    g = splat_mesh.load_splat(splat_path or os.path.join(project, "splat", "splat_enu.ply"))
     np.savez(inp, viewmats=np.array([located[n]["viewmat"] for n in names], np.float32),
              K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64), dist=np.array(dist, np.float64),
              width=cam.width, height=cam.height, render_width=int(width),
@@ -140,7 +142,8 @@ def run(project, holdout, width=1920, log=print):
     stats = {**metrics, "held_out": len(holdout["images"]), "located": len(names), "width": int(width),
              "seconds": round(time.time() - t0, 1)}
     json.dump({**stats, "per_image": per}, open(out_json, "w"), indent=1)
-    Report(project).set("evaluation", stats)
+    if report:
+        Report(project).set("evaluation", stats)
     log(f"evaluate: {stats}")
     return stats
 

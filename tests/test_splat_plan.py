@@ -62,20 +62,18 @@ def test_suggest_small_and_large():
     assert p["iterations"] == 30_000 and p["downscale"] == 1 and p["strategy"] == "default"
     assert p["reset_alpha_every"] == 30 and p["stop_split_at"] == 15_000 and p["max_gaussians"] is None
     assert p["camera_opt"] == "SO3xR3"
-    # splatfacto-big grows ~2x the Gaussians without a cap: it takes the capped mcmc at half the need
-    mid = dict(small, images=350)  # ~6.0M needed, under the 7M a 24 GB GPU fits
-    assert splat_plan.suggest(mid, vram=24)["strategy"] == "default"
-    for m in ("splatfacto-big", "splatfacto-big-lidar"):
-        p = splat_plan.suggest(mid, vram=24, method=m)
-        assert p["strategy"] == "mcmc" and p["max_gaussians"] == splat_plan.needed_gaussians(mid)
-        assert any("grows ~2×" in n for n in p["notes"])
-    assert splat_plan.suggest(small, vram=24, method="splatfacto-big")["strategy"] == "default"  # 3.5M x 2 fits
+    # auto densification is always default (mcmc fogged karlak), also for splatfacto-big
+    mid = dict(small, images=350)
+    for m in ("splatfacto", "splatfacto-big", "splatfacto-big-lidar"):
+        assert splat_plan.suggest(mid, vram=24, method=m)["strategy"] == "default"
 
     big = dict(small, images=8000, train_images=7200, width=3840, height=2160, area_m2=250_000.0, gsd_m=0.03)
     p = splat_plan.suggest(big, vram=24)
-    assert p["iterations"] == 144_000 and p["strategy"] == "mcmc"  # 20 views per training image
-    assert p["downscale"] == 1 and p["needed"] > p["cap"]  # full resolution; the budget is the GPU's
-    assert p["max_gaussians"] == p["cap"] and p["stop_split_at"] == 120_000
+    assert p["iterations"] == 144_000 and p["strategy"] == "default"  # 20 views per training image
+    assert p["downscale"] == 2 and p["max_gaussians"] is None  # 4K photos trained at 1920 px
+    assert any("trained at 1920 px" in n for n in p["notes"])
+    p = splat_plan.suggest(big, vram=24, strategy="mcmc")  # mcmc when asked: the budget is the GPU's
+    assert p["needed"] > p["cap"] and p["max_gaussians"] == p["cap"] and p["stop_split_at"] == 120_000
     p = splat_plan.suggest(big, vram=24, downscale=8)  # fewer pixels: the need shrinks with the factor²
     assert p["needed"] == splat_plan.needed_gaussians(big, 8) == splat_plan.needed_gaussians(big) // 64
     # the default strategy: refinement needs step % reset period >= training images + 100
@@ -90,10 +88,14 @@ def test_suggest_small_and_large():
         (60_000, 1, 3_000_000, "off", 50_000)
 
 
+def test_auto_downscale():
+    assert [splat_plan.auto_downscale(w) for w in (1920, 2688, 3840, 4032, 5280, 8192)] == [1, 1, 2, 2, 2, 4]
+
+
 def test_schedule_flags():
     plan = splat_plan.suggest({"images": 8000, "train_images": 7200, "source": "x", "width": 3840,
                                "height": 2160, "initial_points": 1, "area_m2": 250_000.0, "overlap": 20.0,
-                               "gsd_m": 0.03}, vram=24)
+                               "gsd_m": 0.03}, vram=24, strategy="mcmc")
     cmd = splat.train_command("/p", iterations=plan["iterations"], downscale=plan["downscale"], schedule=plan)
     val = lambda flag: cmd[cmd.index(flag) + 1]  # noqa: E731
     assert val("--max-num-iterations") == val("--optimizers.means.scheduler.max-steps") == "144000"
