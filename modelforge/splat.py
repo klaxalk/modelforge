@@ -35,6 +35,7 @@ exports the partial splat, and `resume` (--resume) continues with the run's own 
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -57,7 +58,8 @@ CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps me
 
 def auto_cache(project, downscale=1):
     """Image cache for training: gpu when the decoded photos take < 1/4 of the GPU memory, else cpu when twice
-    their size fits in half the available RAM, else disk. gpu took 11.7 GB of the 24 GB on karlak (471 4K photos),
+    their size fits in half the available RAM, else disk. gpu only up to 500 training images: nerfstudio
+    switches to cpu above that (a 740-photo tile was planned gpu and cached in RAM). gpu took 11.7 GB of the 24 GB on karlak (471 4K photos),
     crowding the Gaussians out (training ran out of memory). cpu holds the photos twice (the trainer's copy + the
     data workers' shared memory): 2000 photos at 1920 px (12.4 GB decoded) took 11.7 + 12.1 GB and the kernel
     killed the training on a 31 GB machine. The speed differs little (karlak, 6000 steps: disk 405 s, gpu 381 s:
@@ -72,7 +74,8 @@ def auto_cache(project, downscale=1):
                      if line.startswith("MemAvailable")) / 1e6
     except (OSError, StopIteration, ValueError):
         avail = 0.0
-    if gb < 0.25 * vram:
+    # nerfstudio turns gpu into cpu above 500 training images (full_images_datamanager)
+    if gb < 0.25 * vram and math.ceil(0.9 * len(t["frames"])) <= 500:
         return "gpu", gb
     if 2 * gb < 0.5 * avail:
         return "cpu", gb
