@@ -508,7 +508,7 @@ def main():
                     help="splatfacto's own defaults (30000 steps, no schedule) instead of the flight-based plan")
     ap.add_argument("--tiles", choices=("auto", "on", "off"), default="auto",
                     help="train in tiles (modelforge/splat_tiles.py); auto: above 800 training images")
-    ap.add_argument("--tile-photos", type=int, default=None, help="photos looking into each tile (default 500)")
+    ap.add_argument("--tile-photos", type=int, default=None, help="about this many photos look into each tile (default 500)")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()

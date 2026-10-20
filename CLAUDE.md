@@ -1300,10 +1300,21 @@ helped little):
 - **When:** plan `tiles` (Splat tab "Tiles" auto / on / off, CLI `--tiles`): auto above 800 training images
   (`TILE_ABOVE`). The plan note says so.
 - **Partition:** each camera's look-at point = median x/y of the sampled sparse points it sees (as
-  `splat_plan.survey`); recursive median splits along the longer axis until ≤ `PHOTOS_PER_TILE` (500, "Photos per
-  tile") cameras look into a cell; outer cells open to infinity. A tile's photos: those looking into its cell +
-  every photo with ≥ 25 % of its seen points inside it (oblique views from the neighbours). dira2k: 4 tiles of
-  740 / 784 / 822 / 662 photos, 2.7 s.
+  `splat_plan.survey`); ⌈cameras / `PHOTOS_PER_TILE`⌉ cells (500, "Photos per tile"), cut recursively along the
+  longer axis (k parts → ⌊k/2⌋ + ⌈k/2⌉). Outer cells open to infinity.
+  - **Where to cut** (`_cut`; 2026-10-20, the user saw an excavator the drone circled split between tiles 1 and 2 on
+    kladno_dira, its far-side views missing from one): a plain median of the look-ats landed on the most
+    photographed spots, since an orbit puts many photos there. Now a cut may move up to `SIZE_SLACK` (20 %) of the
+    smaller side's photos off balance, and goes where it splits the least: sparse points within `GAP_WIDTH` (2 % of the
+    extent) of the line, each weighted by the photos seeing it, in the worst 4 × `GAP_WIDTH` stretch along the line
+    (summed over the whole line an object drowns in the ground); among cuts within 10 % of the cheapest the most
+    balanced. Look-at density alone did not work: an orbit's look-ats spread around the object, beyond it.
+    kladno_dira (2883 photos): the most viewed spot (~500 photos per point, tall: the excavator) was 12 m from a cut,
+    now 52 m; 6 tiles of 400–617 core photos (the plain median gave 8 of ~360: 2883 → 1441 → 720 → 360).
+  - A tile's photos: those looking into its cell + every photo with ≥ 25 % (`MIN_VISIBLE`) of its seen points
+    inside it, or ≥ 10 % (`MIN_IN_CELL`) with its look-at within half the margin of the cell (far-side views of edge
+    objects). kladno_dira: 4,763 photo slots (+12 % for the second rule; a "≥ 25 % in cell + margin" rule gave +37 %).
+    dira2k (old rule): 4 tiles of 740 / 784 / 822 / 662 photos, 2.7 s.
 - **Training:** `PROJECT/tiles/tile_KK/` = transforms.json with its frames, sparse_pc.ply cropped to the cell +
   margin (25 % of the cell's longer side), `images/` and `images_N/` as relative links to the project's; then
   `splat.run` with its own plan (`suggest(survey(tile), tiles="off")`: steps from its photos, the tab's explicit

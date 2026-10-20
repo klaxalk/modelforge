@@ -220,8 +220,8 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
     from modelforge import splat_tiles
     plan["tiles"] = splat_tiles.wanted(n, tiles)
     if plan["tiles"]:
-        notes.append(f"**tiles** of ~{splat_tiles.PHOTOS_PER_TILE} photos (+ oblique views from the neighbours), "
-                     f"~{max(1, round(s['images'] / splat_tiles.PHOTOS_PER_TILE))} of them, each trained with its own "
+        notes.append(f"**tiles** of ≤ ~{splat_tiles.PHOTOS_PER_TILE} photos (+ oblique views from the neighbours), "
+                     f"~{max(1, math.ceil(s['images'] / splat_tiles.PHOTOS_PER_TILE))} of them, each trained with its own "
                      "plan (steps from its photos), then cropped to its cell and merged"
                      + (f": one splat over {n:,} training images stays blurry" if n > splat_tiles.TILE_ABOVE else ""))
     plan["notes"] = notes

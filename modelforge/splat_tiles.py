@@ -6,10 +6,15 @@ well: the run sees each photo only a few times, and one densification schedule s
 are in the project's ENU frame (one global SfM), so they join by concatenation (as VastGaussian / CityGS).
 
   partition  cameras and sparse points (transforms.json, sparse_pc.ply) -> cells on the ground plane (ENU x/y):
-             recursive median splits of the cameras' look-at points (the median of the sparse points each camera
-             sees) until a cell has <= photos_per_tile cameras looking into it. A cell's photos: those looking
-             into it plus every photo with >= MIN_VISIBLE of its seen points inside it (oblique views from
-             the neighbours). Outer cells extend to infinity.
+             recursive splits of the cameras' look-at points (the median of the sparse points each camera sees)
+             along the longer axis into ceil(n / photos_per_tile) parts, each cut placed where it splits the least
+             (sparse points near the line weighted by the photos seeing them, in its worst stretch) within
+             SIZE_SLACK of the balanced position. An orbited object is many points seen by many photos: a plain
+             median cut went through one on kladno_dira, and its far-side views missed one of the halves. A cell's
+             photos: those looking into it plus every photo with >= MIN_VISIBLE of its seen points inside it,
+             or >= MIN_IN_CELL inside and its look-at point within half the margin of the cell (far-side
+             views of objects near the edge; on kladno_dira +12 % photos, a cell + margin share rule +37 %).
+             Outer cells extend to infinity.
   train      PROJECT/tiles/tile_KK/: transforms.json with the tile's frames, sparse_pc.ply cropped to the cell
              + margin, images/ and images_N/ as links to the project's; then splat.run with its own plan
              (splat_plan.suggest on the tile: steps from its photo count), one tile after the other.
@@ -34,7 +39,10 @@ from modelforge import jobs, splat, splat_plan
 
 TILE_ABOVE = 800  # training images; more -> tiles (worlds up to ~800 photos train well in one piece)
 PHOTOS_PER_TILE = 500  # cameras looking into a cell (its photos also include oblique views from neighbours)
-MIN_VISIBLE = 0.25  # a photo joins a tile when this share of its seen sparse points lies in the cell
+MIN_VISIBLE = 0.25  # a photo joins a tile when this share of its seen sparse points lies in the cell, or ...
+MIN_IN_CELL = 0.10  # ... this share in the cell when looking at most half the margin beyond its edge
+SIZE_SLACK = 0.2  # a cut may move this share of the smaller side's photos off the balanced position
+GAP_WIDTH = 0.02  # of the look-ats' extent: half the band of sparse points a candidate cut is charged for
 MARGIN = 0.25  # of the cell's longer side: initial points and the clean's reach beyond the cell
 MAX_POINTS = 50_000  # sparse points sampled for the partition
 DIR = "tiles"
@@ -67,22 +75,51 @@ def _seen(C, R, fx, w, h, xyz):
     return out
 
 
-def _split(ids, looks, cell, photos, out):
-    """Recursive median split of the cameras `ids` (looking at `looks`) inside `cell` (x0, y0, x1, y1)."""
-    if len(ids) <= photos:
+def _cut(looks, axis, frac, pts, views):
+    """Where to cut along axis so that about frac of the cameras' look-at points lie below. Candidates are midpoints
+    between neighbouring look-ats leaving frac -/+ SIZE_SLACK x the smaller side below. A candidate's cost is what
+    the cut would split: the sparse points (pts, n x 2) within GAP_WIDTH of the line, each weighted by the photos
+    seeing it (views), in the worst stretch of 4 x GAP_WIDTH along the line (an orbited object is local: summed
+    over the whole line it would drown in the ground). Of the about equally cheap cuts the most balanced."""
+    x = np.sort(looks[:, axis])
+    n = len(x)
+    slack = SIZE_SLACK * min(frac, 1 - frac) * n
+    k = np.arange(max(1, int(np.ceil(frac * n - slack))), min(n - 1, int(frac * n + slack)) + 1)
+    if not len(k) or not len(pts):
+        return float(np.median(x))
+    c = (x[k - 1] + x[k]) / 2
+    h = GAP_WIDTH * max(x[int(0.98 * (n - 1))] - x[int(0.02 * (n - 1))], 1e-9)
+    order = np.argsort(pts[:, axis])
+    px, py, pw = pts[order, axis], pts[order, 1 - axis], views[order]
+    lo, hi = np.searchsorted(px, c - h), np.searchsorted(px, c + h)
+    cost = np.zeros(len(c))
+    for i, (a, b) in enumerate(zip(lo, hi)):
+        if b > a:
+            cost[i] = max(np.bincount(((py[a:b] - py.min()) / (4 * h) + off).astype(int), pw[a:b]).max()
+                          for off in (0, 0.5))
+    cheap = cost <= cost.min() + 0.1 * (np.median(cost) - cost.min())  # about as cheap as the cheapest
+    best = np.flatnonzero(cheap)[np.argmin(np.abs(k[cheap] - frac * n))]
+    return float(c[best])
+
+
+def _split(ids, looks, cell, parts, out, pts, views):
+    """Recursive split of the cameras `ids` (looking at `looks`) inside `cell` (x0, y0, x1, y1) into `parts`
+    cells of about equal photo counts, cut where little is seen (_cut; pts, views: the sampled sparse points)."""
+    if parts <= 1:
         out.append((cell, ids))
         return
     lo, hi = np.percentile(looks[ids], 2, axis=0), np.percentile(looks[ids], 98, axis=0)
     axis = int(np.argmax(hi - lo))
-    m = float(np.median(looks[ids, axis]))
+    here = _inside(pts, cell)
+    m = _cut(looks[ids], axis, (parts // 2) / parts, pts[here], views[here])
     left = looks[ids, axis] < m
     if left.all() or not left.any():  # all looking at one spot: cannot split further
         out.append((cell, ids))
         return
     a, b = list(cell), list(cell)
     a[axis + 2], b[axis] = m, m
-    _split(ids[left], looks, tuple(a), photos, out)
-    _split(ids[~left], looks, tuple(b), photos, out)
+    _split(ids[left], looks, tuple(a), parts // 2, out, pts, views)
+    _split(ids[~left], looks, tuple(b), parts - parts // 2, out, pts, views)
 
 
 def _inside(xy, cell, pad=0.0):
@@ -99,8 +136,10 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS):
         raise RuntimeError("sparse_pc.ply has too few points to divide the scene into tiles")
     seen = _seen(C, R, fx, w, h, xyz)
     looks = np.array([np.median(xyz[s, :2], axis=0) if len(s) else c[:2] for s, c in zip(seen, C)])
+    views = np.bincount(np.concatenate(seen), minlength=len(xyz)).astype(float) if seen else np.zeros(len(xyz))
     leaves = []
-    _split(np.arange(len(C)), looks, (-np.inf, -np.inf, np.inf, np.inf), max(1, int(photos)), leaves)
+    _split(np.arange(len(C)), looks, (-np.inf, -np.inf, np.inf, np.inf), math.ceil(len(C) / max(1, int(photos))),
+           leaves, xyz[:, :2], views)
     lo, hi = np.percentile(xyz[:, :2], 1, axis=0), np.percentile(xyz[:, :2], 99, axis=0)
     point_cell = np.full(len(xyz), -1)
     for k, (cell, _) in enumerate(leaves):
@@ -114,7 +153,9 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS):
         finite = np.array([max(cell[0], lo[0]), max(cell[1], lo[1]), min(cell[2], hi[0]), min(cell[3], hi[1])])
         margin = MARGIN * float(max(finite[2] - finite[0], finite[3] - finite[1], 1e-6))
         pad = max(pad, margin)
-        frames = sorted(set(ids.tolist()) | set(np.flatnonzero(share[:, k] >= MIN_VISIBLE).tolist()))
+        near = _inside(looks, cell, margin / 2)  # looking just across the edge: far-side views of edge objects
+        joins = (share[:, k] >= MIN_VISIBLE) | ((share[:, k] >= MIN_IN_CELL) & near)
+        frames = sorted(set(ids.tolist()) | set(np.flatnonzero(joins).tolist()))
         tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": frames, "core": len(ids)})
     box = [float(lo[0] - pad), float(lo[1] - pad), float(hi[0] + pad), float(hi[1] + pad)]
     return tiles, box
@@ -249,7 +290,8 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
         os.makedirs(os.path.dirname(state_path), exist_ok=True)
         json.dump(state, open(state_path, "w"), indent=1)
         on_line(f"splat: {len(tiles)} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
-                f"({photos} looking into each cell + oblique views from the neighbours)")
+                f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
+                f"+ views from the neighbours)")
     method, extra, lidar_depth = state["method"], tuple(state["extra"]), state["lidar_depth"]
     plan_args, box = state["plan_args"], state["box"]
     down = int(plan_args["downscale"])

@@ -459,8 +459,11 @@ class App:
                      "of a few hundred photos train well). Iterations, when set, apply per tile.")
             self.g_splat_tile_photos = gui.add_number(
                 "Photos per tile", initial_value=splat_tiles.PHOTOS_PER_TILE, min=100, max=2000, step=50,
-                hint="Cameras looking into each cell; a tile also gets the oblique photos from its neighbours "
-                     f"that see it (≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view), so tiles hold more.")
+                hint="About this many cameras look into each cell (the scene is cut into ⌈photos / this⌉ cells, "
+                     "each cut moved up to 20 % off balance to where it splits the least: not through an orbited "
+                     "object); a tile also gets the oblique photos from its neighbours that see it "
+                     f"(≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view, or "
+                     f"≥ {int(100 * splat_tiles.MIN_IN_CELL)} % looking just across its edge), so tiles hold more.")
             self.g_splat_plan = gui.add_markdown("")
             for g in (self.g_splat_method, self.g_splat_iters, self.g_splat_down, self.g_splat_strategy,
                       self.g_splat_maxg, self.g_splat_camopt, self.g_splat_tiles):

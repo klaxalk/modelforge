@@ -37,13 +37,30 @@ def write_scene(project, n_side=8, extent=100.0, seed=0):
 def test_partition(tmp_path):
     n = write_scene(str(tmp_path))
     tiles, box = splat_tiles.partition(str(tmp_path), photos=16)
-    assert len(tiles) == 4 and all(t["core"] == 16 for t in tiles)
+    assert len(tiles) == 4 and sum(t["core"] for t in tiles) == n
+    assert all(12 <= t["core"] <= 20 for t in tiles)  # cuts move to cheap gaps within the size slack
     covered = sorted({i for t in tiles for i in t["frames"]})
     assert covered == list(range(n))  # every photo trains somewhere
     assert all(len(t["frames"]) > t["core"] for t in tiles)  # plus neighbours seeing the cell
     centre = np.array([t["cell"] for t in tiles])
     assert np.isinf(centre).sum() == 8  # 2 x 2 cells: the outer sides open
     assert box[0] < -100 and box[2] > 100
+
+
+def test_cut_avoids_an_orbited_object():
+    """Photos spread evenly along x, one object at the balanced cut seen by many of them: the cut moves off it,
+    staying within the size slack."""
+    rng = np.random.default_rng(0)
+    looks = np.c_[np.linspace(0, 100, 400), rng.uniform(0, 100, 400)]
+    ground = np.c_[rng.uniform(0, 100, (5000, 2))]
+    obj = np.c_[rng.normal(50, 1.5, 500), rng.normal(50, 1.5, 500)]
+    pts = np.r_[ground, obj]
+    views = np.r_[np.full(len(ground), 5.0), np.full(len(obj), 80.0)]
+    m = splat_tiles._cut(looks, 0, 0.5, pts, views)
+    assert abs(m - 50) > 5  # off the object (sigma 1.5 m)
+    below = (looks[:, 0] < m).mean()
+    assert 0.5 - splat_tiles.SIZE_SLACK * 0.5 - 0.01 <= below <= 0.5 + splat_tiles.SIZE_SLACK * 0.5 + 0.01
+    assert abs(splat_tiles._cut(looks, 0, 0.5, ground, np.full(len(ground), 5.0)) - 50) < 15  # no object: near
 
 
 def test_clean():
