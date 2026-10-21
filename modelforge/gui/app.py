@@ -16,7 +16,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, semantic, splat, splat_mesh, splat_plan, splat_tiles
+from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_mesh, splat_plan, splat_tiles
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -63,6 +63,9 @@ STAGE_HINTS = {
     "splat-tiles": "Divide the scene into tiles for a tiled splat (Photos per tile) and write each tile's dataset, "
                    "without training: View → Tile boundaries shows them, Train tiles picks one. Replaces earlier "
                    "tiles and their training. Seconds to a minute.",
+    "sfmmesh": "Mesh from the SfM points (after export): normals from their neighbours, COLMAP's Poisson, faces "
+               "far from every point cut away (sfmmesh/mesh.ply, vertex colours). A surface to hold the splat to "
+               "later, and a look at the ground the sparse model implies. Seconds to minutes.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → splat → splat mesh (→ COLMAP dense if ticked in the Dense tab).",
@@ -82,6 +85,7 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
+    "sfmmesh": "View tab → Dense / splat → Mesh **sfm**",
     "splat-tiles": "View tab → **Tile boundaries**; Splat tab → Train tiles: all or one, then **Train + export splat**",
 }
 LOG_LINES = 200
@@ -425,6 +429,9 @@ class App:
                                    hint=STAGE_HINTS[stage])
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
+            b = gui.add_button("Run SfM mesh", hint=STAGE_HINTS["sfmmesh"])
+            b.on_click(lambda _: self.run_stage("sfmmesh"))
+            self.g_buttons["sfmmesh"] = b
 
         with tabs.add_tab("Splat", viser.Icon.SPARKLES):
             why = splat.available()
@@ -1192,7 +1199,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles"):
+            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1260,6 +1267,12 @@ class App:
                     self._run_splat(project, resume=st == "splat-resume")
                     report = pipeline.Report(project)  # splat.run wrote its stats
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
+                elif st == "sfmmesh":
+                    sfm_mesh.run(project, on_line=self._on_log, token=self._token)
+                    report = pipeline.Report(project)
+                    self._refresh_dense()
+                    if "sfm" in self.g_mesh.options:
+                        self.g_mesh.value = "sfm"  # show the new mesh in the View tab
                 elif st == "splatmesh":
                     self._run_splat_mesh(project)
                     report = pipeline.Report(project)
@@ -1273,7 +1286,7 @@ class App:
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat", "splatmesh", "all") or stage in pipeline.DENSE_STAGES:
+            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "all") or stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
             if stage in ("refine", "reconstruct", "sfm"):
@@ -1938,6 +1951,10 @@ class App:
                 return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos"
                         + (f" in {r['tiles']} tiles" if r.get("tiles") else "")
                         + f" ({r['version']}, {r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
+            if st == "sfmmesh":
+                r = rep["sfm_mesh"]
+                return (f"{r['faces']:,} faces from {r['points']:,} SfM points ({r['model']}), Poisson depth "
+                        f"{r['depth']} (cells {r['cell']:.2f}), cut {r['trim_dist']:.2f} from the points")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "
@@ -2230,6 +2247,7 @@ class App:
             if mesh is None:
                 mesh = gdata.load_mesh(self.dense["meshes"][method])
                 note = ("from the splat, vertex colours" if method == "splat" else
+                        "Poisson over the SfM points, vertex colours" if method == "sfm" else
                         "no texture yet: run the texture stage" if method not in self.dense["textured"] else
                         "untextured preview" if not self.g_mesh_tex.value else
                         f"textured mesh over {gdata.MAX_TEXTURED_FACES:,} faces: grey preview")

@@ -1441,6 +1441,18 @@ helped little):
   trainer: Stop in tile 2 → merged partial → Resume → every Gaussian of the scene box in exactly one tile; set-up +
   one tile; semantic per tile with a stub worker), `test_gui_dense.py::test_set_up_tiles`.
 
+**Mesh from the SfM points** (`modelforge/sfm_mesh.py`, Sparse tab **Run SfM mesh**, stage `sfmmesh`,
+`python -m modelforge.sfm_mesh PROJECT [--depth N] [--trim K]`; the user asked, 2026-10-21, as a later prior for the
+splat): the points of sparse/export (else refined) without strays (outside the 0.5-99.5 % box + 10 %, or 16th
+neighbour > 10x its median distance: on fullrun_test a few points stretched Poisson's box to 1.45 km and its cells
+to 1.4 m), normals by PCA over 16 neighbours turned towards a camera seeing the point, COLMAP `poisson_mesher`
+(killable; its density trim off, depth from extent / (2 x point spacing), 8-12), then faces with a vertex farther
+than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex colours), points.ply, preview.ply
+(≤ 300k faces), stats.json; report.json `sfm_mesh`. View tab Mesh **sfm**. fullrun_test: 43.7k points, depth 11
+(0.17 m cells), 175k of 225k faces kept, 82 % of the points within 0.3 m of a vertex, 5 s. Not yet used as a prior
+(the plan: rendered depth / normals per training view for the depth loss, Gaussians seeded on it).
+Test: `tests/test_sfm_mesh.py`.
+
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):
 an alternative to COLMAP's dense mesh, asked for by the user (who suggested an ESDF over the splat;
