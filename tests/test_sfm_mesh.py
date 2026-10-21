@@ -246,3 +246,17 @@ def test_colour_live_and_kept_when_stopped(tmp_path):
         assert not (p / "sfmmesh" / sfm_mesh.LIVE).exists()
     finally:
         app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "points3D.bin")),
+                    reason="needs a refined project")
+def test_preview_keeps_the_colours(tmp_path):
+    """COLMAP's mesh_simplifier writes positions only: the preview takes the colours of the nearest mesh vertex."""
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), tmp_path / "sparse" / "refined")
+    st = sfm_mesh.run(str(tmp_path), on_line=lambda m: None)
+    out = str(tmp_path / "sfmmesh")
+    sfm_mesh.write_preview(out, os.path.join(out, "mesh.ply"), st["faces"], None, name="small.ply", faces=5000)
+    v = plyfile.PlyData.read(os.path.join(out, "small.ply"))["vertex"].data
+    src = plyfile.PlyData.read(os.path.join(out, "mesh.ply"))["vertex"].data
+    assert "red" in v.dtype.names and v["red"].std() > 5  # colours, not one grey
+    assert abs(float(v["green"].mean()) - float(src["green"].mean())) < 15

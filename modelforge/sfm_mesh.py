@@ -103,7 +103,8 @@ def read_mesh(path):
     import plyfile
     ply = plyfile.PlyData.read(path)
     f = ply["face"].data
-    return ply["vertex"].data, (np.stack(f["vertex_indices"]).astype(np.int64) if len(f) else np.zeros((0, 3), int))
+    key = "vertex_indices" if "vertex_indices" in f.dtype.names else "vertex_index"  # COLMAP writes the latter
+    return ply["vertex"].data, (np.stack(f[key]).astype(np.int64) if len(f) else np.zeros((0, 3), int))
 
 
 def write_mesh(path, v, faces):
@@ -119,6 +120,25 @@ def write_mesh(path, v, faces):
     return len(used)
 
 
+def transfer_colours(src, dst):
+    """dst's vertices get the colour of the nearest vertex of src (if src has colours)."""
+    import cv2
+    v_src, _ = read_mesh(src)
+    if "red" not in v_src.dtype.names:
+        return
+    v_dst, f_dst = read_mesh(dst)
+    a = np.c_[v_src["x"], v_src["y"], v_src["z"]]
+    c = a.mean(0)
+    index = cv2.flann_Index((a - c).astype(np.float32), dict(algorithm=1, trees=4))
+    b = np.c_[v_dst["x"], v_dst["y"], v_dst["z"]]
+    k, _ = index.knnSearch((b - c).astype(np.float32), 1, params={"checks": 32})
+    v = np.empty(len(v_dst), [("x", "f4"), ("y", "f4"), ("z", "f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    v["x"], v["y"], v["z"] = b.T
+    for ch in ("red", "green", "blue"):
+        v[ch] = v_src[ch][k[:, 0]]
+    write_mesh(dst, v, f_dst)
+
+
 def trim(v, faces, xyz, max_dist):
     """Faces whose vertices all lie within max_dist of an SfM point (bool per face)."""
     import cv2
@@ -131,10 +151,13 @@ def trim(v, faces, xyz, max_dist):
 
 
 def write_preview(out, mesh, n_faces, token, name="preview.ply", faces=PREVIEW_FACES):
+    """A simplified copy (<= faces) for the View tab, with the mesh's vertex colours: COLMAP's mesh_simplifier
+    writes positions only, so every preview vertex takes the colour of the nearest vertex of the mesh."""
     preview = os.path.join(out, name)
     if n_faces > faces:
         dense._colmap("mesh_simplifier", "--input_path", mesh, "--output_path", preview,
                       "--MeshSimplification.target_face_ratio", f"{faces / n_faces:.6f}", token=token)
+        transfer_colours(mesh, preview)
     elif os.path.exists(preview):
         os.remove(preview)
 

@@ -1476,6 +1476,9 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
     (`App._on_colour_live`, ≤ every 15 s, View Mesh switched to **sfm**) maps the shown mesh's vertices once to the
     nearest mesh.ply vertex and re-sends it recoloured. Stopped, the last saved colours become mesh_coloured.ply +
     preview (`.json` "partial", "photos_done"). Progress "colouring: photo k / n" on the state line and the bar.
+  - **Previews keep the colours**: COLMAP's `mesh_simplifier` writes positions only (and names the face list
+    `vertex_index`), so every preview vertex takes the colour of the nearest mesh vertex (`transfer_colours`); before,
+    large SfM meshes (kladno_dira) showed grey in the View tab, coloured or not.
 - **Which model the mesh uses**: `sparse/export` only while it is not older than `sparse/refined` (else refined), and
   every export first deletes the previous `sparse/export` (it writes one only when it leaves photos out), so a mesh
   never comes from an earlier refine's or export's points. Run SfM (all) and Run full pipeline run export → SfM mesh
