@@ -17,6 +17,10 @@ NERFSTUDIO_METHOD_CONFIGS / NERFSTUDIO_DATAPARSER_CONFIGS, so nothing is install
               Loss: lidar_depth_lambda * mean(min(|D - z| / z, lidar_depth_clamp)) over those pixels,
               D = splatfacto's expected depth. The relative error weighs near and far alike; the clamp
               bounds the pull of wrong returns (moving objects, leaks).
+Dense targets instead (dataparser --depth-maps: metadata["depth_files"], one z-depth map per training image at the
+undistorted training camera, e.g. the SfM mesh rendered by modelforge/export/mesh_depth.py): the map of the training
+image (camera.metadata["cam_idx"]), scaled into nerfstudio's units and resized (nearest) to the current training
+resolution, replaces the projected points; the same loss over every pixel with a depth > 0.
 Every lidar_report_every steps it prints "[lidar] step N: depth error median x% p90 y% within 5% z%"
 (over the steps since the last report), which splat.py puts into report.json.
 """
@@ -75,19 +79,35 @@ class SplatfactoLidarModel(SplatfactoModel):
         if xyz is not None and len(xyz) > self.config.lidar_max_points:
             xyz = xyz[torch.randperm(len(xyz), generator=torch.Generator().manual_seed(0))[
                 :self.config.lidar_max_points]]
-        self.has_lidar = xyz is not None and len(xyz) > 0
+        meta = self.kwargs.get("metadata") or {}
+        self.depth_files, self.depth_scale = meta.get("depth_files"), float(meta.get("depth_scale", 1.0))
+        self.has_lidar = (xyz is not None and len(xyz) > 0) or bool(self.depth_files)
         # not persistent: checkpoints stay as splatfacto's (the live preview and ns-export read them)
-        self.register_buffer("lidar_xyz", xyz.float() if self.has_lidar else torch.zeros(0, 3), persistent=False)
+        self.register_buffer("lidar_xyz", xyz.float() if xyz is not None and len(xyz) else torch.zeros(0, 3),
+                             persistent=False)
         if self.has_lidar:
             self.config.output_depth_during_training = True
         self._lidar_errors = []
-        print(f"[lidar] {len(self.lidar_xyz)} LiDAR points, depth loss weight {self.config.lidar_depth_lambda}"
+        print(f"[lidar] dense depth maps for {sum(f is not None for f in self.depth_files)} of "
+              f"{len(self.depth_files)} training images, depth loss weight {self.config.lidar_depth_lambda}"
+              if self.depth_files else
+              f"[lidar] {len(self.lidar_xyz)} LiDAR points, depth loss weight {self.config.lidar_depth_lambda}"
               if self.has_lidar else "[lidar] no LiDAR points (transforms.json lidar_ply_file_path): "
               "training as plain splatfacto", flush=True)
 
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
-        if self.training and self.has_lidar and out.get("depth") is not None:
+        if self.training and self.depth_files and out.get("depth") is not None:
+            idx = (camera.metadata or {}).get("cam_idx")
+            f = self.depth_files[int(idx)] if idx is not None else None
+            if f is not None:
+                with torch.no_grad():
+                    d = torch.from_numpy(np.load(f).astype(np.float32)).to(out["depth"].device) * self.depth_scale
+                    H, W = out["depth"].shape[:2]
+                    if d.shape != (H, W):
+                        d = F.interpolate(d[None, None], size=(H, W), mode="nearest")[0, 0]
+                    out["lidar_depth"] = d[:, :, None]
+        elif self.training and self.has_lidar and out.get("depth") is not None:
             with torch.no_grad():
                 c2w = self.camera_optimizer.apply_to_camera(camera)
                 d = self._get_downscale_factor()

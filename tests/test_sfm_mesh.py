@@ -32,3 +32,140 @@ def test_sfm_mesh_lies_on_the_points(tmp_path):
     assert (p["nz"] > 0.5).mean() > 0.5  # a drone survey: mostly ground, normals up towards the cameras
     assert gdata.dense_artifacts(str(tmp_path))["meshes"]["sfm"].endswith(".ply")
     assert json.load(open(tmp_path / "report.json"))["sfm_mesh"]["faces"] == st["faces"]
+    # patching holes: enclosed pieces of the cut Poisson surface come back, the outside stays cut
+    r = sfm_mesh.fill(str(tmp_path), on_line=lambda m: None)
+    assert r["holes"] > 0 and r["faces"] == st["faces"] + r["faces_added"] < st["faces_untrimmed"]
+    assert r["largest_patched"] <= r["max_hole"]
+    patched = np.load(tmp_path / "sfmmesh" / "patched.npy")
+    assert patched.sum() == r["faces_added"] and len(patched) == r["faces"]
+    assert (tmp_path / "sfmmesh" / "mesh_trimmed.ply").exists()
+    sfm_mesh.run(str(tmp_path), on_line=lambda m: None)  # a new mesh drops the old patch
+    assert not (tmp_path / "sfmmesh" / "patched.npy").exists()
+
+
+def test_components_split_by_shared_edges():
+    # two triangles sharing an edge, a third touching them only at a vertex, a fourth masked out
+    faces = np.array([[0, 1, 2], [1, 2, 3], [3, 4, 5], [5, 6, 7]])
+    lab = sfm_mesh.components(faces, np.array([True, True, True, False]))
+    assert lab[0] == lab[1] != lab[2] and lab[3] == -1
+
+
+def test_mesh_prior_in_the_train_command():
+    from modelforge import splat
+    cmd = splat.train_command("/p", lidar_depth=0.5, depth_cloud="/p/sfmmesh/mesh.ply")
+    k = cmd.index("lidar-data")
+    assert cmd[0].endswith("ns-train") and cmd[1] == "splatfacto-lidar"
+    assert cmd[k:].count("--depth-ply") == 1 and cmd[cmd.index("--depth-ply") + 1] == "/p/sfmmesh/mesh.ply"
+    assert "--depth-ply" not in splat.train_command("/p", depth_cloud="/p/m.ply")  # no depth loss, no prior
+    cmd = splat.train_command("/p", lidar_depth=1.0, depth_cloud="/p/m.ply", depth_maps="/p/sfmmesh/depth_x2")
+    assert "--depth-ply" not in cmd and cmd[cmd.index("--depth-maps") + 1] == "/p/sfmmesh/depth_x2"
+    assert cmd.index("--depth-maps") > cmd.index("lidar-data")  # a dataparser argument
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "transforms.json")), reason="needs an exported project")
+def test_gui_ticks_the_mesh_prior_when_a_mesh_appears(tmp_path):
+    from modelforge.gui.app import App
+    from tests.test_projects import free_port
+    p = tmp_path / "p"
+    (p / "sparse").mkdir(parents=True)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    for f in ("poses.json", "transforms.json", "sparse_pc.ply"):
+        shutil.copy(os.path.join(REAL, f), p / f)
+    if os.path.exists(os.path.join(REAL, "ingest.json")):
+        shutil.copy(os.path.join(REAL, "ingest.json"), p / "ingest.json")
+    os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
+    app = App(str(p), port=free_port(), root=str(tmp_path))
+    try:
+        assert not app.g_splat_mesh_prior.value and app.g_splat_mesh_prior.disabled
+        sfm_mesh.run(str(p), on_line=lambda m: None)
+        app._refresh_dense()
+        assert app.g_splat_mesh_prior.value and not app.g_splat_mesh_prior.disabled
+        assert "sfm" in app.g_mesh.options
+        app.g_splat_mesh_prior.value = False  # the user's choice holds while the mesh stays
+        app._refresh_dense()
+        assert not app.g_splat_mesh_prior.value
+    finally:
+        app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "transforms.json")) or
+                    not os.path.exists("/opt/nerfstudio/bin/python"), reason="needs an exported project + nerfstudio")
+def test_mesh_depth_maps_line_up_with_nerfstudios_cameras(tmp_path):
+    """The SfM mesh rendered at every training camera (export/mesh_depth.py) matches the photo's own SfM points
+    projected with nerfstudio's undistorted, cropped camera (×2: the plan's default on 4K) to a fraction of a percent."""
+    import subprocess
+
+    import pycolmap
+
+    from modelforge import splat
+    p = tmp_path / "p"
+    (p / "sparse").mkdir(parents=True)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    for f in ("transforms.json", "sparse_pc.ply"):
+        shutil.copy(os.path.join(REAL, f), p / f)
+    os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
+    sfm_mesh.run(str(p), on_line=lambda m: None)
+    t = json.load(open(p / "transforms.json"))
+    t["frames"] = t["frames"][::10]  # a few cameras are enough
+    json.dump(t, open(p / "transforms.json", "w"))
+    splat.prepare_downscaled(str(p), 2, on_line=lambda m: None)
+    maps = splat.mesh_depth_maps(str(p), str(p / "sfmmesh" / "mesh.ply"), 2, on_line=lambda m: None)
+    rec = pycolmap.Reconstruction(str(p / "sparse" / "refined"))
+    obs = {}
+    for i in rec.reg_image_ids():
+        im = rec.image(i)
+        obs[im.name] = np.array([rec.point3D(q.point3D_id).xyz for q in im.points2D if q.has_point3D()])
+    np.savez(tmp_path / "observed.npz", **obs)
+    code = f"""
+import numpy as np
+from pathlib import Path
+from mf_lidar_dataparser import LidarDataParserConfig
+from nerfstudio.data.datasets.base_dataset import InputDataset
+from nerfstudio.data.utils.dataloaders import undistort_view
+out = LidarDataParserConfig(data=Path("{p}"), depth_maps=Path("{maps}"), downscale_factor=2).setup() \\
+    .get_dataparser_outputs("train")
+ds, OBS, rel = InputDataset(out), np.load("{tmp_path / 'observed.npz'}"), []
+T = out.dataparser_transform.numpy()
+for i in range(len(ds)):
+    cam, data = undistort_view(i, ds)
+    cam, (H, W) = cam[0], data["image"].shape[:2]
+    K = cam.get_intrinsics_matrices().numpy()
+    c2w = np.eye(4); c2w[:3] = cam.camera_to_worlds.numpy(); c2w[:3, 1:3] *= -1
+    w2c = np.linalg.inv(c2w)
+    X = (OBS[Path(out.image_filenames[i]).name] @ T[:, :3].T + T[:, 3]) * out.dataparser_scale
+    X = X @ w2c[:3, :3].T + w2c[:3, 3]
+    X = X[X[:, 2] > 1e-3]
+    u, v = K[0, 0] * X[:, 0] / X[:, 2] + K[0, 2], K[1, 1] * X[:, 1] / X[:, 2] + K[1, 2]
+    ok = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    m = np.load(out.metadata["depth_files"][i]).astype(np.float32) * out.metadata["depth_scale"]
+    assert m.shape == (H, W), (m.shape, H, W)
+    z = m[v[ok].astype(int), u[ok].astype(int)]
+    rel.append(np.abs(z[z > 0] - X[ok][z > 0, 2]) / X[ok][z > 0, 2])
+r = np.concatenate(rel)
+print("median", np.median(r), "p90", np.percentile(r, 90))
+assert np.median(r) < 0.005 and np.percentile(r, 90) < 0.03
+print("ok")
+"""
+    r = subprocess.run([os.path.join(splat.NS_BIN, "python"), "-c", code], env=splat._env(),
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0 and "ok" in r.stdout, (r.stdout + r.stderr)[-2000:]
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "transforms.json")) or
+                    not os.path.exists("/opt/nerfstudio/bin/python"), reason="needs an exported project + nerfstudio")
+def test_colour_from_the_photos(tmp_path):
+    p = tmp_path / "p"
+    (p / "sparse").mkdir(parents=True)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    shutil.copy(os.path.join(REAL, "transforms.json"), p / "transforms.json")
+    os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
+    sfm_mesh.run(str(p), on_line=lambda m: None)
+    r = sfm_mesh.colour(str(p), width=960, on_line=lambda m: None)
+    assert r["coloured"] > 0.8 * r["vertices"]
+    v0 = plyfile.PlyData.read(p / "sfmmesh" / "mesh.ply")["vertex"].data
+    v1 = plyfile.PlyData.read(p / "sfmmesh" / "mesh_coloured.ply")["vertex"].data
+    assert len(v0) == len(v1) and np.allclose(v0["x"], v1["x"])  # the same mesh, other colours
+    assert np.mean(v0["red"] != v1["red"]) > 0.5
+    assert "coloured" in gdata.dense_artifacts(str(p))["meshes"]["sfm"]
+    sfm_mesh.fill(str(p), on_line=lambda m: None)  # a patch drops the colours (patched faces have none)
+    assert "coloured" not in gdata.dense_artifacts(str(p))["meshes"]["sfm"]

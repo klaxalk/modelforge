@@ -384,7 +384,8 @@ def _reset(project, k, tile):
 
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
-        lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None):
+        lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None, depth_cloud=None,
+        depth_dense=False):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
@@ -419,12 +420,15 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
         for k in targets:
             _reset(project, k, state["tiles"][k])
         state.update(method=method, plan_args=dict(plan_args, downscale=down), extra=list(extra), cache=cache,
-                     lidar_depth=lidar_depth, round_steps=0 if only is not None else int(round_steps or 0),
+                     lidar_depth=lidar_depth, depth_cloud=depth_cloud, depth_dense=bool(depth_dense),
+                     round_steps=0 if only is not None else int(round_steps or 0),
                      only=only, round=1)
         json.dump(state, open(state_path, "w"), indent=1)
         if only is not None:
             on_line(f"splat: training tile {only + 1} of {len(state['tiles'])} only; the others keep their splats")
     method, extra, lidar_depth = state["method"], tuple(state["extra"]), state["lidar_depth"]
+    depth_cloud = state.get("depth_cloud")  # the whole SfM mesh: each tile's photos see only their part
+    depth_dense = state.get("depth_dense", False)
     plan_args, box, round_steps = state["plan_args"], state["box"], int(state.get("round_steps") or 0)
     down = int(plan_args["downscale"])
     splat.prepare_downscaled(project, down, on_line, job=job, on_count=on_prepare)
@@ -501,7 +505,9 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                 stats = splat.resume(tdir, **common)
             else:
                 stats = splat.run(tdir, method, iters, extra, cache=tile_cache, downscale=down,
-                                  lidar_depth=lidar_depth, schedule=tile["schedule"], **common)
+                                  lidar_depth=lidar_depth, schedule=tile["schedule"], depth_cloud=depth_cloud,
+                                  depth_dense=depth_dense,
+                                  **common)
         except splat.Paused:
             tile["status"] = "paused"
             tile["step"] = json.load(open(os.path.join(tdir, splat.RESUME)))["step"]

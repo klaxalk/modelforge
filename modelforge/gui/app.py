@@ -66,9 +66,18 @@ STAGE_HINTS = {
     "sfmmesh": "Mesh from the SfM points (after export): normals from their neighbours, COLMAP's Poisson, faces "
                "far from every point cut away (sfmmesh/mesh.ply, vertex colours). A surface to hold the splat to "
                "later, and a look at the ground the sparse model implies. Seconds to minutes.",
+    "sfmmesh-fill": "Patch the SfM mesh's holes up to Max hole size with Poisson's own smooth surface across them "
+                    "(the parts the trim cut that the mesh encloses; anything open to the outside stays cut). "
+                    "Interpolated, not measured. Run SfM mesh again to undo. Seconds.",
+    "sfmmesh-colour": "Colour the SfM mesh from the photos (for the View tab): every vertex gets the weighted mean "
+                      "of the photos that see it (with lens distortion, occlusion tested against the mesh), near "
+                      "and head-on views weighted most. Writes a separate coloured copy and a denser preview (≤ 1M "
+                      "faces); the splat's depth prior keeps using the mesh as it is. Needs nerfstudio's "
+                      "environment. A few minutes for thousands of photos.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
-    "all": "Full pipeline: sparse → splat → splat mesh (→ COLMAP dense if ticked in the Dense tab).",
+    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh (→ COLMAP "
+           "dense if ticked in the Dense tab).",
 }
 NEXT_STEP = {
     "all": "View tab: refined cameras, mesh and splat; Export tab for the files",
@@ -85,7 +94,10 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
-    "sfmmesh": "View tab → Dense / splat → Mesh **sfm**",
+    "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes in SfM mesh**",
+    "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour SfM mesh from the "
+                    "photos**",
+    "sfmmesh-colour": "View tab → Dense / splat → Mesh **sfm** (coloured from the photos)",
     "splat-tiles": "View tab → **Tile boundaries**; Splat tab → Train tiles: all or one, then **Train + export splat**",
 }
 LOG_LINES = 200
@@ -341,8 +353,8 @@ class App:
             self.subset = SubsetPanel(self, gui)
             self.g_buttons["analyze"] = self.subset.g_analyze
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
-                               hint="Runs features → pairs → match → refine → export in sequence. "
-                                    "About 15-20 min on CPU for 300 images; matching dominates.")
+                               hint="Runs features → pairs → match → refine → export → SfM mesh → patch holes in "
+                                    "sequence. About 15-20 min on CPU for 300 images; matching dominates.")
             b.on_click(lambda _: self.run_stage("sfm"))
             self.g_buttons["sfm"] = b
             self.g_ba_iters = gui.add_number(
@@ -432,6 +444,16 @@ class App:
             b = gui.add_button("Run SfM mesh", hint=STAGE_HINTS["sfmmesh"])
             b.on_click(lambda _: self.run_stage("sfmmesh"))
             self.g_buttons["sfmmesh"] = b
+            self.g_fill_max = gui.add_number(
+                "Max hole size (m)", initial_value=0.0, min=0.0, step=0.5,
+                hint="Patch holes in SfM mesh: the largest hole patched, across (scene units for videos). "
+                     "0 = auto (40 SfM point spacings; ~4-6 m on a drone survey).")
+            b = gui.add_button("Patch holes in SfM mesh", hint=STAGE_HINTS["sfmmesh-fill"])
+            b.on_click(lambda _: self.run_stage("sfmmesh-fill"))
+            self.g_buttons["sfmmesh-fill"] = b
+            b = gui.add_button("Colour SfM mesh from the photos", hint=STAGE_HINTS["sfmmesh-colour"])
+            b.on_click(lambda _: self.run_stage("sfmmesh-colour"))
+            self.g_buttons["sfmmesh-colour"] = b
 
         with tabs.add_tab("Splat", viser.Icon.SPARKLES):
             why = splat.available()
@@ -525,6 +547,18 @@ class App:
                      "bag projects (default 0.2), else the SfM points of the export (sparse_pc.ply, triangulated "
                      "without the photos it left out; e.g. 0.2). 0 = off (plain splatfacto). The depth error is "
                      "reported in the log and History.")
+            self.g_splat_mesh_prior = gui.add_checkbox(
+                "Depth prior: SfM mesh", initial_value=False, disabled=True,
+                hint="The depth loss measures against the SfM mesh's vertices (Sparse tab → Run SfM mesh, holes "
+                     "patched) instead of the SfM points: evenly spaced, smoothed, and present in the patched holes. "
+                     "Ticked by itself once the project has an SfM mesh; uses Depth weight (0 → 0.2).")
+            self.g_splat_mesh_dense = gui.add_checkbox(
+                "Mesh prior: dense (rendered depth)", initial_value=True,
+                hint="With the SfM mesh prior: render the mesh into every training camera (undistorted and cropped "
+                     "as nerfstudio trains, at the training downscale) and use the whole depth map as the target, "
+                     "every pixel the mesh covers, instead of only its vertices (~1 pixel in 10 on a drone survey). "
+                     "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
+                     "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -1177,6 +1211,7 @@ class App:
             report = pipeline.Report(project)
             pri = self.project.priors
             sfm = pipeline.sfm_stages(self._sparse_kind())
+            sfm = tuple(sfm) + ("sfmmesh", "sfmmesh-fill")  # the splat's depth prior, holes patched
             if stage == "all":
                 seq, skipped = list(sfm), []
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
@@ -1199,7 +1234,8 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh"):
+            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh",
+                           "sfmmesh-fill", "sfmmesh-colour"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1267,8 +1303,17 @@ class App:
                     self._run_splat(project, resume=st == "splat-resume")
                     report = pipeline.Report(project)  # splat.run wrote its stats
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
-                elif st == "sfmmesh":
-                    sfm_mesh.run(project, on_line=self._on_log, token=self._token)
+                elif st in ("sfmmesh", "sfmmesh-fill", "sfmmesh-colour"):
+                    if st == "sfmmesh-colour":
+                        sfm_mesh.colour(project, on_line=self._on_log, token=self._token)
+                    elif st == "sfmmesh":
+                        sfm_mesh.run(project, on_line=self._on_log, token=self._token)
+                    else:
+                        if not sfm_mesh.can_fill(project):  # none yet, or built before patching existed
+                            self._on_log("sfm mesh: no mesh to patch yet: building it first")
+                            sfm_mesh.run(project, on_line=self._on_log, token=self._token)
+                        sfm_mesh.fill(project, max_hole=float(self.g_fill_max.value) or None, on_line=self._on_log,
+                                      token=self._token)
                     report = pipeline.Report(project)
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
@@ -1286,7 +1331,8 @@ class App:
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "all") or stage in pipeline.DENSE_STAGES:
+            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "all") or \
+                    stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
             if stage in ("refine", "reconstruct", "sfm"):
@@ -1320,7 +1366,7 @@ class App:
                 self.running = False
                 self.g_state.content = final or "❌ **stopped**"
             unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
-                           "splat": splat.available() is not None,
+                           "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
                            "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
                            "splatmesh": splat_mesh.available() is not None}
             for name, b in self.g_buttons.items():
@@ -1756,7 +1802,8 @@ class App:
 
         def prepare(done, total):  # images_<factor>/ before training (thousands of images: minutes)
             self.g_progress.value = 100.0 * done / total
-            self._job["detail"] = f"downscaling images ×{down}: {done:,} / {total:,}"
+            self._job["detail"] = f"preparing the training images ×{down} (downscaled photos, mesh depth maps): " \
+                                  f"{done:,} / {total:,}"
         self._splat_pause_event = pause = threading.Event()
         self.g_splat_pause.disabled = False
         keep_live = False
@@ -1765,7 +1812,11 @@ class App:
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value),
                                       drop_isolated=bool(self.g_drop_isolated.value))
             weight = float(self.g_splat_depth.value)
-            lidar_depth = weight if weight > 0 and splat.depth_source(project) else None  # LiDAR, else SfM points
+            mesh = sfm_mesh.depth_cloud(project) if self.g_splat_mesh_prior.value else None
+            if mesh and weight <= 0:
+                weight = splat.DEFAULT_LIDAR_DEPTH
+                self._on_log(f"splat: SfM mesh prior with depth weight 0: using {weight}")
+            lidar_depth = weight if weight > 0 and (mesh or splat.depth_source(project)) else None
             live = self.g_splat_live.value
             if not live:  # a paused run's preview may still be up
                 self._splat_live_on = False
@@ -1791,7 +1842,9 @@ class App:
                                      strategy=self.g_splat_strategy.value,
                                      max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
                                      camera_opt=self.g_splat_camopt.value),
-                                cache=self.g_splat_cache.value, lidar_depth=lidar_depth, on_tile=on_tile,
+                                cache=self.g_splat_cache.value, lidar_depth=lidar_depth, depth_cloud=mesh,
+                                depth_dense=bool(self.g_splat_mesh_dense.value),
+                                on_tile=on_tile,
                                 photos=int(self.g_splat_tile_photos.value),
                                 round_steps=int(self.g_splat_rounds.value), only=only, **common)
             else:
@@ -1800,7 +1853,8 @@ class App:
                     cache, gb = splat.auto_cache(project, down)
                     self._on_log(f"splat: image cache {cache} ({gb:.1f} GB of decoded photos)")
                 splat.run(project, self.g_splat_method.value, iters, cache=cache,
-                          downscale=down, lidar_depth=lidar_depth, schedule=plan, **common)
+                          downscale=down, lidar_depth=lidar_depth, schedule=plan, depth_cloud=mesh,
+                          depth_dense=bool(self.g_splat_mesh_dense.value), **common)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         except splat.Paused:
             keep_live = live  # paused: the last live snapshot stays on screen (the Splat toggle drives it)
@@ -1951,6 +2005,14 @@ class App:
                 return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos"
                         + (f" in {r['tiles']} tiles" if r.get("tiles") else "")
                         + f" ({r['version']}, {r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
+            if st == "sfmmesh-colour":
+                r = rep["sfm_mesh"]["colour"]
+                return (f"{r['coloured']:,} of {r['vertices']:,} vertices coloured from {r['photos']:,} photos "
+                        f"({r['width']} px), {_fmt_s(r['seconds'])}")
+            if st == "sfmmesh-fill":
+                r = rep["sfm_mesh"]["fill"]
+                return (f"{r['holes']} holes patched (up to {r['max_hole']:.2f} across, largest {r['largest_patched']:.2f}) "
+                        f"with {r['faces_added']:,} faces; mesh {r['faces']:,} faces")
             if st == "sfmmesh":
                 r = rep["sfm_mesh"]
                 return (f"{r['faces']:,} faces from {r['points']:,} SfM points ({r['model']}), Poisson depth "
@@ -2071,6 +2133,11 @@ class App:
         self._sync_resume()
         self.semantic.refresh()
         self._sync_tile_choice()
+        has_mesh = sfm_mesh.depth_cloud(self.path) is not None
+        self.g_splat_mesh_prior.disabled = not has_mesh
+        if has_mesh != getattr(self, "_sfm_mesh_seen", None):  # ticked when a mesh appears (or a project has one)
+            self.g_splat_mesh_prior.value = has_mesh
+            self._sfm_mesh_seen = has_mesh
         self._draw_tiles()
 
     # ------------------------------------------------------------- export
@@ -2247,7 +2314,11 @@ class App:
             if mesh is None:
                 mesh = gdata.load_mesh(self.dense["meshes"][method])
                 note = ("from the splat, vertex colours" if method == "splat" else
-                        "Poisson over the SfM points, vertex colours" if method == "sfm" else
+                        ("Poisson over the SfM points"
+                         + (", holes patched" if os.path.exists(os.path.join(self.path, sfm_mesh.OUT, "patched.npy"))
+                            else "")
+                         + (", coloured from the photos" if "coloured" in os.path.basename(self.dense["meshes"]["sfm"])
+                            else ", vertex colours of the SfM points")) if method == "sfm" else
                         "no texture yet: run the texture stage" if method not in self.dense["textured"] else
                         "untextured preview" if not self.g_mesh_tex.value else
                         f"textured mesh over {gdata.MAX_TEXTURED_FACES:,} faces: grey preview")

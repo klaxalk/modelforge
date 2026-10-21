@@ -480,7 +480,8 @@ def dense_artifacts(path):
         if os.path.exists(p):
             found["meshes"]["splat"] = p
             break
-    for name in ("preview.ply", "mesh.ply"):  # the mesh from the SfM points (Poisson, vertex colours)
+    # the mesh from the SfM points (Poisson): coloured from the photos if done, else the SfM points' colours
+    for name in ("preview_coloured.ply", "mesh_coloured.ply", "preview.ply", "mesh.ply"):
         p = os.path.join(path, "sfmmesh", name)
         if os.path.exists(p):
             found["meshes"]["sfm"] = p

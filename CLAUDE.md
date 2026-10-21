@@ -1451,6 +1451,42 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
 (≤ 300k faces), stats.json; report.json `sfm_mesh`. View tab Mesh **sfm**. fullrun_test: 43.7k points, depth 11
 (0.17 m cells), 175k of 225k faces kept, 82 % of the points within 0.3 m of a vertex, 5 s. Not yet used as a prior
 (the plan: rendered depth / normals per training view for the depth loss, Gaussians seeded on it).
+- **Patch holes** (Sparse tab **Patch holes in SfM mesh** + "Max hole size (m)", stage `sfmmesh-fill`, run by hand;
+  `--fill [MAX]`; the user asked): Poisson's surface is closed (fullrun_test: 12 open edges of 338k), so the faces
+  the trim cut form pieces (`components`: faces sharing an edge, union-find by hooking + pointer jumping); anything
+  open to the outside joins one large piece around the scene, and the enclosed pieces are Poisson's smooth surface
+  across a hole. Those up to the max size across (bounding box; 0 = 40 point spacings) are put back: mesh.ply
+  becomes the patched mesh, `patched.npy` marks its patched faces, mesh_trimmed.ply keeps the trimmed one; SfM mesh
+  again undoes it. fullrun_test: 186 holes ≤ 5.8 m, +3,930 faces, 1 s. Interpolated, not measured.
+- **Colour from the photos** (Sparse tab **Colour SfM mesh from the photos**, stage `sfmmesh-colour`, by hand; the
+  user wanted it pretty in the GUI): `export/mesh_color.py` (nerfstudio's venv): every transforms.json photo (decoded
+  at ≤ 1920 px by JPEG DCT scaling) projects the vertices with its OPENCV distortion; a vertex counts when in frame,
+  facing it (cos > 0.1) and not hidden (ray from the camera hits the mesh no earlier than 5 cm / 0.2 % before it);
+  colour = mean weighted (cos / distance)^4. → `mesh_coloured.ply` + `preview_coloured.ply` (≤ 1M faces), which the
+  View tab prefers; mesh.ply (the depth prior and its cached maps) is untouched; SfM mesh / Patch holes drop the
+  colours. fullrun_test: 95 % of 93k vertices coloured from 80 photos in 5 s (0.07 s per photo); roof tile rows and
+  edges show where the SfM-point colours were mottled.
+- **In the pipelines** (the user asked): Run SfM (all) and Run full pipeline end the sparse part with `sfmmesh` and
+  `sfmmesh-fill` (GUI sequence; the CLI pipeline does not).
+- **SfM mesh prior for the splat** (Splat tab "Depth prior: SfM mesh"; ticked by itself when a project has a mesh or
+  one appears, `App._refresh_dense`; the user's untick holds while the mesh stays): the depth loss uses the mesh's
+  vertices (`sfmmesh/mesh.ply`, patched if done; ~0.11 m spacing on kladno_dira) instead of the SfM points: the
+  lidar-data dataparser's `--depth-ply` (`splat.train_command(depth_cloud=)`, `splat.run / resume`,
+  `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Depth weight 0 with the
+  prior ticked uses 0.2.
+- **Dense mesh prior** (Splat tab "Mesh prior: dense (rendered depth)", default on; the user asked: the vertices
+  supervise only ~1 pixel in 10 at ×2 on kladno_dira): `export/mesh_depth.py` (nerfstudio's venv, Open3D CPU
+  raycasting) renders the mesh's z-depth at every training camera **as nerfstudio trains it**: intrinsics × 1/N,
+  size floor(w / N), then undistorted and cropped like `nerfstudio.data.utils.dataloaders._undistort_image` (K − 0.5,
+  `getOptimalNewCameraMatrix` alpha 0, roi crop, + 0.5), one ray per pixel centre → `sfmmesh/depth_x<N>/<image>.npy`
+  (float16 m, 0 = no hit; manifest keyed by mesh size + mtime, N, camera; shared by the tiles). `splat.mesh_depth_maps`
+  runs it before training (`splat.run(depth_dense=True)`, also resume / tiles); the dataparser's `--depth-maps`
+  attaches the files to the train split (`metadata["depth_files"]`, `depth_scale` = dataparser scale) and the plugin
+  takes the map of `camera.metadata["cam_idx"]`, scaled, resized (nearest) to the current resolution, as the
+  target: the same robust relative loss over every covered pixel. The camera optimizer's pose changes are ignored.
+  - Alignment on fullrun_test against each photo's own SfM points projected with nerfstudio's undistorted camera:
+    |dz| / z median 0.18 % (×1) / 0.19 % (×2), p90 1.3 %. 0.17 s per 1920 × 1080 map. 1000 steps, weight 1.0:
+    depth error 1.68 % → 0.68 % median (step 500 → 1000), gpu and disk caches alike.
 Test: `tests/test_sfm_mesh.py`.
 
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or

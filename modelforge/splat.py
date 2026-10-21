@@ -191,12 +191,15 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
-                  steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None):
+                  steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
+                  depth_maps=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
     (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
     latest checkpoint there (a paused / stopped run; `run` trains through nsplugin/mf_train.py, which
-    makes that work for splatfacto)."""
+    makes that work for splatfacto). depth_cloud: the depth loss's points from this ply instead (absolute path;
+    the SfM mesh, sfm_mesh.depth_cloud). depth_maps: dense depth targets instead, a folder of per-image maps
+    (mesh_depth_maps)."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -227,7 +230,27 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     parser = "nerfstudio-data" if lidar_depth is None else "lidar-data"
     scale = (schedule or {}).get("scale_factor")  # world units -> nerfstudio's (else 1 / max |camera position|)
     scale_args = ["--auto-scale-poses", "False", "--scale-factor", f"{float(scale):.8g}"] if scale else []
-    return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args
+    depth_args = [] if lidar_depth is None else (["--depth-maps", str(depth_maps)] if depth_maps else
+                                                 ["--depth-ply", str(depth_cloud)] if depth_cloud else [])
+    return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
+
+
+def mesh_depth_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
+    """Depth maps of the mesh at every camera of PROJECT/transforms.json (a tile's dataset works too), as the
+    training images are undistorted and cropped (export/mesh_depth.py in nerfstudio's venv), in
+    <mesh folder>/depth_x<downscale>/ (shared by the tiles; kept while mesh, downscale and camera stay).
+    Returns the folder."""
+    out = os.path.join(os.path.dirname(mesh), f"depth_x{int(downscale)}")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "mesh_depth.py")
+
+    def line(text):
+        on_line(text)
+        m = re.search(r"mesh depth: (\d+) / (\d+)", text)
+        if m and on_count:
+            on_count(int(m.group(1)), int(m.group(2)))
+    _stream([os.path.join(NS_BIN, "python"), script, project, mesh, out, "--downscale", str(int(downscale))],
+            line, job or Job())
+    return out
 
 
 def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):
@@ -336,7 +359,7 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None,
-        schedule=None, pause=None, load_dir=None, stop_at=None):
+        schedule=None, pause=None, load_dir=None, stop_at=None, depth_cloud=None, depth_dense=False):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
     schedule: densification / learning-rate settings from splat_plan.suggest (or None: splatfacto's).
     Stopping the job (job.cancel) asks the trainer for a checkpoint at the current step first; the run's
@@ -345,7 +368,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     load_dir: continue from that checkpoint folder (used by `resume`).
     stop_at: end at this step with a checkpoint (splat/resume.json, as a Stop) and export the splat so far, but
     return normally with stats["stopped_at_step"] (splat tiles: the end of a round).
-    lidar_depth: weight of the LiDAR depth loss (None: off; needs lidar_ply_file_path in transforms.json).
+    lidar_depth: weight of the depth loss (None: off): against the LiDAR points (lidar_ply_file_path), else the
+    SfM points (sparse_pc.ply), or `depth_cloud` (a ply path: the SfM mesh's vertices) when given; with
+    depth_dense the mesh rendered into every training camera instead (mesh_depth_maps, before training).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
@@ -358,7 +383,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if ply_count(os.path.join(project, "sparse_pc.ply")) == 0 and not any("random-init" in a for a in extra):
         raise RuntimeError("sparse_pc.ply has no points: SfM found no 3D points to start the splat from (too little "
                            "overlap between the images? see the refine History line; Images used: keep more)")
-    if lidar_depth is not None and depth_source(project) is None:
+    if depth_cloud and not os.path.exists(depth_cloud):
+        raise RuntimeError(f"depth prior {depth_cloud} missing: run SfM mesh again (Sparse tab)")
+    if lidar_depth is not None and not depth_cloud and depth_source(project) is None:
         raise RuntimeError("the depth loss needs LiDAR or SfM points (sparse_pc.ply): run the export stage first")
     job = job or Job()
     t0 = time.time()
@@ -377,13 +404,15 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
             lidar_log.append(q)
 
     settings = {"method": method, "iterations": iterations, "extra": list(extra), "cache": cache,
-                "downscale": int(downscale), "lidar_depth": lidar_depth, "schedule": schedule}
+                "downscale": int(downscale), "lidar_depth": lidar_depth, "schedule": schedule,
+                "depth_cloud": depth_cloud, "depth_dense": bool(depth_dense)}
     if load_dir is None:
         _remove(os.path.join(project, RESUME))  # a new run replaces the paused one
     prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
     on_line(("splat: resuming " if load_dir else "splat: training ")
             + f"{method_dir}, cache {cache}, downscale {downscale}"
-            + (f", LiDAR depth weight {lidar_depth}" if lidar_depth is not None else "")
+            + (f", depth weight {lidar_depth} ({('SfM mesh, dense' if depth_dense else 'SfM mesh vertices') if depth_cloud else depth_source(project)})"
+               if lidar_depth is not None else "")
             + (f", {iterations or DEFAULT_ITERATIONS:,} steps" if schedule else "")
             + (f", {schedule['strategy']} densification" if schedule and schedule.get("strategy") else "")
             + (f" (≤{schedule['max_gaussians']:,} gaussians)" if schedule and schedule.get("max_gaussians") else "")
@@ -398,8 +427,11 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     os.makedirs(os.path.dirname(control), exist_ok=True)  # a fresh project has no splat/ yet
     for f in (control, control + ".done"):
         _remove(f)
+    maps = None
+    if lidar_depth is not None and depth_cloud and depth_dense:
+        maps = mesh_depth_maps(project, depth_cloud, downscale, on_line, job=job, on_count=on_prepare)
     cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
-                        lidar_depth, schedule, load_dir)
+                        lidar_depth, schedule, load_dir, depth_cloud, maps)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 
@@ -508,7 +540,8 @@ def resume(project, **kwargs):
     kwargs.pop("on_tile", None)  # GUI callers pass it for tiled runs
     return run(project, info["method"], info["iterations"], tuple(info["extra"]), cache=info["cache"],
                downscale=info["downscale"], lidar_depth=info["lidar_depth"], schedule=info["schedule"],
-               load_dir=info["load_dir"], **kwargs)
+               load_dir=info["load_dir"], depth_cloud=info.get("depth_cloud"),
+               depth_dense=info.get("depth_dense", False), **kwargs)
 
 
 def _num_vertices(ply):
