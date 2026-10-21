@@ -29,16 +29,20 @@ MIN_CELLS = 10
 
 
 def find(rec, times, min_gap_s=MIN_GAP_S, max_link_share=MAX_LINK_SHARE, cell_m=CELL_M, max_dz=MAX_DZ,
-         max_off=MAX_OFF, min_cells=MIN_CELLS):
+         max_off=MAX_OFF, min_cells=MIN_CELLS, progress=None):
     """times: image name -> project time [s] (None: unknown). Returns {"drop": [names], "isolated" (weakly tied
-    photos), "photos", "linking_points", "stretches": [(t0, t1, photos dropped, median share of cells off)]}."""
+    photos), "photos", "linking_points", "stretches": [(t0, t1, photos dropped, median share of cells off)]}.
+    progress(text, k, n): the points read, then the photos checked."""
     ids = [i for i in rec.reg_image_ids() if times.get(rec.image(i).name) is not None]
     t_img = {i: float(times[rec.image(i).name]) for i in ids}
     out = {"drop": [], "isolated": 0, "photos": rec.num_reg_images(), "linking_points": 0, "stretches": []}
     if len(ids) < 2:
         return out
     pids, xyz, tmean, link = [], [], [], []
-    for pid, p in rec.points3D.items():
+    n_pts = rec.num_points3D()
+    for k, (pid, p) in enumerate(rec.points3D.items()):
+        if progress and k % 200_000 == 0:
+            progress("finding isolated photos: reading point", k, n_pts)
         ts = [t_img[e.image_id] for e in p.track.elements if e.image_id in t_img]
         if ts:
             pids.append(pid)
@@ -61,7 +65,9 @@ def find(rec, times, min_gap_s=MIN_GAP_S, max_link_share=MAX_LINK_SHARE, cell_m=
         if e - s >= 5:
             ground[k[s]][q[s]] = float(np.median(z[s:e]))
     drop, off_of = [], {}
-    for i in ids:
+    for k, i in enumerate(ids):
+        if progress and k % 25 == 0:
+            progress("finding isolated photos: photo", k, len(ids))
         rows = np.array([row[p.point3D_id] for p in rec.image(i).get_observation_points2D()
                          if p.point3D_id in row], int)
         if not len(rows) or link[rows].mean() >= max_link_share:

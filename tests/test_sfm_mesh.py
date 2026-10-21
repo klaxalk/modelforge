@@ -169,3 +169,16 @@ def test_colour_from_the_photos(tmp_path):
     assert "coloured" in gdata.dense_artifacts(str(p))["meshes"]["sfm"]
     sfm_mesh.fill(str(p), on_line=lambda m: None)  # a patch drops the colours (patched faces have none)
     assert "coloured" not in gdata.dense_artifacts(str(p))["meshes"]["sfm"]
+
+
+def test_mesh_uses_the_export_model_only_while_it_is_current(tmp_path):
+    for name in ("refined", "export"):
+        (tmp_path / "sparse" / name).mkdir(parents=True)
+    ref, exp = tmp_path / "sparse" / "refined" / "points3D.bin", tmp_path / "sparse" / "export" / "points3D.bin"
+    ref.write_bytes(b"")
+    exp.write_bytes(b"")
+    os.utime(ref, (1000, 1000))
+    os.utime(exp, (2000, 2000))
+    assert sfm_mesh.model_dir(str(tmp_path)).endswith("export")  # the export after the refine
+    os.utime(ref, (3000, 3000))  # refine ran again since
+    assert sfm_mesh.model_dir(str(tmp_path)).endswith("refined")

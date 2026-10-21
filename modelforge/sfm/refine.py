@@ -10,7 +10,9 @@ solver options have no function / parameter tolerance, and on these prior-anchor
 cameras stop moving after ~10-80 iterations while Ceres runs hundreds more nudging points.
 """
 
+import contextlib
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -18,6 +20,8 @@ import numpy as np
 import pyceres
 import pycolmap
 import pycolmap.cost_functions
+
+from modelforge import jobs
 
 
 
@@ -75,16 +79,19 @@ def init_from_database(db_path, priors, names=None):
     return rec
 
 
+_TRIANGULATING = re.compile(r"Triangulating image #\d+ \((\d+)\)")  # COLMAP's log: (k) = images done
+
 POINT_BATCH = 100_000  # points per refine_points problem (~0.5 GB)
 
 
-def refine_points(rec, loss_scale_px=1.0, max_iterations=50, batch=POINT_BATCH):
+def refine_points(rec, loss_scale_px=1.0, max_iterations=50, batch=POINT_BATCH, progress=None):
     """Points-only BA: poses and intrinsics constant, so every point is its own 3x3 problem (sparse
     normal Cholesky on a block-diagonal system, no Schur complement over thousands of cameras).
 
     Solved in batches of `batch` points: a config with variable points and no images gives only
     constant-pose residuals for those points' tracks. One problem over all points ran out of memory
-    on 8000 images (kladno_dira: ~10M points, killed at 30 GB); a batch takes a few hundred MB."""
+    on 8000 images (kladno_dira: ~10M points, killed at 30 GB); a batch takes a few hundred MB.
+    progress(text, k, n) after every batch."""
     opts = pycolmap.BundleAdjustmentOptions()
     opts.refine_focal_length = opts.refine_extra_params = opts.refine_principal_point = False
     opts.refine_rig_from_world = False
@@ -92,6 +99,7 @@ def refine_points(rec, loss_scale_px=1.0, max_iterations=50, batch=POINT_BATCH):
     opts.ceres.loss_function_scale = loss_scale_px
     opts.ceres.solver_options.max_num_iterations = max_iterations
     ids = list(rec.point3D_ids())
+    n = (len(ids) + batch - 1) // batch
     for k in range(0, len(ids), batch):
         config = pycolmap.BundleAdjustmentConfig()
         for point3D_id in ids[k:k + batch]:
@@ -99,11 +107,16 @@ def refine_points(rec, loss_scale_px=1.0, max_iterations=50, batch=POINT_BATCH):
         ba = pycolmap.create_default_ceres_bundle_adjuster(opts, config, rec)
         solver_options = pyceres.SolverOptions(opts.ceres.create_solver_options(config, ba.problem))
         solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+        solver_options.num_threads = os.cpu_count() or 1  # Ceres' default is one thread
         pyceres.solve(solver_options, ba.problem, pyceres.SolverSummary())
         del ba
+        if progress:
+            progress("refining points: batch", k // batch + 1, n)
 
 
-def triangulate(rec, db_path, image_path, out_dir, rnd, refine=False):
+def triangulate(rec, db_path, image_path, out_dir, rnd, refine=False, progress=None):
+    """Points from the database's matches at the registered poses (fixed). progress(text, k, n): images
+    triangulated (read from COLMAP's log), then the point refinement's batches."""
     opts = pycolmap.IncrementalPipelineOptions()
     tri = opts.triangulation
     tri.merge_max_reproj_error = rnd.max_reproj_px
@@ -118,10 +131,17 @@ def triangulate(rec, db_path, image_path, out_dir, rnd, refine=False):
     # refined first (refine_points; for the final model, which no prior BA follows).
     opts.ba_global_max_refinements = 0
     os.makedirs(out_dir, exist_ok=True)
-    rec = pycolmap.triangulate_points(rec, db_path, image_path, out_dir, clear_points=True,
-                                      options=opts, refine_intrinsics=False)
+    n_reg = rec.num_reg_images()
+
+    def line(text):
+        m = _TRIANGULATING.search(text)
+        if m:
+            progress("triangulating: image", int(m.group(1)), n_reg)
+    with jobs.stderr_lines(line) if progress else contextlib.nullcontext():
+        rec = pycolmap.triangulate_points(rec, db_path, image_path, out_dir, clear_points=True,
+                                          options=opts, refine_intrinsics=False)
     if refine:
-        refine_points(rec, rnd.loss_scale_px)
+        refine_points(rec, rnd.loss_scale_px, progress=progress)
     pycolmap.ObservationManager(rec).filter_all_points3D(rnd.max_reproj_px, opts.mapper.filter_min_tri_angle)
     rec.write(out_dir)
     return rec

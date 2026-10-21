@@ -46,10 +46,13 @@ def depth_cloud(project):
 
 
 def model_dir(project):
-    for name in ("export", "refined"):
-        d = os.path.join(project, "sparse", name)
-        if os.path.exists(os.path.join(d, "points3D.bin")):
-            return d
+    """The export's model (sparse/export: triangulated without the photos it left out) when it belongs to the
+    current refine (not older than sparse/refined), else sparse/refined."""
+    exp, ref = (os.path.join(project, "sparse", n, "points3D.bin") for n in ("export", "refined"))
+    if os.path.exists(exp) and (not os.path.exists(ref) or os.path.getmtime(exp) >= os.path.getmtime(ref)):
+        return os.path.dirname(exp)
+    if os.path.exists(ref):
+        return os.path.dirname(ref)
     raise RuntimeError("no SfM model yet (sparse/refined): run refine first")
 
 

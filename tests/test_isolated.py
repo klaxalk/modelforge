@@ -34,6 +34,9 @@ class FakeRec:
     def num_reg_images(self):
         return len(self.images)
 
+    def num_points3D(self):
+        return len(self.points)
+
     @property
     def points3D(self):
         return self.points
@@ -112,10 +115,14 @@ def test_export_triangulates_without_the_dropped_photos(tmp_path, monkeypatch):
     os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
     names = sorted(r["image"] for r in json.load(open(p / "poses.json"))["images"])
     drop = names[10:16]
-    monkeypatch.setattr(isolated, "find", lambda rec, times: {
+    monkeypatch.setattr(isolated, "find", lambda rec, times, **kw: {
         "drop": drop, "isolated": len(drop), "photos": rec.num_reg_images(), "linking_points": 0,
         "stretches": [(0.0, 1.0, len(drop), 0.5)]})
-    pipeline.stage_export(str(p), pipeline.Report(str(p)))
+    seen = []
+    pipeline.stage_export(str(p), pipeline.Report(str(p)), progress=lambda text, k, n: seen.append((text, k, n)))
+    tri = [(k, n) for text, k, n in seen if text.startswith("triangulating")]
+    assert tri and tri[-1] == (len(names) - len(drop), len(names) - len(drop))  # read from COLMAP's log
+    assert any(text.startswith("refining points") for text, _, _ in seen) and seen[-1][0].startswith("writing")
     t = json.load(open(p / "transforms.json"))
     assert len(t["frames"]) == len(names) - len(drop)
     assert not {f["file_path"].split("/")[-1] for f in t["frames"]} & set(drop)
@@ -124,3 +131,5 @@ def test_export_triangulates_without_the_dropped_photos(tmp_path, monkeypatch):
     assert rec.num_points3D() > 1000 and not seen & set(drop)  # no point keeps an observation of them
     iso = json.load(open(p / "report.json"))["export"]["isolated"]
     assert iso["triangulated"] and iso["dropped"] == len(drop) and iso["points"] == rec.num_points3D()
+    pipeline.stage_export(str(p), pipeline.Report(str(p)), drop_isolated=False)  # nothing left out this time
+    assert not (p / "sparse" / "export").exists()  # no stale model for the SfM mesh to pick up

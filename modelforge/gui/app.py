@@ -69,6 +69,8 @@ STAGE_HINTS = {
     "sfmmesh-fill": "Patch the SfM mesh's holes up to Max hole size with Poisson's own smooth surface across them "
                     "(the parts the trim cut that the mesh encloses; anything open to the outside stays cut). "
                     "Interpolated, not measured. Run SfM mesh again to undo. Seconds.",
+    "sfmmesh-all": "Build the SfM mesh, patch its holes up to Max hole size, colour it from the photos (the colour "
+                   "step only with nerfstudio's environment).",
     "sfmmesh-colour": "Colour the SfM mesh from the photos (for the View tab): every vertex gets the weighted mean "
                       "of the photos that see it (with lens distortion, occlusion tested against the mesh), near "
                       "and head-on views weighted most. Writes a separate coloured copy and a denser preview (≤ 1M "
@@ -94,10 +96,10 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
-    "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes in SfM mesh**",
-    "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour SfM mesh from the "
-                    "photos**",
+    "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes**",
+    "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour from the photos**",
     "sfmmesh-colour": "View tab → Dense / splat → Mesh **sfm** (coloured from the photos)",
+    "sfmmesh-all": "View tab → Dense / splat → Mesh **sfm**; the Splat tab uses it as the depth prior",
     "splat-tiles": "View tab → **Tile boundaries**; Splat tab → Train tiles: all or one, then **Train + export splat**",
 }
 LOG_LINES = 200
@@ -441,17 +443,26 @@ class App:
                                    hint=STAGE_HINTS[stage])
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
-            b = gui.add_button("Run SfM mesh", hint=STAGE_HINTS["sfmmesh"])
+
+        with tabs.add_tab("Sparse Mesh", viser.Icon.TRIANGLES):  # the mesh from the SfM points, after Sparse
+            gui.add_markdown("A surface from the SfM points (after **export**): the splat's depth prior (Splat tab) "
+                             "and a quick look at the ground the sparse model implies. View tab → Mesh **sfm**.")
+            b = gui.add_button("Run all (mesh → patch holes → colour)", icon=viser.Icon.PLAYER_TRACK_NEXT,
+                               hint=STAGE_HINTS["sfmmesh-all"])
+            b.on_click(lambda _: self.run_stage("sfmmesh-all"))
+            self.g_buttons["sfmmesh-all"] = b
+            b = gui.add_button("Build mesh", hint=STAGE_HINTS["sfmmesh"])
             b.on_click(lambda _: self.run_stage("sfmmesh"))
             self.g_buttons["sfmmesh"] = b
             self.g_fill_max = gui.add_number(
                 "Max hole size (m)", initial_value=0.0, min=0.0, step=0.5,
-                hint="Patch holes in SfM mesh: the largest hole patched, across (scene units for videos). "
-                     "0 = auto (40 SfM point spacings; ~4-6 m on a drone survey).")
-            b = gui.add_button("Patch holes in SfM mesh", hint=STAGE_HINTS["sfmmesh-fill"])
+                hint="Patch holes: the largest hole patched, across (scene units for videos). Projects with pose "
+                     "priors start at the mean distance between consecutive cameras (a hole that size lies between "
+                     "photos, not outside the flight). 0 = 40 SfM point spacings.")
+            b = gui.add_button("Patch holes", hint=STAGE_HINTS["sfmmesh-fill"])
             b.on_click(lambda _: self.run_stage("sfmmesh-fill"))
             self.g_buttons["sfmmesh-fill"] = b
-            b = gui.add_button("Colour SfM mesh from the photos", hint=STAGE_HINTS["sfmmesh-colour"])
+            b = gui.add_button("Colour from the photos", hint=STAGE_HINTS["sfmmesh-colour"])
             b.on_click(lambda _: self.run_stage("sfmmesh-colour"))
             self.g_buttons["sfmmesh-colour"] = b
 
@@ -866,8 +877,23 @@ class App:
             except OSError:
                 pass
 
+    def _camera_spacing(self):
+        """Mean distance between consecutive prior camera positions (per source, capture order), or None."""
+        pr = self.project
+        if pr is None or not pr.has_priors:
+            return None
+        gaps = []
+        for src in np.unique(pr.source):
+            k = np.flatnonzero((pr.source == src) & pr.prior_cams.valid)
+            c = pr.prior_cams.centers[k[np.argsort(pr.time[k])]]
+            gaps.append(np.linalg.norm(np.diff(c, axis=0), axis=1))
+        g = np.concatenate(gaps) if gaps else np.zeros(0)
+        return float(g.mean()) if len(g) else None
+
     def _show_project(self):
         self.g_header.content = self._header()
+        gap = self._camera_spacing()  # Sparse Mesh: holes up to the camera spacing (0 = auto without priors)
+        self.g_fill_max.value = round(gap, 1) if gap else 0.0
         self.subset.refresh()
         self._apply_kind()
         self._set_aspect()
@@ -1237,6 +1263,12 @@ class App:
             elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh",
                            "sfmmesh-fill", "sfmmesh-colour"):
                 seq = (stage,)
+            elif stage == "sfmmesh-all":
+                seq = ["sfmmesh", "sfmmesh-fill"]
+                if splat.available() is None:
+                    seq.append("sfmmesh-colour")
+                else:
+                    self._history(f"⚪ **skipped** colouring the SfM mesh ({splat.available()})")
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
             m = self.g_mesh_method.value
@@ -1273,7 +1305,8 @@ class App:
                     finally:
                         self.g_skip.disabled = self.g_skip_round.disabled = True
                 elif st == "export":
-                    pipeline.stage_export(project, report, drop_isolated=bool(self.g_drop_isolated.value))
+                    pipeline.stage_export(project, report, drop_isolated=bool(self.g_drop_isolated.value),
+                                          progress=self._on_export_progress)
                 elif st == "analyze":
                     from modelforge.sfm import overlap
                     if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
@@ -1331,7 +1364,8 @@ class App:
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "all") or \
+            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
+                         "all") or \
                     stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
@@ -1894,6 +1928,13 @@ class App:
         self._job["detail"] = f"{unit} {done:,} / {total:,}" + (f" · `{name}`" if name else "")
         if self._job.get("label") == stage:
             self.g_progress.value = 100.0 * done / max(total, 1)
+
+    def _on_export_progress(self, text, done, total):
+        """Export: the step on the state line, 'k / n' where it counts (triangulating, refining points)."""
+        if total > 1:
+            self._on_count_progress("export", text, done, total)
+        else:
+            self._job["detail"] = text
 
     def _on_analysis_progress(self, phase, done, total, name):
         self._on_count_progress("analyze", "features: image" if phase == "features" else "matching: pair",

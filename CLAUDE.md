@@ -1317,6 +1317,11 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     - kladno_dira (global refine, round 1 skipped at 75 iterations): 689 weakly tied, 309 dropped (10.7 %),
       268k of 2.4M points; tile 3's 2 m cells with a pass > 1 m off the others 175 → 52 (the crossing's +1.8 m
       copy, 77 cells, gone; 30 %: 243 photos, 102 cells). 45 s on 2883 photos. Test: `tests/test_isolated.py`.
+    - **Progress** (the user asked): `stage_export(progress=)` shows reading / finding isolated photos (point k / n,
+      photo k / n) / "triangulating: image k / n" (COLMAP reports it only in its log: `jobs.stderr_lines` taps file
+      descriptor 2 during `pycolmap.triangulate_points`, `refine.triangulate(progress=)`) / "refining points: batch
+      k / n" / colours / writing. `refine_points` now uses all cores (Ceres defaults to one; on kladno_dira the export's
+      refinement ran > 4 min on one core): fullrun_test 5.1 → 2.7 s. kladno_dira export: points 2.41M → 2.15M.
     - **The points are triangulated again without them** (the user asked): their frames are deregistered and
       `refine.triangulate` (poses fixed, refine's final 4 px threshold, points refined) writes `sparse/export`
       (a View snapshot "export"), whose points make sparse_pc.ply. Without a database.db only the points the left-out
@@ -1466,6 +1471,15 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   View tab prefers; mesh.ply (the depth prior and its cached maps) is untouched; SfM mesh / Patch holes drop the
   colours. fullrun_test: 95 % of 93k vertices coloured from 80 photos in 5 s (0.07 s per photo); roof tile rows and
   edges show where the SfM-point colours were mottled.
+- **Which model the mesh uses**: `sparse/export` only while it is not older than `sparse/refined` (else refined), and
+  every export first deletes the previous `sparse/export` (it writes one only when it leaves photos out), so a mesh
+  never comes from an earlier refine's or export's points. Run SfM (all) and Run full pipeline run export → SfM mesh
+  → patch holes; the splat then trains on that export (transforms.json, sparse_pc.ply; tiles set up again when
+  transforms.json changed) with the mesh prior ticked when a mesh first appears (a user's untick holds).
+- **GUI: its own tab "Sparse Mesh"** (right panel, after Sparse; the user asked): **Run all (mesh → patch holes →
+  colour)** (stage `sfmmesh-all`; colouring skipped without nerfstudio), **Build mesh**, **Max hole size (m)**,
+  **Patch holes**, **Colour from the photos**. With pose priors the hole size starts at the mean distance between
+  consecutive prior cameras (per source; kladno_dira 4.4 m, fullrun_test / karlak 2.0 m; `App._camera_spacing`), else 0.
 - **In the pipelines** (the user asked): Run SfM (all) and Run full pipeline end the sparse part with `sfmmesh` and
   `sfmmesh-fill` (GUI sequence; the CLI pipeline does not).
 - **SfM mesh prior for the splat** (Splat tab "Depth prior: SfM mesh"; ticked by itself when a project has a mesh or

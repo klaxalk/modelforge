@@ -7,8 +7,13 @@ triangulation, fusion) cannot be interrupted; the token is checked as soon as th
 adjustment checks it every iteration (its Ceres callback aborts the solve).
 """
 
+import contextlib
+import os
 import subprocess
+import sys
 import threading
+
+_TAP = threading.Lock()
 
 
 class Cancelled(Exception):
@@ -84,6 +89,46 @@ class Token:
             raise RuntimeError(f"{prog} {cmd[1] if len(cmd) > 1 else ''} exited with code {rc}: "
                                + (tail[-1] if tail else ""))
         return tail
+
+
+@contextlib.contextmanager
+def stderr_lines(on_line):
+    """While inside, every line written to file descriptor 2 (COLMAP's log from in-process pycolmap calls, which
+    report progress nowhere else) also goes to on_line; it still reaches the real stderr. Process-wide: a second
+    tap while one is open does nothing."""
+    if not _TAP.acquire(blocking=False):
+        yield
+        return
+    sys.stderr.flush()
+    saved = os.dup(2)
+    r, w = os.pipe()
+    os.dup2(w, 2)
+    os.close(w)
+
+    def pump():
+        buf = b""
+        with os.fdopen(r, "rb", buffering=0) as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:  # fd 2 restored: the pipe's last writer is gone
+                    break
+                os.write(saved, chunk)
+                *lines, buf = (buf + chunk).split(b"\n")
+                for line in lines:
+                    try:
+                        on_line(line.decode(errors="replace"))
+                    except Exception:  # noqa: BLE001 - a progress display must not break the job
+                        pass
+    th = threading.Thread(target=pump, daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved, 2)
+        th.join(timeout=5)
+        os.close(saved)
+        _TAP.release()
 
 
 def check(token):

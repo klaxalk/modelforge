@@ -527,20 +527,26 @@ def stage_reconstruct(project, report, progress=None, token=None, mapper="increm
     return stats
 
 
-def stage_export(project, report, rec=None, lidar=True, drop_isolated=True):
+def stage_export(project, report, rec=None, lidar=True, drop_isolated=True, progress=None):
     """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud.
     drop_isolated: leave out photos no other pass ties in whose ground lies off the other passes' (sfm.isolated); the
     points are then triangulated again from the kept photos alone (poses fixed, as refine's final triangulation,
-    into sparse/export), so the left-out photos neither add points nor pull any into place."""
+    into sparse/export), so the left-out photos neither add points nor pull any into place.
+    progress(text, k, n): finding the isolated photos, triangulating, refining the points, writing."""
+    def step(text, k=0, n=1):
+        if progress:
+            progress(text, k, n)
     if rec is None:
+        step("reading sparse/refined")
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
     kind = sparse_kind(project)  # a ROS 2 bag of images only: an up-oriented local frame, like a video
     world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
     iso = None
+    shutil.rmtree(os.path.join(project, "sparse", "export"), ignore_errors=True)  # only this export's model counts
     if drop_isolated and kind != "video":  # metres (the cover distance); a video's frame has no scale
         t0 = time.time()
         times = {r["image"]: r.get("time_s") for r in json.load(open(os.path.join(project, "poses.json")))["images"]}
-        iso = isolated.find(rec, times)
+        iso = isolated.find(rec, times, progress=progress)
         iso["points_before"] = rec.num_points3D()
         db_path = os.path.join(project, "database.db")
         if iso["drop"] and os.path.exists(db_path):
@@ -549,7 +555,9 @@ def stage_export(project, report, rec=None, lidar=True, drop_isolated=True):
                 rec.deregister_frame(rec.find_image_with_name(name).frame_id)
             image_path = os.path.join(project, "images")
             rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "export"),
-                                     refine.DEFAULT_ROUNDS[-1], refine=True)  # refine's final threshold (4 px)
+                                     refine.DEFAULT_ROUNDS[-1], refine=True,  # refine's final threshold (4 px)
+                                     progress=progress)
+            step("colours of the points from the photos")
             rec.extract_colors_for_all_images(image_path)
             rec.write(os.path.join(project, "sparse", "export"))  # View: snapshot "export"
             iso["triangulated"] = True
@@ -562,6 +570,7 @@ def stage_export(project, report, rec=None, lidar=True, drop_isolated=True):
             f"{isolated.MAX_OFF:.0%} of their ground > {isolated.MAX_DZ} m off the others' ({iso['isolated']} weakly "
             f"tied); points {iso['points_before']:,} → {iso['points']:,}; stretches (t0, t1, photos, share of cells off) "
             f"{iso['stretches'][:10]}{' …' if len(iso['stretches']) > 10 else ''}")
+    step("writing transforms.json + sparse_pc.ply")
     path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar,
                              exclude=set(iso["drop"]) if iso else ())
     n_lidar = json.load(open(path)).get("modelforge", {}).get("lidar_points_in_ply", 0)
