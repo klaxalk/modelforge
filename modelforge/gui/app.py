@@ -79,8 +79,8 @@ STAGE_HINTS = {
                       "environment. A few minutes for thousands of photos.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
-    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh (→ COLMAP "
-           "dense if ticked in the Dense tab).",
+    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh → "
+           "semantic features → SfM mesh coloured from the photos (→ COLMAP dense if ticked in the Dense tab).",
 }
 NEXT_STEP = {
     "all": "View tab: refined cameras, mesh and splat; Export tab for the files",
@@ -1265,8 +1265,9 @@ class App:
                             seq.append("semantic")
                         else:
                             skipped.append(f"semantic features ({semantic.available()})")
+                    seq.append("sfmmesh-colour")  # for looking at; last, so the splat is not kept waiting
                 else:
-                    skipped.append(f"splat and splat mesh ({splat.available()})")
+                    skipped.append(f"splat, splat mesh and colouring the SfM mesh ({splat.available()})")
                 if self.g_dense_in_all.value:  # COLMAP's MVS only when asked (Dense tab)
                     if dense.has_cuda():
                         seq += list(pipeline.DENSE_STAGES)

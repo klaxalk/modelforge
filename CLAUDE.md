@@ -1492,7 +1492,8 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   **Patch holes**, **Colour from the photos**. With pose priors the hole size starts at the mean distance between
   consecutive prior cameras (per source; kladno_dira 4.4 m, fullrun_test / karlak 2.0 m; `App._camera_spacing`), else 0.
 - **In the pipelines** (the user asked): Run SfM (all) and Run full pipeline end the sparse part with `sfmmesh` and
-  `sfmmesh-fill` (GUI sequence; the CLI pipeline does not).
+  `sfmmesh-fill` (GUI sequence; the CLI pipeline does not); the full pipeline also colours it (`sfmmesh-colour`) as
+  its last step (before COLMAP dense), so the splat does not wait for it (~14 min on kladno_dira).
 - **SfM mesh prior for the splat** (Splat tab "Depth prior: SfM mesh"; ticked by itself when a project has a mesh or
   one appears, `App._refresh_dense`; the user's untick holds while the mesh stays): the depth loss uses the mesh's
   vertices (`sfmmesh/mesh.ply`, patched if done; ~0.11 m spacing on kladno_dira) instead of the SfM points: the
