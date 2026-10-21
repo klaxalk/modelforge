@@ -94,7 +94,8 @@ def test_gui_switches_projects(tmp_path):
         app.projects.g_list.value = "real"
         app.projects.open_selected()
         assert app.project is not None and app.snap.name == "refined"
-        assert app.g_points.value and app.g_cams.value  # no splat / mesh: the sparse model is shown
+        assert app.g_points.value and app.g_traj.value and not app.g_cams.value  # the default view
+        assert not app.g_splat.value and not app.g_corr.value and app.g_mesh.value == "off" and not app.g_plan.value
         n = len(os.listdir(os.path.join(REAL, "images")))
         assert len(app.cam_handles) == len(app.project.names) == n
         assert f"{n} images" in app.g_header.content

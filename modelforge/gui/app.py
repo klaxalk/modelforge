@@ -163,8 +163,9 @@ class App:
             names = self.project.snapshot_names()
             self.load_snapshot("refined" if "refined" in names else names[-1])
         self._refresh_dense()
-        self._auto_show_sparse()
+        self._set_plan_visible(self.project is None)  # the default view (_default_view): no flight plan
         self.server.on_client_connect(self._on_connect)
+        self.server.on_client_disconnect(self._on_disconnect)
         threading.Thread(target=self._watch_uploads, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
@@ -210,7 +211,7 @@ class App:
             self.g_snapshot.on_update(lambda _: self.load_snapshot(self.g_snapshot.value))
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
-                self.g_points = gui.add_checkbox("Points", initial_value=False,
+                self.g_points = gui.add_checkbox("Points", initial_value=True,
                                                  hint="Sparse 3D points of the snapshot.")
                 self.g_point_size = gui.add_slider("Point size", min=0.01, max=0.5, step=0.01, initial_value=0.08)
                 self.g_cams = gui.add_checkbox("Cameras", initial_value=False,
@@ -219,7 +220,7 @@ class App:
                                                  hint="Image thumbnails in the frustums (slower with many cameras).")
                 self.g_priors = gui.add_checkbox("Prior cameras", initial_value=False,
                                                  hint="Grey frustums at the telemetry poses.")
-                self.g_corr = gui.add_checkbox("Prior → refined", initial_value=True,
+                self.g_corr = gui.add_checkbox("Prior → refined", initial_value=False,
                                                hint="Red segments from each prior position to the estimated one.")
                 self.g_traj = gui.add_checkbox("Trajectories", initial_value=True,
                                                hint="Grey: prior path; blue: estimated path.")
@@ -241,7 +242,7 @@ class App:
                                                         "grey simplified preview, lighter on the browser. COLMAP's "
                                                         "meshers write geometry only, so the colour comes from the "
                                                         "texture stage.")
-                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=True, disabled=True,
+                self.g_splat = gui.add_checkbox("Splat (ENU)", initial_value=False, disabled=True,
                                                 hint="splat/splat_enu.ply, in the same frame as the cameras and "
                                                      "mesh; shown as soon as training finishes (and live while it "
                                                      "trains).")
@@ -770,6 +771,7 @@ class App:
         with self.lock:
             self.path = path
             self._clear_scene()
+            self._default_view()
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
@@ -779,6 +781,7 @@ class App:
             self.g_state.content = "⚪ **idle**"
             self.g_inspect_md.content = "Click a camera to inspect it."
         self.ingest.set_project(path)
+        self._set_plan_visible(self.project is None)  # a project without images: its Ingest flight plan
         self.projects.refresh()
         self._remember_project()
         for client in self.server.get_clients().values():
@@ -824,7 +827,17 @@ class App:
             self.g_snapshot.options = names
             self.load_snapshot("refined" if "refined" in names else names[-1])
         self._refresh_dense()
-        self._auto_show_sparse()
+
+    def _default_view(self):
+        """What a project opens with, as on start (the user asked): Points and Trajectories only; the other
+        layers are a click away (View tab, quick bar). The flight plan is set after the Ingest tab switched."""
+        for box, on in ((self.g_points, True), (self.g_traj, True), (self.g_cams, False), (self.g_thumbs, False),
+                        (self.g_priors, False), (self.g_corr, False), (self.g_dense_pts, False),
+                        (self.g_splat, False), (self.g_tiles_view, False)):
+            if box.value != on:
+                box.value = on
+        if self.g_mesh.value != "off":
+            self.g_mesh.value = "off"
 
     def _auto_show_sparse(self, max_cameras=2000):
         """Points and Cameras start off (thousands of frustums hide a splat); a project with nothing else to
@@ -1411,6 +1424,16 @@ class App:
         self.ingest._draw_scene()
         self._sync_quickbar()
 
+    def _on_disconnect(self, client):
+        """A browser left (closed, reloaded): end its flight / orbit. viser does not fail on a closed
+        connection, so they ran on, and the shared Fly / Orbit buttons kept saying stop."""
+        self._stop_fly(client)
+        stop = self._orbits.pop(client.client_id, None)
+        if stop is not None:
+            stop.set()
+            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+            self._sync_quickbar()
+
     def toggle_orbit(self, client):
         """Start / stop orbiting this client's camera around its current look-at point (about +z)."""
         if client is None:
@@ -1513,8 +1536,8 @@ class App:
             return
         state = {"stop": threading.Event(), "jump": None}
         self._flights[client.client_id] = state
+        self.g_fly.label = "Stop flying"  # before the thread: a flight that ends at once relabels it back
         threading.Thread(target=self._fly, args=(client, state, path), daemon=True).start()
-        self.g_fly.label = "Stop flying"
         self._sync_quickbar()
 
     def _stop_fly(self, client):
@@ -1841,7 +1864,9 @@ class App:
                 return (f"{r['images']} images, {r['keypoints']:,} keypoints"
                         + (f" ({r['extractor']}{', upright' if r.get('upright') else ''})" if "extractor" in r else ""))
             if st == "pairs":
-                return f"{r['num_pairs']:,} pairs ({r.get('mode', 'auto')})"
+                return f"{r['num_pairs']:,} pairs ({r.get('mode', 'auto')})" + (
+                    f", {r['num_pairs'] - r['flat_pairs']:,} of them from the terrain of the earlier model"
+                    if "flat_pairs" in r else "")
             if st == "match":
                 return f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
             if st == "refine":

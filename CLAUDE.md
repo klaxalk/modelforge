@@ -726,7 +726,7 @@ comparison**. Stages and artifacts:
 | Stage | Artifact | Notes |
 |---|---|---|
 | `features` | `features.db` | Upright SIFT (gimbal keeps roll ≈ 0), one shared OPENCV camera. Matching works on a copy. |
-| `pairs` | `pairs.txt` | Time neighbours (±5) plus look-at-point overlap (optical axis ∩ takeoff ground plane, axes within 60°). Catches revisits. |
+| `pairs` | `pairs.txt` | Time neighbours (±5) plus look-at-point overlap (optical axis ∩ takeoff ground plane, axes within 60°). Catches revisits. On a re-run, also the pairs from look-ats on the terrain of the earlier model (see below). |
 | `match` | `database.db` | `match_image_pairs` on the pair list. |
 | `refine` | `sparse/round_N[_tri]`, `sparse/refined` | Every frame registered at its prior, then 3 rounds of (triangulate with poses fixed → BA with free poses + `AbsolutePosePriorCost`). Thresholds 40 → 12 → 4 px. No gauge fixing. |
 | `export` | `transforms.json`, `sparse_pc.ply` | nerfstudio, world = ENU, no `applied_transform`. |
@@ -752,6 +752,16 @@ Results on `berlin_3_1` (300 images, CPU):
   the views are near-horizontal and see mostly distant content. Camera
   position is weakly constrained there, and the priors hold it.
 - Runtime: matching 698 s (CPU, 2398 pairs) dominates. Refinement takes 83 s.
+- **Terrain look-ats** (the user asked, 2026-10-21): the flat plane at takeoff height was far off on kladno_dira (a
+  quarry pit: surface median −7.6 m, 2–98 % −27…+6 m vs −1.8 m): 2501 of 2883 look-at depths changed > 25 %, and
+  drones inside the pit (below the plane) had their look-at clamped 1 m in front of the lens. `pairs.Terrain` =
+  median z per grid cell (extent / 400, ≥ 0.5 m) of 3D points, holes from the nearest cell; `look_at_points(terrain=)`
+  marches each optical axis to the first point at or below the surface. `stage_pairs` uses it when the project has
+  a `sparse_pc.ply` with ≥ 1000 points (a re-run of SfM on these images) and adds those pairs to the flat ones
+  (`report.json pairs.flat_pairs / terrain_points`). A fresh project has no points and keeps the flat plane.
+  kladno_dira: +10,441 pairs (8,375 between passes > 60 s apart); 5,589 of them verify (≥ 15 inliers), 4,245 between
+  passes with 1.09M inliers, against 7,084 cross-pass pairs / 1.57M inliers in the flat set (+60 % / +69 %);
+  matching them took 48 s. Test: `test_multi_source.py::test_terrain_look_ats_pair_views_into_a_pit`.
 
 ## Robust priors (M3), `modelforge/sfm/robust.py`
 
@@ -1772,10 +1782,11 @@ Code layout:
       points (2–98 % range, so stray far points don't count) from the south, above them. The same
       framing runs when a browser connects and on a project switch. The user lost the scene of a
       video-kind project (arbitrary frame and scale) and asked for it.
-    - A project with nothing else to show (no splat, mesh or dense points, e.g. right after SfM)
-      opens with Points and Cameras (≤ 2000) on (`_auto_show_sparse`).
-    - Points, Cameras, Thumbs and Prior cameras start off (the user asked):
-      with thousands of cameras the frustums hide the splat / mesh.
+    - **Default view** (the user asked, 2026-10-21): on start and on opening a project only **Points** and
+      **Trajectories** are on (`_default_view`); splat, mesh, dense points, cameras, thumbnails, prior cameras,
+      Prior → refined and tile boundaries are off (a large splat is no longer sent at start). The flight plan is
+      on only for a project without images (nothing else to see). After an SfM run a project with nothing else
+      to show still gets Cameras (≤ 2000) on (`_auto_show_sparse`); after a splat run the splat is shown.
     - **Plan** is the Ingest flight plan (each source's track plus dots at the
       planned image positions). The user asked to hide it from the 3D view:
       its checkbox existed only in the Ingest tab. The quick bar, View
@@ -1831,7 +1842,7 @@ Code layout:
       The user asked why the mesh was grey.
     - Textured meshes in the user's projects: 94k–156k faces, an 11 MB GLB,
       ~2.6 s to load and convert.
-    - The Splat checkbox is ticked by default.
+    - The Splat checkbox is off on start / project open (see Default view), ticked after a splat run.
     - The layers refresh right after the splat stage and after fusion /
       mesh / texture, not only when the run ends. Before, the splat vanished
       during the full pipeline's dense stages: the live layer was gone and

@@ -91,6 +91,26 @@ def test_pairs_and_relative_links_stay_within_sources():
     assert len(rel) == 18 and all(pri[a].source == pri[b].source for a, b in rel)
 
 
+def test_terrain_look_ats_pair_views_into_a_pit():
+    """Two drones inside a pit (10 m above its floor, 15 m below takeoff) look at the same floor spot from both
+    sides: on the flat plane at takeoff height their look-ats make no sense (they are below it), so they are not
+    paired; on the terrain from sparse points they meet on the floor and are."""
+    pri = {}
+    for k, sx in enumerate((-1.0, 1.0)):
+        a = np.array([-sx * np.sin(np.radians(20)), 0.0, -np.cos(np.radians(20))])  # 20 deg off vertical, inwards
+        x = np.array([0.0, 1.0, 0.0])
+        R = np.stack([x, np.cross(a, x), a], 0)  # cam_from_world: its rows are the camera axes
+        C = np.array([sx * 10 * np.tan(np.radians(20)), 0.0, -15.0])
+        pri[f"c{k}"] = Prior.from_pose(f"c{k}", k, float(k * 100), R, C, source=0, order=k * 100)
+    g = np.stack(np.meshgrid(np.arange(-50, 50.5, 1.0), np.arange(-50, 50.5, 1.0)), -1).reshape(-1, 2)
+    z = np.where(np.abs(g).max(1) > 20, 0.0, -25.0)
+    terrain = pairs.Terrain(np.c_[g, z])
+    _, P, _, depth = pairs.look_at_points(pri, 0.0, terrain=terrain)
+    assert np.allclose(P[:, 2], -25.0, atol=1.0) and np.linalg.norm(P[0] - P[1]) < 2.0
+    assert pairs.select(pri, 0.0, seq_neighbors=0) == []  # flat ground at takeoff height: missed
+    assert pairs.select(pri, 0.0, seq_neighbors=0, terrain=terrain) == [("c0", "c1")]
+
+
 @pytest.mark.skipif(not os.path.exists(VIDEO), reason="needs the sample clip berlin_3_1.MP4 in data/")
 def test_ingest_two_pieces(tmp_path):
     from modelforge.dji import ingest

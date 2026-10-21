@@ -122,6 +122,13 @@ def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
     if mode == "auto" and priors_mod.has_poses(pri):  # DJI: look-at overlap from the priors
         rep["ground_z"] = meta["ground_z"] if "ground_z" in meta else -meta["enu_origin_lla"][2]
         pp = pairs.select(pri, rep["ground_z"])
+        terrain = _terrain(project)
+        if terrain is not None:  # a re-run: look-ats on the surface of the earlier model, added to the flat ones
+            flat = len(pp)
+            pp = sorted(set(pp) | set(pairs.select(pri, rep["ground_z"], terrain=terrain)))
+            rep.update(terrain_points=terrain.points, terrain_cell_m=round(terrain.cell, 2), flat_pairs=flat)
+            log(f"pairs: terrain from {terrain.points:,} sparse points ({terrain.cell:.2f} m cells): "
+                f"{len(pp) - flat:,} pairs added to {flat:,} on flat ground")
     elif mode == "exhaustive":
         pp = pairs.sequential(seqs, exhaustive_below=len(names))
     else:  # sequential, or auto without priors (exhaustive when small)
@@ -130,6 +137,20 @@ def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
     pairs.write(project, pp)
     report.set("pairs", {"num_pairs": len(pp), **rep})
     log(f"pairs: {len(pp)} ({mode})")
+
+
+def _terrain(project, min_points=1000):
+    """pairs.Terrain from the project's sparse points (sparse_pc.ply of an earlier SfM of these images), or None."""
+    path = os.path.join(project, "sparse_pc.ply")
+    if not os.path.exists(path):
+        return None
+    import plyfile
+    v = plyfile.PlyData.read(path)["vertex"].data
+    if len(v) < min_points:
+        return None
+    t = pairs.Terrain(np.stack([v["x"], v["y"], v["z"]], 1))
+    t.points = len(v)
+    return t
 
 
 def copy_db(src, dst):

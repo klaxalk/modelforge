@@ -233,9 +233,9 @@ def test_quick_bar(app):
     state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
-    assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "○", "Cams": "○", "Thumbs": "·",
-                       "Resid": state()["Resid"], "Traj": state()["Traj"], "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
-                       "Center": "⌖", "Fly": "○"}  # points, cameras, thumbs off
+    assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "●", "Cams": "○", "Thumbs": "·",
+                       "Resid": "○", "Traj": "●", "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
+                       "Center": "⌖", "Fly": "○"}  # the default view: points and trajectories; cameras, thumbs off
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Tiles", None)  # View: Tile boundaries
@@ -327,7 +327,22 @@ def test_fly_the_camera_path(app):
     time.sleep(0.2)
     app.toggle_fly(c)
     time.sleep(0.2)
-    assert not app._flights
+    assert not app._flights and app.g_fly.label == "Fly the camera path"
+
+    # a browser that closes mid-flight (or orbit) ends it: viser does not fail on a closed connection, so the
+    # flight ran on and the shared buttons said "Stop flying" / "Stop orbit" for every browser
+    gone = Client()
+    gone.client_id = 22
+    app.g_fly_loop.value = True
+    app.toggle_fly(gone)
+    app.toggle_orbit(c)
+    time.sleep(0.2)
+    app._on_disconnect(gone)
+    app._on_disconnect(c)
+    time.sleep(0.3)
+    assert not app._flights and not app._orbits
+    assert app.g_fly.label == "Fly the camera path" and app.g_orbit.label == "Start orbit"
+    app.g_fly_loop.value = False
 
 
 def test_tile_boundaries(app, monkeypatch):
