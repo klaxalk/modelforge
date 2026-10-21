@@ -563,7 +563,9 @@ class App:
                 "Depth prior: SfM mesh", initial_value=False, disabled=True,
                 hint="The depth loss measures against the SfM mesh's vertices (Sparse tab → Run SfM mesh, holes "
                      "patched) instead of the SfM points: evenly spaced, smoothed, and present in the patched holes. "
-                     "Ticked by itself once the project has an SfM mesh; uses Depth weight (0 → 0.2).")
+                     "Ticked by itself once the project has an SfM mesh; ticking it sets Depth weight to 0.2 when it "
+                     "is 0.")
+            self.g_splat_mesh_prior.on_update(lambda _: self._mesh_prior_weight())
             self.g_splat_mesh_dense = gui.add_checkbox(
                 "Mesh prior: dense (rendered depth)", initial_value=True,
                 hint="With the SfM mesh prior: render the mesh into every training camera (undistorted and cropped "
@@ -1979,6 +1981,11 @@ class App:
         except Exception:  # noqa: BLE001 - a preview must not stop the colouring
             traceback.print_exc()
 
+    def _mesh_prior_weight(self):
+        """The SfM mesh prior needs a depth weight: 0.2 (splat.DEFAULT_LIDAR_DEPTH) when it is ticked at 0."""
+        if self.g_splat_mesh_prior.value and float(self.g_splat_depth.value) <= 0:
+            self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH
+
     def _on_sfm_mesh_line(self, text):
         """Sparse Mesh steps: the log, plus the step on the state line ('colouring: photo k / n' with the bar)."""
         self._on_log(text)
@@ -2241,6 +2248,7 @@ class App:
         if has_mesh != getattr(self, "_sfm_mesh_seen", None):  # ticked when a mesh appears (or a project has one)
             self.g_splat_mesh_prior.value = has_mesh
             self._sfm_mesh_seen = has_mesh
+        self._mesh_prior_weight()  # also after a project switch reset the weight to its kind's default
         self._draw_tiles()
 
     # ------------------------------------------------------------- export

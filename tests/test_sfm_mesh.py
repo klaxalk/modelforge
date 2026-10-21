@@ -77,9 +77,11 @@ def test_gui_ticks_the_mesh_prior_when_a_mesh_appears(tmp_path):
     app = App(str(p), port=free_port(), root=str(tmp_path))
     try:
         assert not app.g_splat_mesh_prior.value and app.g_splat_mesh_prior.disabled
+        assert app.g_splat_depth.value == 0.0  # no mesh: no depth loss by default
         sfm_mesh.run(str(p), on_line=lambda m: None)
         app._refresh_dense()
         assert app.g_splat_mesh_prior.value and not app.g_splat_mesh_prior.disabled
+        assert app.g_splat_depth.value == 0.2  # the prior's default weight
         assert "sfm" in app.g_mesh.options
         app.g_splat_mesh_prior.value = False  # the user's choice holds while the mesh stays
         app._refresh_dense()

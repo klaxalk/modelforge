@@ -1497,8 +1497,9 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   one appears, `App._refresh_dense`; the user's untick holds while the mesh stays): the depth loss uses the mesh's
   vertices (`sfmmesh/mesh.ply`, patched if done; ~0.11 m spacing on kladno_dira) instead of the SfM points: the
   lidar-data dataparser's `--depth-ply` (`splat.train_command(depth_cloud=)`, `splat.run / resume`,
-  `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Depth weight 0 with the
-  prior ticked uses 0.2.
+  `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Ticking the prior (by itself
+  or by hand) sets Depth weight to 0.2 when it is 0 (`App._mesh_prior_weight`; the user asked for 0.2 as the prior's
+  default); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags.
 - **Dense mesh prior** (Splat tab "Mesh prior: dense (rendered depth)", default on; the user asked: the vertices
   supervise only ~1 pixel in 10 at ×2 on kladno_dira): `export/mesh_depth.py` (nerfstudio's venv, Open3D CPU
   raycasting) renders the mesh's z-depth at every training camera **as nerfstudio trains it**: intrinsics × 1/N,
