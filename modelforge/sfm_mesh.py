@@ -26,6 +26,7 @@ file, so mesh.ply (the splat's depth prior, its cached depth maps) stays as it i
 import argparse
 import json
 import os
+import re
 import time
 
 import numpy as np
@@ -36,7 +37,7 @@ OUT = "sfmmesh"
 NEIGHBOURS = 16
 PREVIEW_FACES = 300_000
 COLOURED_PREVIEW_FACES = 1_000_000  # the coloured mesh is for looking at: more detail in the View tab
-COLOURED = ("mesh_coloured.ply", "mesh_coloured.ply.json", "preview_coloured.ply")
+COLOURED = ("mesh_coloured.ply", "mesh_coloured.ply.json", "preview_coloured.ply", "colour_live.npy")
 
 
 def depth_cloud(project):
@@ -153,6 +154,7 @@ def run(project, depth=None, trim_spacings=6.0, on_line=print, token=None):
     rec = pycolmap.Reconstruction(src)
     if rec.num_points3D() < 100:
         raise RuntimeError(f"{os.path.relpath(src, project)} has only {rec.num_points3D()} points")
+    on_line(f"sfm mesh: normals of {rec.num_points3D():,} points")
     xyz, rgb, nrm, spacing = oriented_points(rec)
     del rec
     token.check()
@@ -169,6 +171,7 @@ def run(project, depth=None, trim_spacings=6.0, on_line=print, token=None):
     token.check()
     mesh = os.path.join(out, "mesh.ply")
     max_dist = trim_spacings * spacing
+    on_line(f"sfm mesh: cutting faces farther than {max_dist:.2f} from the points")
     v, faces = read_mesh(raw)
     kept = trim(v, faces, xyz, max_dist)
     np.save(os.path.join(out, "kept.npy"), kept)
@@ -176,7 +179,7 @@ def run(project, depth=None, trim_spacings=6.0, on_line=print, token=None):
     for name in ("mesh_trimmed.ply", "patched.npy") + COLOURED:  # earlier patch / colours: the earlier mesh
         if os.path.exists(os.path.join(out, name)):
             os.remove(os.path.join(out, name))
-    on_line(f"sfm mesh: {n_f:,} of {n_raw:,} faces within {max_dist:.2f} of an SfM point")
+    on_line(f"sfm mesh: {n_f:,} of {n_raw:,} faces within {max_dist:.2f} of an SfM point; writing the preview")
     write_preview(out, mesh, n_f, token)
     stats = {"model": os.path.relpath(src, project), "points": len(xyz), "point_spacing": round(spacing, 4),
              "depth": depth, "cell": round(extent / 2 ** depth, 4), "trim_dist": round(max_dist, 4),
@@ -237,10 +240,12 @@ def fill(project, max_hole=None, on_line=print, token=None):
     stats = json.load(open(os.path.join(out, "stats.json")))
     if max_hole is None or max_hole <= 0:
         max_hole = 40 * stats["point_spacing"]
+    on_line("sfm mesh: reading the Poisson surface")
     v, faces = read_mesh(raw)
     kept = np.load(kept_path)
     if len(kept) != len(faces):
         raise RuntimeError("sfmmesh/kept.npy does not match poisson.ply: run SfM mesh again")
+    on_line(f"sfm mesh: finding holes among {int((~kept).sum()):,} cut faces")
     label = components(faces, ~kept)
     token.check()
     vx = np.c_[v["x"], v["y"], v["z"]]
@@ -262,6 +267,7 @@ def fill(project, max_hole=None, on_line=print, token=None):
     if not os.path.exists(trimmed):
         os.replace(mesh, trimmed)
     keep = kept | patched
+    on_line(f"sfm mesh: writing the patched mesh ({holes} holes)")
     n_v = write_mesh(mesh, v, faces[keep])
     for name in COLOURED:  # coloured before the patch: the patch has no photo colours
         if os.path.exists(os.path.join(out, name)):
@@ -279,8 +285,30 @@ def fill(project, max_hole=None, on_line=print, token=None):
     return rep
 
 
-def colour(project, width=1920, on_line=print, token=None):
-    """Colour PROJECT/sfmmesh/mesh.ply from the photos of transforms.json (see the module doc)."""
+LIVE = "colour_live.npy"  # the colours so far while colouring runs (uint8 RGB per vertex of mesh.ply)
+
+
+def write_coloured(mesh_path, rgb, out_path):
+    """mesh_path with its vertex colours replaced by rgb (N, 3 uint8)."""
+    import plyfile
+    ply = plyfile.PlyData.read(mesh_path)
+    v = ply["vertex"].data
+    if "red" not in v.dtype.names:
+        from numpy.lib import recfunctions
+        v = recfunctions.append_fields(v, ("red", "green", "blue"), [rgb[:, 0], rgb[:, 1], rgb[:, 2]],
+                                       dtypes=["u1"] * 3, usemask=False)
+    else:
+        v = v.copy()
+        v["red"], v["green"], v["blue"] = rgb.T
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex"), ply["face"]]).write(out_path + ".part.ply")
+    os.replace(out_path + ".part.ply", out_path)
+
+
+def colour(project, width=1920, on_line=print, token=None, on_live=None, every=100):
+    """Colour PROJECT/sfmmesh/mesh.ply from the photos of transforms.json (see the module doc).
+    on_live(path, k, n): the colours after k of n photos were saved to path (sfmmesh/colour_live.npy), every
+    `every` photos. Stopped (jobs.Cancelled), the colours saved last become mesh_coloured.ply (partial) before the
+    Cancelled goes on."""
     from modelforge import splat
     from modelforge.pipeline import Report
     token = token or jobs.Token()
@@ -294,17 +322,45 @@ def colour(project, width=1920, on_line=print, token=None):
     if why:
         raise RuntimeError(f"colouring runs in nerfstudio's environment: {why}")
     coloured = os.path.join(out, "mesh_coloured.ply")
+    live = os.path.join(out, LIVE)
+    if os.path.exists(live):
+        os.remove(live)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "mesh_color.py")
-    splat._stream([os.path.join(splat.NS_BIN, "python"), script, project, mesh, coloured, "--width", str(int(width))],
-                  on_line, token)
-    import plyfile
+    done = [0, 0]
+
+    def line(text):
+        on_line(text)
+        m = re.match(r"mesh colour: live (\d+) / (\d+)", text)
+        if m:
+            done[:] = int(m.group(1)), int(m.group(2))
+            if on_live:
+                on_live(live, *done)
+
+    def finish(rep, tok):
+        import plyfile
+        on_line("mesh colour: writing the preview")
+        n_faces = plyfile.PlyData.read(coloured)["face"].count
+        write_preview(out, coloured, n_faces, tok, name="preview_coloured.ply", faces=COLOURED_PREVIEW_FACES)
+        stats = json.load(open(os.path.join(out, "stats.json")))
+        stats["colour"] = rep
+        json.dump(stats, open(os.path.join(out, "stats.json"), "w"), indent=1)
+        Report(project).set("sfm_mesh", stats)
+    try:
+        splat._stream([os.path.join(splat.NS_BIN, "python"), script, project, mesh, coloured, "--width", str(int(width)),
+                       "--live", live, "--every", str(int(every))], line, token)
+    except jobs.Cancelled:
+        if os.path.exists(live):  # keep what is done: the colours saved last
+            on_line(f"mesh colour: stopped after {done[0]} of {done[1]} photos: keeping the colours so far")
+            write_coloured(mesh, np.load(live), coloured)
+            rep = {"photos": done[1], "photos_done": done[0], "width": width, "partial": True}
+            json.dump(rep, open(coloured + ".json", "w"))
+            finish(rep, jobs.Token())  # the job's token is cancelled
+        raise
+    finally:
+        if os.path.exists(live):
+            os.remove(live)
     rep = json.load(open(coloured + ".json"))
-    n_faces = plyfile.PlyData.read(coloured)["face"].count
-    write_preview(out, coloured, n_faces, token, name="preview_coloured.ply", faces=COLOURED_PREVIEW_FACES)
-    stats = json.load(open(os.path.join(out, "stats.json")))
-    stats["colour"] = rep
-    json.dump(stats, open(os.path.join(out, "stats.json"), "w"), indent=1)
-    Report(project).set("sfm_mesh", stats)
+    finish(rep, token)
     return rep
 
 

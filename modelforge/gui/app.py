@@ -9,6 +9,7 @@ may be new or empty: the Ingest tab builds it from one or more videos.
 import argparse
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -1351,14 +1352,23 @@ class App:
                     self._refresh_dense()  # show the finished splat now, not only when the whole run ends
                 elif st in ("sfmmesh", "sfmmesh-fill", "sfmmesh-colour"):
                     if st == "sfmmesh-colour":
-                        sfm_mesh.colour(project, on_line=self._on_log, token=self._token)
+                        self._colour_live_mesh, self._colour_live_t = None, 0.0
+                        if "sfm" in self.g_mesh.options and self.g_mesh.value != "sfm":
+                            self.g_mesh.value = "sfm"  # the colours appear on it while they are computed
+                        try:
+                            sfm_mesh.colour(project, on_line=self._on_sfm_mesh_line, token=self._token,
+                                            on_live=self._on_colour_live)
+                        except jobs.Cancelled:
+                            self._refresh_dense()  # the colours so far were kept: show them
+                            raise
                     elif st == "sfmmesh":
-                        sfm_mesh.run(project, on_line=self._on_log, token=self._token)
+                        sfm_mesh.run(project, on_line=self._on_sfm_mesh_line, token=self._token)
                     else:
                         if not sfm_mesh.can_fill(project):  # none yet, or built before patching existed
                             self._on_log("sfm mesh: no mesh to patch yet: building it first")
-                            sfm_mesh.run(project, on_line=self._on_log, token=self._token)
-                        sfm_mesh.fill(project, max_hole=float(self.g_fill_max.value) or None, on_line=self._on_log,
+                            sfm_mesh.run(project, on_line=self._on_sfm_mesh_line, token=self._token)
+                        sfm_mesh.fill(project, max_hole=float(self.g_fill_max.value) or None,
+                                      on_line=self._on_sfm_mesh_line,
                                       token=self._token)
                     report = pipeline.Report(project)
                     self._refresh_dense()
@@ -1943,6 +1953,42 @@ class App:
         if self._job.get("label") == stage:
             self.g_progress.value = 100.0 * done / max(total, 1)
 
+    def _on_colour_live(self, path, done, total, every_s=15.0):
+        """Colouring the SfM mesh: the colours so far onto the mesh the View tab shows (at most every 15 s). Its
+        vertices are mapped once per run to the nearest vertex of mesh.ply, whose colours the file holds."""
+        if self.g_mesh.value != "sfm" or time.time() - self._colour_live_t < every_s:
+            return
+        self._colour_live_t = time.time()
+        try:
+            rgb = np.load(path)
+            if self._colour_live_mesh is None:
+                import cv2
+                import plyfile
+                shown = gdata.load_mesh(self.dense["meshes"]["sfm"])
+                v = plyfile.PlyData.read(os.path.join(self.path, sfm_mesh.OUT, "mesh.ply"))["vertex"].data
+                full = np.c_[v["x"], v["y"], v["z"]].astype(np.float32)
+                c = full.mean(0)
+                index = cv2.flann_Index(full - c, dict(algorithm=1, trees=4))
+                k, _ = index.knnSearch((np.asarray(shown.vertices, np.float32) - c), 1, params={"checks": 32})
+                self._colour_live_mesh = (shown, k[:, 0])
+            mesh, nearest = self._colour_live_mesh
+            mesh.visual.vertex_colors = np.c_[rgb[nearest], np.full(len(nearest), 255, np.uint8)]
+            self.server.scene.add_mesh_trimesh("/dense/mesh", mesh)
+            self._unchanged("mesh", None)  # the finished mesh is drawn again at the end
+            self._dense_status("mesh", f"mesh (sfm): colouring, {done:,} of {total:,} photos so far")
+        except Exception:  # noqa: BLE001 - a preview must not stop the colouring
+            traceback.print_exc()
+
+    def _on_sfm_mesh_line(self, text):
+        """Sparse Mesh steps: the log, plus the step on the state line ('colouring: photo k / n' with the bar)."""
+        self._on_log(text)
+        m = re.match(r"mesh colour: (\d+) / (\d+)", text)
+        if m:
+            self._on_count_progress(self._job.get("label"), "colouring: photo", int(m.group(1)), int(m.group(2)))
+            self.g_progress.value = 100.0 * int(m.group(1)) / max(int(m.group(2)), 1)
+        elif text.startswith(("sfm mesh: ", "mesh colour: ")) and not text.startswith("sfm mesh: {"):
+            self._job["detail"] = text.split(": ", 1)[1][:160]
+
     def _on_export_progress(self, text, done, total):
         """Export: the step on the state line, 'k / n' where it counts (triangulating, refining points)."""
         if total > 1:
@@ -2062,6 +2108,8 @@ class App:
                         + f" ({r['version']}, {r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
             if st == "sfmmesh-colour":
                 r = rep["sfm_mesh"]["colour"]
+                if r.get("partial"):
+                    return f"stopped: colours from {r['photos_done']:,} of {r['photos']:,} photos kept"
                 return (f"{r['coloured']:,} of {r['vertices']:,} vertices coloured from {r['photos']:,} photos "
                         f"({r['width']} px), {_fmt_s(r['seconds'])}")
             if st == "sfmmesh-fill":

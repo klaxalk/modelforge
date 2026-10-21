@@ -7,7 +7,10 @@ no earlier than just before it (Open3D raycasting). Its colour is the weighted m
 (cos / distance)^4: the near, head-on views dominate, so detail stays sharp where one photo saw it best, and far or
 grazing views only fill in. Vertices no photo saw keep their colour (Poisson's, from the SfM points).
 
-python export/mesh_color.py PROJECT MESH OUT [--width 1920]
+With --live PATH, the colours so far (uint8 RGB per vertex, in the mesh file's vertex order) are saved to PATH
+every --every photos ("mesh colour: live k / n"): the GUI shows them while it runs, and a stopped run keeps them.
+
+python export/mesh_color.py PROJECT MESH OUT [--width 1920] [--live PATH --every 100]
 """
 import argparse
 import json
@@ -50,6 +53,8 @@ def main():
     ap.add_argument("mesh")
     ap.add_argument("out")
     ap.add_argument("--width", type=int, default=1920, help="photos are decoded at most this wide")
+    ap.add_argument("--live", help="save the colours so far here (.npy) every --every photos")
+    ap.add_argument("--every", type=int, default=100)
     a = ap.parse_args()
     t = json.load(open(os.path.join(a.project, "transforms.json")))
     if t.get("camera_model", "OPENCV") != "OPENCV":
@@ -72,9 +77,22 @@ def main():
     K[2, 2] = 1.0
     dist = (t.get("k1", 0.0), t.get("k2", 0.0), t.get("p1", 0.0), t.get("p2", 0.0))
     acc, wsum = np.zeros((len(V), 3)), np.zeros(len(V))
+    old = (np.asarray(mesh.vertex_colors) * 255.0) if mesh.has_vertex_colors() else np.full((len(V), 3), 128.0)
+
+    def current():
+        rgb = old.copy()
+        seen = wsum > 0
+        rgb[seen] = acc[seen] / wsum[seen, None]
+        return np.clip(rgb, 0, 255), seen
     V32 = V.astype(np.float32)
     frames = t["frames"]
     for k, f in enumerate(frames):
+        if (k + 1) % 10 == 0 or k + 1 == len(frames):
+            print(f"mesh colour: {k + 1} / {len(frames)} ({(time.time() - t0) / (k + 1):.2f} s per photo)", flush=True)
+        if a.live and k and k % a.every == 0:
+            np.save(a.live + ".part.npy", np.round(current()[0]).astype(np.uint8))
+            os.replace(a.live + ".part.npy", a.live)
+            print(f"mesh colour: live {k} / {len(frames)}", flush=True)
         img = cv2.imread(os.path.join(a.project, f["file_path"]), flag)
         if img is None:
             continue
@@ -101,13 +119,8 @@ def main():
         col = bilinear(img, u, v)[:, ::-1]  # BGR -> RGB
         acc[idx] += col * wgt[:, None]  # idx is unique within a photo
         wsum[idx] += wgt
-        if (k + 1) % 50 == 0 or k + 1 == len(frames):
-            print(f"mesh colour: {k + 1} / {len(frames)} ({(time.time() - t0) / (k + 1):.2f} s per photo)", flush=True)
-    seen = wsum > 0
-    old = (np.asarray(mesh.vertex_colors) * 255.0) if mesh.has_vertex_colors() else np.full((len(V), 3), 128.0)
-    rgb = old.copy()
-    rgb[seen] = acc[seen] / wsum[seen, None]
-    mesh.vertex_colors = o3d.utility.Vector3dVector(np.clip(rgb, 0, 255) / 255.0)
+    rgb, seen = current()
+    mesh.vertex_colors = o3d.utility.Vector3dVector(rgb / 255.0)
     mesh.vertex_normals = o3d.utility.Vector3dVector()  # keep the file as the input's: positions, colours, faces
     o3d.io.write_triangle_mesh(a.out + ".part.ply", mesh, write_ascii=False, compressed=False,
                                write_vertex_normals=False, write_vertex_colors=True, write_triangle_uvs=False)

@@ -207,3 +207,42 @@ def test_view_opens_on_the_export_model_while_current(tmp_path):
         assert app.snap.name == "refined"
     finally:
         app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "transforms.json")) or
+                    not os.path.exists("/opt/nerfstudio/bin/python"), reason="needs an exported project + nerfstudio")
+def test_colour_live_and_kept_when_stopped(tmp_path):
+    from modelforge import jobs
+    from modelforge.gui.app import App
+    from tests.test_projects import free_port
+    p = tmp_path / "p"
+    (p / "sparse").mkdir(parents=True)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    for f in ("poses.json", "transforms.json", "sparse_pc.ply"):
+        shutil.copy(os.path.join(REAL, f), p / f)
+    os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
+    sfm_mesh.run(str(p), on_line=lambda m: None)
+    n_v = plyfile.PlyData.read(p / "sfmmesh" / "mesh.ply")["vertex"].count
+    app = App(str(p), port=free_port(), root=str(tmp_path))
+    try:
+        app.g_mesh.value = "sfm"
+        app._colour_live_mesh, app._colour_live_t = None, 0.0
+        token, lives = jobs.Token(), []
+
+        def on_live(path, k, n):
+            rgb = np.load(path)
+            assert rgb.shape == (n_v, 3) and rgb.dtype == np.uint8
+            lives.append(k)
+            app._on_colour_live(path, k, n, every_s=0)  # the GUI recolours the shown mesh
+            if len(lives) == 2:
+                token.cancel()  # Stop after the second snapshot
+        with pytest.raises(jobs.Cancelled):
+            sfm_mesh.colour(str(p), width=480, token=token, on_live=on_live, every=20, on_line=lambda m: None)
+        assert lives[:2] == [20, 40]  # a snapshot already on its way when Stop came may follow
+        assert f"colouring, {lives[-1]} of" in app._dense_lines["mesh"]
+        rep = json.load(open(p / "sfmmesh" / "mesh_coloured.ply.json"))
+        assert rep["partial"] and rep["photos_done"] == lives[-1]  # the colours saved last were kept
+        assert plyfile.PlyData.read(p / "sfmmesh" / "mesh_coloured.ply")["vertex"].count == n_v
+        assert not (p / "sfmmesh" / sfm_mesh.LIVE).exists()
+    finally:
+        app.server.stop()

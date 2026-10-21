@@ -1471,6 +1471,11 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   View tab prefers; mesh.ply (the depth prior and its cached maps) is untouched; SfM mesh / Patch holes drop the
   colours. fullrun_test: 95 % of 93k vertices coloured from 80 photos in 5 s (0.07 s per photo); roof tile rows and
   edges show where the SfM-point colours were mottled.
+  - **Live and kept on Stop** (the user asked): `mesh_color.py --live sfmmesh/colour_live.npy --every 100` saves the
+    colours so far (uint8 RGB per vertex of mesh.ply); `sfm_mesh.colour(on_live=)` passes each save on, and the GUI
+    (`App._on_colour_live`, ≤ every 15 s, View Mesh switched to **sfm**) maps the shown mesh's vertices once to the
+    nearest mesh.ply vertex and re-sends it recoloured. Stopped, the last saved colours become mesh_coloured.ply +
+    preview (`.json` "partial", "photos_done"). Progress "colouring: photo k / n" on the state line and the bar.
 - **Which model the mesh uses**: `sparse/export` only while it is not older than `sparse/refined` (else refined), and
   every export first deletes the previous `sparse/export` (it writes one only when it leaves photos out), so a mesh
   never comes from an earlier refine's or export's points. Run SfM (all) and Run full pipeline run export → SfM mesh
