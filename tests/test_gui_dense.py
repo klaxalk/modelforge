@@ -347,3 +347,23 @@ def test_tile_boundaries(app, monkeypatch):
     app.g_tiles_view.value = False
     assert "tiles" not in app.g_dense_md.content
     app.g_splat_tile_photos.value = 500
+
+
+def test_set_up_tiles(app):
+    """Splat tab → Set up tiles: tiles.json written without training; Train tiles offers each tile."""
+    import time as _time
+    from modelforge import splat_tiles
+    app.g_splat_tile_photos.value = 30
+    app._setup_tiles_clicked(None)
+    t0 = _time.time()
+    while app.running and _time.time() - t0 < 60:
+        _time.sleep(0.1)
+    state = splat_tiles.load(app.path)
+    assert state and all(t["status"] == "pending" for t in state["tiles"])
+    assert tuple(app.g_splat_train_tiles.options) == ("all",) + tuple(f"tile {k + 1}" for k in range(len(state["tiles"])))
+    assert "set up tiles" in app.g_history.content
+    app.g_splat_train_tiles.value = "tile 2"
+    shutil.rmtree(os.path.join(app.path, splat_tiles.DIR))
+    app._sync_tile_choice()
+    assert app.g_splat_train_tiles.options == ("all",) and app.g_splat_train_tiles.value == "all"
+    app.g_splat_tile_photos.value = 500

@@ -526,6 +526,11 @@ def main():
     ap.add_argument("--round-steps", type=int, default=None,
                     help="tiled runs: every tile advances this many steps per round, merged after each "
                          "(default 4000; 0 = one tile after the other)")
+    ap.add_argument("--tile", type=int, metavar="K", default=None,
+                    help="train only tile K (1-based) of the set-up tiles from scratch; the others keep their splats "
+                         "and all are merged again")
+    ap.add_argument("--setup-tiles", action="store_true",
+                    help="only divide the scene into tiles (tiles/tiles.json + datasets), without training")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
     args, extra = ap.parse_known_args()
@@ -535,13 +540,19 @@ def main():
             resume(project, on_line=lambda m: print(m, flush=True))
             return
         from modelforge import splat_plan, splat_tiles
-        if not args.no_plan and splat_tiles.wanted(splat_plan.survey(project)["train_images"], args.tiles):
+        if args.setup_tiles:
+            splat_tiles.setup(project, args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
+                              on_line=lambda m: print(m, flush=True))
+            return
+        if args.tile is not None or (not args.no_plan and splat_tiles.wanted(splat_plan.survey(project)["train_images"],
+                                                                             args.tiles)):
             splat_tiles.run(project, args.method, dict(iterations=args.iterations, downscale=args.downscale,
                                                        strategy=args.strategy, max_gaussians=args.max_gaussians,
                                                        camera_opt=args.camera_opt), extra,
                             on_line=lambda m: print(m, flush=True), cache=args.cache, lidar_depth=args.lidar_depth,
                             photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
-                            round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps)
+                            round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps,
+                            only=None if args.tile is None else args.tile - 1)
             return
         if args.no_plan:
             iterations, downscale, schedule = args.iterations, args.downscale or 1, None

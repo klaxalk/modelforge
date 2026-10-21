@@ -1264,6 +1264,19 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     passes together, a global BA can (its drift stayed ≤ 0.5 m). Global: 67 min, 7.2 GB; chunked 24 min, 3.9 GB.
     → BA mode auto now chunks from 2500 images (was 1000). Larger projects still need a cheap final global step
     (idea: `refine.local_ba(global_pass=True)` on thinned points after the drift passes; untested).
+  - **kladno_dira (2883 images, chunked) had the same split** (2026-10-21): pairs > 60 s apart 0.39 m median, p90
+    1.57 m, 51 % merged; the drift passes stopped at 0.47 m. The tiled splats could not even fit their training
+    photos (17 dB). The user suspected the priors; they are loose (0.75 / 0.5 m; the solution deviates 1.4 m median),
+    but in chunked mode they are the only link between passes.
+  - **Loop closures in the pose graph** (`chunked.revisit_edges`, `Chunked.revisit_passes` = 3, before the drift
+    passes; the user asked): triangulate all → every image pair beyond the chunk edges' reach (order gap > 64)
+    with ≥ 20 inlier matches on different 3D points gives an edge = current relative pose with the second camera
+    moved by median(X_a − X_b) (σ max(3 cm, the offset's own), 0.1°; within and across sources) → pose graph
+    again (chunk edges + priors + these) → repeat until the median split < 5 cm. Log / state line "revisit pass k";
+    History "revisits split a → b m". Synthetic two passes as separate chunks, drifting priors (`test_local_ba.py::
+    test_revisit_edges_join_two_passes`): split 0.67 → 0 in one pass, camera spread 0.34 → 0.048 (a global BA with
+    those tight priors stays at 0.34). fullrun_test (no real revisits): final error unchanged. Not yet validated on
+    dira2k / kladno_dira.
 - **Splat on dira2k, still open** (held-out PSNR / LPIPS, ×2, default densification): 4000 steps (camera optimizer
   off): no drift 15.3 / 0.97, chunked + drift 16.5 / 0.92, global + drift 17.0 / 0.86; renders now line up with
   the photos. But longer plan runs get **worse**: 12000 steps 14.9 (chunked and global alike), 36000 steps 12.9;
@@ -1347,10 +1360,35 @@ helped little):
   (cropped to its cell) through `splat/live_tiles.npz` and an identity transform. Progress "tile k / n: training
   step …"; report.json `splat.tiles`, `per_tile`.
 - `tiles/` is an intermediate (Clean), archived on re-extraction.
-- Not done: seam fine-tune, visibility pruning of floaters, per-tile splat mesh / semantic (they run on the merged
-  splat), level of detail for very large merged splats.
+- **Set up tiles / Train tiles** (the user asked, 2026-10-21; Splat tab, CLI `--setup-tiles`, `--tile K`):
+  `splat_tiles.setup` = partition + every tile's dataset, all pending, nothing trained (replaces tiles/; the GUI asks
+  when trained tiles would go). A run reuses the set-up while Photos per tile and transforms.json are the same
+  (`current`: tiles.json `transforms_mtime`), else sets up again. "Train tiles" all / tile k: `run(only=k)` trains
+  that tile from scratch in one go with the tab's current settings (its own plan); the others keep theirs; its last
+  clean_enu.ply stays in the merge until replaced (merge = every tile with a clean_enu.ply). tiles.json `only`
+  (Resume trains just that one), `merged` (tiles, counts, size + mtime of the merged file; `merged_tiles`).
+- **Semantic features per tile** (the user asked): when splat/splat_enu.ply is the tiles' merge (`merged_tiles`;
+  for runs before the record: the cleans add up to it and are not newer), `semantic.run` computes one PCA basis
+  over the project's photos (`splat/semantic/pca.npz`, the worker's `pca_out`), then per tile its whole splat
+  rendered from the tile's photos for the occlusion test, features kept for its cleaned part (`keep`, `pca_in`) →
+  `tiles/tile_KK/semantic/` with a key (clean_enu size + mtime, PCA), concatenated in merge order. A retrained tile
+  alone is recomputed. The full-splat run on kladno_dira (3.7M Gaussians, 2883 photos) itself worked: 17 min.
+- **Quality of the 30k-step tiles on kladno_dira** (2026-10-21, `build/tile_exp.py`: tile 3, 828 photos, 24 held-out
+  extracted frames between its keyframes looking into its cell, PnP-located): the merged tiles looked soft. Tile 3
+  as trained (30k steps in rounds, ×2): PSNR 16.5 / LPIPS 0.66 at 1920 px (karlak: 23 / 0.30). Renders line up
+  with the photos but surfaces are needle-like Gaussians. Not the photo count (keyframe overlap worst 5 % / median
+  0.21 / 0.33, more than karlak's 0.12 / 0.26), but the site was flown ~3× higher (GSD 1.7 vs 0.6 cm). 53k steps
+  (64 per photo) ×2: 16.3 / 0.61 (2.2M Gaussians): steps alone barely help; split gradient 0.0005 + scale
+  regularization ×2 at 30k: 4.3M Gaussians, 15.9 / 0.647 (band 0; variant 1 at 30k: 16.0 / 0.684). **Cause: the
+  SfM**, not the splat: tile 3 scores 17.3 dB on its own *training* views, and revisits are offset (pairs > 60 s
+  apart: split median 0.39 m, p90 1.57 m, 51 % merged; < 60 s: 0.09 m) because 2883 photos refined chunked and the
+  drift passes stopped at 0.47 m (`build/split_check2.py MODEL PROJECT`). Fix to try: refine with BA mode global
+  (dira2k: 0.05 / 0.15 m). The experiments were stopped (workspace `build/dira_t3_exp`).
+- Not done: seam fine-tune, visibility pruning of floaters, per-tile splat mesh (it runs on the merged splat), level
+  of detail for very large merged splats.
 - Tests: `tests/test_splat_tiles.py` (partition on a synthetic grid, clean, plan switch, a tiled run with the fake
-  trainer: Stop in tile 2 → merged partial → Resume → every Gaussian of the scene box in exactly one tile).
+  trainer: Stop in tile 2 → merged partial → Resume → every Gaussian of the scene box in exactly one tile; set-up +
+  one tile; semantic per tile with a stub worker), `test_gui_dense.py::test_set_up_tiles`.
 
 **Mesh from the splat** (`modelforge/splat_mesh.py`, right panel "Splat mesh" tab, or
 `python -m modelforge.splat_mesh PROJECT [--quality coarse|medium|fine] [--width 960] [--voxel M] [--max-depth M]`):
@@ -1478,6 +1516,7 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   the GUI starts (~13 s; "text model: ready" in the tab); a search meanwhile waits for it. Opening a project
   with ready features also loads them and the splat positions in the background (`_warm`), so the first
   search takes ~0.4 s instead of ~6 s. Not done in `App()` itself: tests create apps.
+- Tiled splats: features per tile, merged (see "Splat tiles").
 - Not yet: tiling above 2048 px, distillation (option B).
 - Tests: `tests/test_semantic.py` (scoring, staleness, the panel's decoration; synthetic features).
 

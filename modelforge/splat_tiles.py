@@ -26,6 +26,10 @@ are in the project's ENU frame (one global SfM), so they join by concatenation (
              no shared side by more than the margin. Outer tiles keep their view away from the scene (distant
              terrain, horizon); FAR x the scene's size beyond it drops absurd outliers. No height cut.
   merge      the cleaned tiles concatenated -> PROJECT/splat/splat_enu.ply, as an untiled run writes it.
+  setup      partition + the tiles' datasets alone (tiles.json, all pending), before any training; a run reuses
+             them while the photos per tile and the cameras are the same. `only`: one tile trains again from
+             scratch with new settings, the others keep their splats, all are merged (semantic features then
+             recompute that tile only: modelforge/semantic.py).
 
 Progress, Stop / Pause / Resume: per tile, through splat.run; PROJECT/tiles/tiles.json records the cells and the
 finished tiles, PROJECT/splat/resume.json ({"tiles": true, ...}) continues with the stopped tile, then the rest.
@@ -265,9 +269,11 @@ def _write(v, path):
 
 
 def merge(project, state):
-    """Concatenate the cleaned tiles (done, a round's or partial) -> PROJECT/splat/splat_enu.ply. Returns its count."""
-    parts = [_read(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply"))
-             for k, t in enumerate(state["tiles"]) if t.get("status") in ("done", "partial", "round")]
+    """Concatenate the tiles' cleaned splats -> PROJECT/splat/splat_enu.ply (a tile training again keeps its last
+    one until replaced). Records them in state["merged"] (and tiles.json). Returns the count."""
+    have = [k for k in range(len(state["tiles"])) if os.path.exists(os.path.join(tile_dir(project, k), "splat",
+                                                                                   "clean_enu.ply"))]
+    parts = [_read(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")) for k in have]
     if not parts:
         return 0
     names = parts[0].dtype.names
@@ -275,8 +281,32 @@ def merge(project, state):
         raise RuntimeError("the tiles' splats have different fields (SH degree?); they cannot be merged")
     v = np.concatenate([p.astype(parts[0].dtype) for p in parts])
     os.makedirs(os.path.join(project, "splat"), exist_ok=True)
-    _write(v, os.path.join(project, "splat", "splat_enu.ply"))
+    path = os.path.join(project, "splat", "splat_enu.ply")
+    _write(v, path)
+    st = os.stat(path)
+    state["merged"] = {"tiles": have, "counts": [len(p) for p in parts], "size": st.st_size,
+                       "mtime_ns": st.st_mtime_ns}
+    json.dump(state, open(os.path.join(project, STATE), "w"), indent=1)
     return len(v)
+
+
+def merged_tiles(project):
+    """The tiles (indices, in merge order) splat/splat_enu.ply is the merge of, or None (not a tiled splat, or
+    changed since). Runs before the merge record: the cleaned tiles add up to it and are not newer."""
+    state = load(project)
+    path = os.path.join(project, "splat", "splat_enu.ply")
+    if state is None or not os.path.exists(path):
+        return None
+    st = os.stat(path)
+    m = state.get("merged")
+    if m:
+        return m["tiles"] if (m["size"], m["mtime_ns"]) == (st.st_size, st.st_mtime_ns) else None
+    cleans = [(k, os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")) for k in range(len(state["tiles"]))]
+    cleans = [(k, c) for k, c in cleans if os.path.exists(c)]
+    if cleans and all(os.path.getmtime(c) <= st.st_mtime for _, c in cleans) and \
+            sum(splat_plan.ply_count(c) for _, c in cleans) == splat_plan.ply_count(path):
+        return [k for k, _ in cleans]
+    return None
 
 
 def _band0(v):
@@ -303,14 +333,65 @@ def _write_live(project, parts, step):
     return path, ident
 
 
+def setup(project, photos=PHOTOS_PER_TILE, on_line=print):
+    """Divide the scene into tiles and write each tile's dataset (cameras, cropped points; links to the photos):
+    tiles.json with every tile pending, nothing trained. Replaces an earlier set-up and its trained tiles (tiles/
+    is removed); the merged splat/splat_enu.ply stays until a run merges again."""
+    import shutil
+    tiles, box = partition(project, photos)
+    shutil.rmtree(os.path.join(project, DIR), ignore_errors=True)
+    rf = os.path.join(project, splat.RESUME)
+    if os.path.exists(rf) and json.load(open(rf)).get("tiles"):  # its tile is gone
+        splat._remove(rf)
+    state = {"photos": int(photos), "box": box,
+             "transforms_mtime": os.path.getmtime(os.path.join(project, "transforms.json")),
+             "tiles": [dict(t, cell=_json_cell(t["cell"]), status="pending", step=0) for t in tiles]}
+    for k, t in enumerate(state["tiles"]):
+        t["points"] = write_tile(project, k, t)[1]
+    os.makedirs(os.path.join(project, DIR), exist_ok=True)
+    json.dump(state, open(os.path.join(project, STATE), "w"), indent=1)
+    on_line(f"splat: {len(tiles)} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
+            f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
+            f"+ views from the neighbours)")
+    return state
+
+
+def load(project):
+    """tiles.json, or None."""
+    try:
+        return json.load(open(os.path.join(project, STATE)))
+    except (OSError, ValueError):
+        return None
+
+
+def current(project, state):
+    """Whether a set-up (tiles.json) still fits the project's cameras (transforms.json unchanged since)."""
+    t = os.path.join(project, "transforms.json")
+    return state is not None and os.path.exists(t) and (
+        "transforms_mtime" not in state or abs(os.path.getmtime(t) - state["transforms_mtime"]) < 1e-3)
+
+
+def _reset(project, k, tile):
+    """Tile k trains again from scratch; its cleaned splat stays in the merge until the new one replaces it."""
+    import shutil
+    tdir = tile_dir(project, k)
+    shutil.rmtree(os.path.join(tdir, "nerfstudio"), ignore_errors=True)
+    splat._remove(os.path.join(tdir, splat.RESUME))
+    for key in ("schedule", "iterations", "gaussians", "train_seconds"):
+        tile.pop(key, None)
+    tile.update(status="pending", step=0)
+
+
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
-        lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS):
+        lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
     round_steps: every tile advances this many steps per round, from its checkpoint (step, optimizer and schedules
-    carry on as in one run), and the tiles are merged after each round; 0 = one tile after the other."""
+    carry on as in one run), and the tiles are merged after each round; 0 = one tile after the other.
+    The tiles of `setup` are used when they fit (same photos per tile, same cameras), else it runs first.
+    only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     job = job or jobs.Token()
@@ -324,39 +405,48 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
         down = plan_args.get("downscale")
         down = splat_plan.auto_downscale(json.load(open(os.path.join(project, "transforms.json")))["w"]) \
             if down in (None, 0, "", "auto") else int(down)
-        tiles, box = partition(project, photos)
-        state = {"method": method, "plan_args": dict(plan_args, downscale=down), "extra": list(extra),
-                 "cache": cache, "lidar_depth": lidar_depth, "photos": photos, "box": box,
-                 "round_steps": int(round_steps or 0),
-                 "tiles": [dict(t, cell=_json_cell(t["cell"])) for t in tiles]}
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        state = load(project)
+        fits = current(project, state)
+        if only is not None:
+            if not fits:
+                raise RuntimeError("set up the tiles first (Splat tab → Set up tiles): "
+                                   + ("none yet" if state is None else "the cameras changed since"))
+            if not 0 <= only < len(state["tiles"]):
+                raise RuntimeError(f"there is no tile {only + 1} (tiles 1–{len(state['tiles'])})")
+        elif not fits or state.get("photos") != int(photos):
+            state = setup(project, photos, on_line)
+        targets = range(len(state["tiles"])) if only is None else [only]
+        for k in targets:
+            _reset(project, k, state["tiles"][k])
+        state.update(method=method, plan_args=dict(plan_args, downscale=down), extra=list(extra), cache=cache,
+                     lidar_depth=lidar_depth, round_steps=0 if only is not None else int(round_steps or 0),
+                     only=only, round=1)
         json.dump(state, open(state_path, "w"), indent=1)
-        on_line(f"splat: {len(tiles)} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
-                f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
-                f"+ views from the neighbours)")
+        if only is not None:
+            on_line(f"splat: training tile {only + 1} of {len(state['tiles'])} only; the others keep their splats")
     method, extra, lidar_depth = state["method"], tuple(state["extra"]), state["lidar_depth"]
     plan_args, box, round_steps = state["plan_args"], state["box"], int(state.get("round_steps") or 0)
     down = int(plan_args["downscale"])
     splat.prepare_downscaled(project, down, on_line, job=job, on_count=on_prepare)
     n = len(state["tiles"])
+    targets = list(range(n)) if state.get("only") is None else [state["only"]]
     done_parts = {}  # tile -> band-0 arrays of its cleaned splat, for the live preview
 
     def save_state():
         json.dump(state, open(state_path, "w"), indent=1)
 
-    for k, tile in enumerate(state["tiles"]):  # every tile's dataset and plan first: the total of steps
-        if "schedule" not in tile:
+    for k, tile in enumerate(state["tiles"]):  # the trained tiles' datasets and plans first: the total of steps
+        if k in targets and "schedule" not in tile:
             if tile.get("status") in (None, "pending", "training"):  # a trained tile's dataset stays as it was
                 tile["points"] = write_tile(project, k, tile, down)[1]
             tile["schedule"] = splat_plan.suggest(splat_plan.survey(tile_dir(project, k)), **plan_args, tiles="off")
             tile["iterations"] = tile["schedule"]["iterations"]
         tile.setdefault("step", 0)
-        if tile.get("status") in ("round", "done", "partial") and on_snapshot and \
-                os.path.exists(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")):
+        if on_snapshot and os.path.exists(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")):
             done_parts[k] = _band0(_read(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")))
     save_state()
-    total_steps = sum(t["iterations"] for t in state["tiles"])
-    longest = max(t["iterations"] for t in state["tiles"])
+    total_steps = sum(state["tiles"][k]["iterations"] for k in targets)
+    longest = max(state["tiles"][k]["iterations"] for k in targets)
     rounds = math.ceil(longest / round_steps) if round_steps else 1
 
     def live_wrapper(k, tile):
@@ -397,7 +487,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                 + (f" (resuming at step {info['step']:,})" if info else ""))
         if on_tile:
             on_tile(k, n, target, label)
-        before = sum(t["step"] for j, t in enumerate(state["tiles"]) if j != k)
+        before = sum(state["tiles"][j]["step"] for j in targets if j != k)
 
         def progress(step, pct):
             if on_progress:
@@ -443,17 +533,18 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                                        "merged into splat/splat_enu.ply, and Resume continues") from None
 
     rnd = int(state.get("round") or 1)
-    while any(t.get("status") != "done" for t in state["tiles"]):
+    while any(state["tiles"][k].get("status") != "done" for k in targets):
         state["round"] = rnd
         save_state()
-        for k, tile in enumerate(state["tiles"]):
+        for k in targets:
+            tile = state["tiles"][k]
             if tile.get("status") != "done" and tile["step"] < min(tile["iterations"], rnd * round_steps or
                                                                    tile["iterations"]):
                 train(k, tile, rnd)
         if rnd >= rounds:
             break
         total = merge(project, state)
-        on_line(f"splat: round {rnd} / {rounds}: all {n} tiles at step {min(rnd * round_steps, longest):,}, merged into "
+        on_line(f"splat: round {rnd} / {rounds}: all {len(targets)} tiles at step {min(rnd * round_steps, longest):,}, merged into "
                 f"splat/splat_enu.ply ({total:,} gaussians)")
         rnd += 1
     on_line("splat: merging the tiles")

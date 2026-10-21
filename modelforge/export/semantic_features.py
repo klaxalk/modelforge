@@ -21,6 +21,11 @@ dims (PCA dimensions kept), pca_images, depth_div (depth render = input / depth_
    (bilinear) and add it, weighted by opacity, to the Gaussian's running sum. Streams: no feature maps
    are stored.
 
+Tiles (modelforge.semantic on a merged tiled splat): PARAMS pca_out = a path: only step 2 over the photos, saved
+there (mean, basis, explained); pca_in = that path: its basis instead of step 2, so the tiles' features share one
+space. INPUT keep (M,) = indices of the Gaussians to output (a tile renders its whole splat for the occlusion
+test, but keeps only its cleaned part).
+
 OUT_DIR/features.npz: feats (N, dims) float16 = weighted mean reduced feature per Gaussian (0 if never seen),
 weight (N,) float32 (sum of weights; 0 = never seen), pca_mean (D,), pca_basis (D, dims), explained.
 Prints "[semantic] pca i / n", "[semantic] image i / n".
@@ -90,13 +95,6 @@ def main():
     t0 = time.time()
     d = np.load(inp)
     dev = torch.device("cuda")
-    k = d["sh"].shape[1]
-    means = torch.tensor(d["means"], device=dev, dtype=torch.float32)
-    opac = torch.sigmoid(torch.tensor(d["opacities"], device=dev, dtype=torch.float32))
-    g = {"means": means, "quats": torch.tensor(d["quats"], device=dev, dtype=torch.float32),
-         "scales": torch.exp(torch.tensor(d["scales"], device=dev, dtype=torch.float32)), "opacities": opac,
-         "colors": torch.tensor(d["sh"], device=dev, dtype=torch.float32)}
-    sh_degree = int(round(np.sqrt(k))) - 1
     W0, H0 = int(d["width"]), int(d["height"])
     model = load_model(params["version"], params["adaptor"])
     head = DenseHead(params["adaptor"])
@@ -105,30 +103,59 @@ def main():
     H = int(round(H0 * W / W0 / ps)) * ps
     K0 = d["K"].astype(np.float64)
     maps = cv2.initUndistortRectifyMap(K0, d["dist"], None, K0, (W0, H0), cv2.CV_32FC1)
-    sx, sy = W / W0, H / H0
-    viewmats, paths = d["viewmats"], d["paths"]
+    paths = d["paths"]
     n = len(paths)
-    print(f"[semantic] {params['version']} at {W}x{H} ({W // ps}x{H // ps} patches), {n} photos, "
-          f"{len(means):,} gaussians", flush=True)
+    print(f"[semantic] {params['version']} at {W}x{H} ({W // ps}x{H // ps} patches), {n} photos"
+          + (f", {len(d['means']):,} gaussians" if "means" in d.files else ""), flush=True)
+    dims = int(params["dims"])
+    if params.get("pca_in"):  # the tiles share one basis
+        p = np.load(params["pca_in"])
+        mean, basis = torch.tensor(p["pca_mean"], device=dev), torch.tensor(p["pca_basis"], device=dev)
+        explained = float(p["explained"])
+    else:
+        mean, basis, explained = pca(model, params, head, paths, maps, (W, H), dims, dev)
+    if params.get("pca_out"):
+        np.savez(params["pca_out"], pca_mean=mean.cpu().numpy().astype(np.float32),
+                 pca_basis=basis.cpu().numpy().astype(np.float32), explained=np.float32(explained))
+        print(f"[semantic] done: PCA basis written to {params['pca_out']}", flush=True)
+        return
+    k = d["sh"].shape[1]
+    means = torch.tensor(d["means"], device=dev, dtype=torch.float32)
+    opac = torch.sigmoid(torch.tensor(d["opacities"], device=dev, dtype=torch.float32))
+    g = {"means": means, "quats": torch.tensor(d["quats"], device=dev, dtype=torch.float32),
+         "scales": torch.exp(torch.tensor(d["scales"], device=dev, dtype=torch.float32)), "opacities": opac,
+         "colors": torch.tensor(d["sh"], device=dev, dtype=torch.float32)}
+    sh_degree = int(round(np.sqrt(k))) - 1
+    back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, maps, (W, H), K0, out_dir, t0)
 
-    # 2. PCA basis from a sample of patches
+
+def pca(model, params, head, paths, maps, size, dims, dev):
+    """2. PCA basis (mean, basis (D, dims), explained share) from a sample of patches."""
+    n = len(paths)
     pick = np.unique(np.linspace(0, n - 1, min(n, int(params["pca_images"]))).round().astype(int))
     sample, rng = [], np.random.default_rng(0)
     for j, i in enumerate(pick):
-        f = features(model, params["adaptor"], photo(paths[i], maps, (W, H)), head)
+        f = features(model, params["adaptor"], photo(paths[i], maps, size), head)
         f = f.reshape(-1, f.shape[-1])
         sample.append(f[torch.from_numpy(rng.choice(len(f), min(len(f), 4000), replace=False)).to(dev)])
         print(f"[semantic] pca {j + 1} / {len(pick)}", flush=True)
     sample = torch.cat(sample)
     mean = sample.mean(0)
     _, s, vt = torch.linalg.svd(sample - mean, full_matrices=False)
-    dims = int(params["dims"])
     basis = vt[:dims].T.contiguous()  # (D, dims)
     explained = float((s[:dims] ** 2).sum() / (s ** 2).sum())
     print(f"[semantic] PCA: {dims} of {sample.shape[1]} dims keep {100 * explained:.1f} % of the variance", flush=True)
-    del sample
+    return mean, basis, explained
 
-    # 3. back-projection with an occlusion test against the rendered depth
+
+def back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, maps, size, K0, out_dir, t0):
+    """3. back-projection with an occlusion test against the rendered depth -> OUT_DIR/features.npz, stats.json."""
+    W, H = size
+    W0, H0 = int(d["width"]), int(d["height"])
+    sx, sy = W / W0, H / H0
+    dev, means, dims = g["means"].device, g["means"], basis.shape[1]
+    viewmats, paths = d["viewmats"], d["paths"]
+    n = len(paths)
     acc = torch.zeros((len(means), dims), device=dev)
     wsum = torch.zeros(len(means), device=dev)
     dd = int(params["depth_div"])
@@ -163,6 +190,9 @@ def main():
             acc.index_add_(0, idx, samp * w[:, None])
             wsum.index_add_(0, idx, w)
         print(f"[semantic] image {i + 1} / {n}: {len(idx):,} gaussians seen", flush=True)
+    if "keep" in d.files:  # a tile: only its cleaned part
+        keep = torch.tensor(d["keep"], device=dev, dtype=torch.long)
+        acc, wsum = acc[keep], wsum[keep]
     seen = wsum > 0
     feats = torch.where(seen[:, None], acc / wsum.clamp(min=1e-12)[:, None], torch.zeros_like(acc))
     os.makedirs(out_dir, exist_ok=True)
@@ -172,7 +202,7 @@ def main():
              explained=np.float32(explained))
     os.replace(tmp, os.path.join(out_dir, "features.npz"))
     stats = {"version": params["version"], "adaptor": params["adaptor"], "width": W, "height": H, "dims": dims,
-             "explained": round(explained, 4), "photos": n, "gaussians": int(len(means)),
+             "explained": round(explained, 4), "photos": n, "gaussians": int(len(wsum)),
              "seen": int(seen.sum()), "seconds": round(time.time() - t0, 1)}
     json.dump(stats, open(os.path.join(out_dir, "stats.json"), "w"), indent=1)
     print(f"[semantic] done: {stats}", flush=True)

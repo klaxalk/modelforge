@@ -60,6 +60,9 @@ STAGE_HINTS = {
                "selection in Images used.",
     "splat-resume": "Continue the paused or stopped splat training from its last checkpoint, with its own "
                     "settings (method, steps, schedule): optimizer state and learning-rate schedules carry on.",
+    "splat-tiles": "Divide the scene into tiles for a tiled splat (Photos per tile) and write each tile's dataset, "
+                   "without training: View → Tile boundaries shows them, Train tiles picks one. Replaces earlier "
+                   "tiles and their training. Seconds to a minute.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → splat → splat mesh (→ COLMAP dense if ticked in the Dense tab).",
@@ -79,6 +82,7 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
+    "splat-tiles": "View tab → **Tile boundaries**; Splat tab → Train tiles: all or one, then **Train + export splat**",
 }
 LOG_LINES = 200
 
@@ -477,6 +481,15 @@ class App:
                      "(the same schedule as training it in one go), and the tiles are merged after each round, so "
                      "the whole scene improves evenly. Each round costs ~1.5–2 min per tile (restart, photo "
                      "loading, export): larger = less overhead. 0 = one tile after the other.")
+            self.g_splat_train_tiles = gui.add_dropdown(
+                "Train tiles", options=("all",), initial_value="all",
+                hint="all: every tile (in rounds, as above). tile k: only that tile, from scratch and in one go with "
+                     "the tab's current settings; the other tiles keep their splats and everything is merged again "
+                     "(its previous splat stays in the merge until the new one is done). Needs the tiles set up "
+                     "(Set up tiles, or an earlier tiled run of these cameras).")
+            b = gui.add_button("Set up tiles", icon=viser.Icon.LAYOUT_GRID, hint=STAGE_HINTS["splat-tiles"])
+            b.on_click(lambda ev: self._setup_tiles_clicked(ev.client))
+            self.g_buttons["splat-tiles"] = b
             self.g_splat_plan = gui.add_markdown("")
             self.g_splat_tile_photos.on_update(lambda _: self._draw_tiles())
             for g in (self.g_splat_method, self.g_splat_iters, self.g_splat_down, self.g_splat_strategy,
@@ -1151,7 +1164,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic"):
+            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles"):
                 seq = (stage,)
             else:
                 seq = pipeline.DENSE_STAGES if stage == "dense" else (stage,)
@@ -1201,12 +1214,19 @@ class App:
                 elif st == "semantic":
                     semantic.run(project, on_line=self._on_log, job=self._token,
                                  on_progress=lambda ph, k, n: self._on_count_progress(
-                                     "semantic", "PCA sample: photo" if ph == "pca" else "photo", k, n))
+                                     "semantic", {"pca": "PCA sample: photo", "image": "photo"}.get(ph, ph), k, n))
                     self.semantic.refresh()
                 elif st == "keyframes":  # the full pipeline with Images used = keyframes
                     n, total = self.subset.apply_keyframes()
                     report, pri = pipeline.Report(project), self.project.priors  # the new image set
                     self._history(f"✅ **keyframes** ({self.subset.g_level.value}) · {n} of {total} images")
+                    continue
+                elif st == "splat-tiles":
+                    state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log)
+                    self._sync_tile_choice()
+                    self._draw_tiles()
+                    self._history(f"✅ **set up tiles** · {len(state['tiles'])} tiles of "
+                                  f"{', '.join(str(len(t['frames'])) for t in state['tiles'])} photos")
                     continue
                 elif st in ("splat", "splat-resume"):
                     self._run_splat(project, resume=st == "splat-resume")
@@ -1662,6 +1682,8 @@ class App:
             plan = self._splat_settings(project)
             iters, down = plan["iterations"], plan["downscale"]
             self._on_log("splat plan: " + "; ".join(plan["notes"]))
+        choice = self.g_splat_train_tiles.value
+        only = None if resume or choice == "all" else int(choice.split()[1]) - 1
 
         self._live_msg = ""
         tile = {"text": ""}
@@ -1711,7 +1733,7 @@ class App:
                           on_snapshot=self._on_splat_snapshot if live else None, on_prepare=prepare)
             if info:
                 splat.resume(project, on_tile=on_tile, **common)
-            elif plan["tiles"]:
+            elif plan["tiles"] or only is not None:
                 splat_tiles.run(project, self.g_splat_method.value,
                                 dict(iterations=int(self.g_splat_iters.value), downscale=self.g_splat_down.value,
                                      strategy=self.g_splat_strategy.value,
@@ -1719,7 +1741,7 @@ class App:
                                      camera_opt=self.g_splat_camopt.value),
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, on_tile=on_tile,
                                 photos=int(self.g_splat_tile_photos.value),
-                                round_steps=int(self.g_splat_rounds.value), **common)
+                                round_steps=int(self.g_splat_rounds.value), only=only, **common)
             else:
                 cache = self.g_splat_cache.value
                 if cache == "auto":
@@ -1842,6 +1864,10 @@ class App:
                 cap = r.get("ba", {}).get("max_iterations")
                 if its and cap:
                     mode += f" · BA iterations {', '.join(map(str, its))} / {cap}"
+                rv = r.get("chunked", {}).get("revisits") or []
+                if rv:  # loop closures: passes over the same ground joined
+                    mode += (f" · revisits split {rv[0]['split_median_m']} → {rv[-1]['split_median_m']} m median "
+                             f"({len(rv)} passes)")
                 drifts = [v["drift"] for k, v in sorted(r.items()) if isinstance(v, dict) and v.get("drift")]
                 drifts += r.get("chunked", {}).get("drift") or []
                 if drifts:  # the last estimate: revisits of a long flight brought together
@@ -1862,8 +1888,9 @@ class App:
                 return f"{r.get('points', r)}"
             if st == "semantic":
                 r = rep["semantic"]
-                return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos ({r['version']}, "
-                        f"{r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
+                return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos"
+                        + (f" in {r['tiles']} tiles" if r.get("tiles") else "")
+                        + f" ({r['version']}, {r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "
@@ -1905,6 +1932,10 @@ class App:
         if phase == "posegraph":
             self._job["detail"] = f"pose graph: {ev['cameras']} cameras, {ev['edges']:,} edges …"
             self.g_progress.value = 86.0
+        elif phase == "revisits":
+            self._job["detail"] = (f"revisit pass {ev['pass'] + 1} (≤ {ev['passes']}): triangulating all images, "
+                                   "joining passes over the same ground …")
+            self.g_progress.value = 86.5
         elif phase == "drift":
             self._job["detail"] = (f"drift pass {ev['pass'] + 1} (≤ {ev['passes']}): triangulating all images and "
                                    "measuring revisits …")
@@ -1975,6 +2006,7 @@ class App:
         self._refresh_splat_plan()
         self._sync_resume()
         self.semantic.refresh()
+        self._sync_tile_choice()
         self._draw_tiles()
 
     # ------------------------------------------------------------- export
@@ -2027,6 +2059,34 @@ class App:
                 self._exporting = False
                 self._refresh_export(msg)
         threading.Thread(target=work, daemon=True).start()
+
+    def _sync_tile_choice(self):
+        """Splat tab → Train tiles: all, or one of the set-up tiles (tiles.json)."""
+        state = splat_tiles.load(self.path) if self.path else None
+        n = len(state["tiles"]) if state and splat_tiles.current(self.path, state) else 0
+        opts = ("all",) + tuple(f"tile {k + 1}" for k in range(n))
+        if tuple(self.g_splat_train_tiles.options) != opts:
+            value = self.g_splat_train_tiles.value
+            self.g_splat_train_tiles.options = opts
+            self.g_splat_train_tiles.value = value if value in opts else "all"
+
+    def _setup_tiles_clicked(self, client):
+        """Set up tiles: asks first when trained tiles would be removed."""
+        if self.running:
+            self.g_state.content += "  \n_busy: wait for the running job to finish_"
+            return
+        state = splat_tiles.load(self.path) if self.path else None
+        trained = [k for k in range(len(state["tiles"]) if state else 0)
+                   if os.path.exists(os.path.join(splat_tiles.tile_dir(self.path, k), "splat", "clean_enu.ply"))]
+        if not trained or client is None:
+            self.run_stage("splat-tiles")
+            return
+        with client.gui.add_modal("Set up tiles again?") as m:
+            client.gui.add_markdown(
+                f"{len(trained)} of {len(state['tiles'])} tiles are trained. Setting up again removes them "
+                "(tiles/); the merged splat/splat_enu.ply stays until the next run merges.")
+            row = client.gui.add_button_group("", options=("Set up", "Cancel"))
+        row.on_click(lambda ev: (m.close(), self.run_stage("splat-tiles") if ev.target.value == "Set up" else None))
 
     def _draw_tiles(self):
         """View → Tile boundaries: a red box per tile cell (the run's tiles.json, else the planned cells). In a

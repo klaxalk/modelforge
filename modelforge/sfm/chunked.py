@@ -13,6 +13,15 @@ pipeline.stage_refine then triangulates all images at the pose-graph poses and p
 one sweep of windows (refine.local_ba without its global pass): the neighbours a window holds fixed
 are consistent now, and the windows see the observations between chunks (revisits included), which
 the chunks themselves do not.
+
+Revisits (loop closures, `revisit_edges`): chunks and chunk edges only relate images close in capture
+order, so two passes over the same ground follow their own (drifting) priors and triangulate as offset
+copies; the windows cannot pull them together either (kladno_dira, 2883 images: passes > 60 s apart split
+0.39 m median, p90 1.57 m, after 3 drift passes). After the pose graph, all images are triangulated, and
+every image pair far apart in capture order whose inlier matches landed on different 3D points gives an
+edge: its current relative pose with the second camera moved by the median offset between the copies
+(X_a - X_b). The pose graph is solved again with these edges, the chunk edges and the priors, and the
+loop repeats until the copies merge (`revisit_done_m`).
 """
 
 import os
@@ -44,6 +53,11 @@ class Chunked:
     min_points: int = 30  # a chunk's camera with fewer points gives no pose-graph edges
     polish_sweeps: int = 1  # window sweeps after the pose graph (0: none)
     polish_window: int = 300
+    revisit_passes: int = 3  # triangulate all + loop-closure edges + pose graph again (0: none)
+    revisit_min_split: int = 20  # split matches an image pair needs for an edge
+    revisit_pos_m: float = 0.03  # edge sigmas: position floor (the offset's own uncertainty when larger), rotation
+    revisit_rot_deg: float = 0.1
+    revisit_done_m: float = 0.05  # stop when the median split of the far pairs is below this
 
 
 def chunks(order, size, overlap):
@@ -123,3 +137,31 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
     return {"cameras": len(params), "edges": len(edges), "abs_priors": n_abs, "iterations": summary.num_successful_steps + summary.num_unsuccessful_steps,
             "initial_cost": summary.initial_cost, "final_cost": summary.final_cost,
             "termination": str(summary.termination_type).split(".")[-1], "seconds": round(time.time() - t0, 1)}
+
+
+def revisit_edges(rec, priors, db_path, cfg):
+    """Loop-closure edges (a, b, i_from_j, cov) between images far apart in capture order (beyond the chunk
+    edges' reach) whose inlier matches triangulated as different 3D points: the current relative pose with
+    camera b moved by median(X_a - X_b), so its copy lands on a's. Also the split statistics of those pairs."""
+    from modelforge.sfm import robust
+    reach = max(cfg.edge_steps)
+    out, split = [], []
+    for same in (True, False):  # within a source and across sources: both are revisits
+        for im1, im2, d, merged in robust._split_pairs(rec, priors, db_path, same_source=same):
+            a, b = im1.name, im2.name
+            if len(d) < cfg.revisit_min_split or a not in priors or b not in priors or \
+                    abs(priors[a].order - priors[b].order) <= reach:
+                continue
+            off = np.median(d, axis=0)
+            spread = 1.4826 * np.median(np.linalg.norm(d - off, axis=1)) / np.sqrt(len(d))
+            split.append(float(np.linalg.norm(off)))
+            pa = np.array(rec.frame(im1.frame_id).rig_from_world.params)
+            pb = np.array(rec.frame(im2.frame_id).rig_from_world.params)
+            moved = pb.copy()
+            moved[4:] = pb[4:] - _rigid(pb).rotation.matrix() @ off  # centre c -> c + off
+            s_pos = max(cfg.revisit_pos_m, float(spread))
+            cov = np.diag([np.radians(cfg.revisit_rot_deg) ** 2] * 3 + [s_pos ** 2] * 3)
+            out.append((a, b, relative(pa, moved), cov))
+    st = {"pairs": len(out), "split_median_m": round(float(np.median(split)), 3) if split else 0.0,
+          "split_p90_m": round(float(np.percentile(split, 90)), 3) if split else 0.0}
+    return out, st

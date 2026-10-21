@@ -342,7 +342,26 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
     stats = {"chunks": per_chunk, "pose_graph": pg, "chunk_size": cfg.size, "overlap": cfg.overlap,
              "rejected_priors": len(rejected)}
     # revisits: the chunks and the pose graph never relate passes over the same ground at different times,
-    # so with a drifting prior they triangulate as offset copies; measure and remove the drift globally
+    # so with a drifting prior they triangulate as offset copies: loop-closure edges from the copies' offsets,
+    # pose graph again, until they merge
+    if cfg.revisit_passes and not (skip is not None and skip.is_set()):
+        stats["revisits"] = []
+        for k in range(cfg.revisit_passes):
+            emit({"phase": "revisits", "pass": k, "passes": cfg.revisit_passes})
+            rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
+            jobs.check(token)
+            loops, rs = chunked.revisit_edges(rec, pri, db_path, cfg)
+            log(f"refine: revisit pass {k + 1}: {rs['pairs']} far image pairs split, median {rs['split_median_m']} m "
+                f"(p90 {rs['split_p90_m']} m)")
+            if not loops or rs["split_median_m"] < cfg.revisit_done_m:
+                stats["revisits"].append(rs)
+                break
+            cur = {name: _pose(rec, i) for name, i in ids.items()}
+            rs["pose_graph"] = chunked.pose_graph(cur, edges + loops, corrected, model, rejected)
+            stats["revisits"].append(rs)
+            for name, i in ids.items():
+                rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(cur[name])
+    # what is left: measure and remove the drift globally
     if model.estimate_drift and not (skip is not None and skip.is_set()):
         stats["drift"] = []
         for k in range(DRIFT_PASSES):

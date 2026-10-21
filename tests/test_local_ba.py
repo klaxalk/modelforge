@@ -218,3 +218,58 @@ def test_refine_shows_iterations_of_the_cap(tmp_path):
         assert re.search(r"BA iterations \d+, \d+, \d+ / 300", app.g_history.content), app.g_history.content
     finally:
         app.server.stop()
+
+
+def test_revisit_edges_join_two_passes(tmp_path):
+    """Two passes over the same scene, solved as separate chunks with drifting priors (0.8 units over the
+    flight): the pose graph alone leaves them as offset copies; loop-closure edges from the copies' offsets
+    join them, rigidly right up to the gauge."""
+    from modelforge.sfm import chunked
+    from modelforge.sfm.priors import PriorSigmas
+    from tests.test_multi_source import make_drift_scene
+
+    def drift(t):
+        return np.array([0.3 * np.sin(t / 119 * np.pi), 0.0, 0.8 * t / 119])
+    db_path, image_path, pri, gt = make_drift_scene(tmp_path, drift)
+    model = robust.PriorModel(abs_sigmas=PriorSigmas(0.05, 0.05, 0.2, 0.2), calibrate=False,
+                              estimate_systematic=False, use_relative=False, estimate_drift=False)
+    cfg = chunked.Chunked(edge_steps=(1, 4))
+    order = sorted(pri, key=lambda n: pri[n].order)
+    rnd = refine.Round(4.0, 1.0, 2.0)
+    init, edges = {}, []
+    for k, names in enumerate((order[:20], order[20:])):  # one chunk per pass: nothing ties them but the priors
+        c = refine.init_from_database(db_path, pri, names=names)
+        c = refine.triangulate(c, db_path, image_path, str(tmp_path / f"chunk_{k}"), rnd)
+        refine.prior_ba(c, pri, model, refine_intrinsics=False)
+        sol = {c.image(i).name: np.array(c.frame(c.image(i).frame_id).rig_from_world.params) for i in c.reg_image_ids()}
+        edges += chunked.chunk_edges(cfg, names, sol)
+        init.update(sol)
+    chunked.pose_graph(init, edges, pri, model)
+    rec = refine.init_from_database(db_path, pri)
+    ids = {rec.image(i).name: i for i in rec.reg_image_ids()}
+
+    def apply():
+        for n, i in ids.items():
+            rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(init[n])
+
+    def spread():  # camera centre errors after removing the common offset (the gauge)
+        pos = np.array([refine.center_of(init[n]) - gt[n] for n in ids])
+        return float(np.median(np.linalg.norm(pos - np.median(pos, 0), axis=1)))
+    apply()
+    before = spread()
+    splits = []
+    for k in range(3):
+        rec = refine.triangulate(rec, db_path, image_path, str(tmp_path / f"all_{k}"), rnd)
+        loops, st = chunked.revisit_edges(rec, pri, db_path, cfg)
+        splits.append(st["split_median_m"])
+        if not loops or st["split_median_m"] < cfg.revisit_done_m:
+            break
+        init = {n: np.array(rec.frame(rec.image(i).frame_id).rig_from_world.params) for n, i in ids.items()}
+        chunked.pose_graph(init, edges + loops, pri, model)
+        apply()
+    after = spread()
+    print("split per pass", splits, "camera spread before", round(before, 3), "after", round(after, 3))
+    assert splits[0] > 0.2 and splits[-1] < cfg.revisit_done_m  # offset copies first, then merged
+    # measured 0.34 -> 0.048 (a global BA with these tight priors stays split here: 0.34); the rest is the drift
+    # within each pass, which its chunk follows
+    assert before > 0.2 and after < 0.2 * before

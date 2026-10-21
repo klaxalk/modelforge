@@ -110,7 +110,7 @@ def test_tiled_run_stop_resume(fake_ns, tmp_path):  # noqa: F811
         splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, on_progress=progress, job=job,
                         cache="disk", photos=16, round_steps=0)
     state = json.load(open(os.path.join(project, splat_tiles.STATE)))
-    assert [t.get("status") for t in state["tiles"]] == ["done", "partial", None, None]
+    assert [t.get("status") for t in state["tiles"]] == ["done", "partial", "pending", "pending"]
     info = splat.resume_info(project)
     assert info and info["tiles"] and info["tile"] == 1 and info["of"] == 4
     partial = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
@@ -166,3 +166,91 @@ def test_rounds(fake_ns, tmp_path):  # noqa: F811
     args_last = json.load(open(os.path.join(bin_dir, "last_args.json")))
     assert "--load-dir" in args_last  # later rounds continue the tile's checkpoint
     assert splat.resume_info(project) is None
+
+
+def _spread_source(tmp_path):
+    """What every fake training exports: 500 Gaussians over the scene (identity frame)."""
+    v, _ = make_splat(np.random.default_rng(1), n=500)
+    v["x"], v["y"] = np.random.default_rng(2).uniform(-250, 250, (2, 500))
+    for i in range(3):
+        v[f"scale_{i}"] = np.log(0.2)
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex")]).write(str(tmp_path / "src.ply"))
+    return v
+
+
+def test_setup_and_one_tile(fake_ns, tmp_path):  # noqa: F811
+    """Set up tiles without training; train all; then one tile alone: the others stay, all are merged again."""
+    project, _ = fake_ns
+    write_scene(project)
+    v = _spread_source(tmp_path)
+    args = dict(iterations=30, downscale=1, camera_opt="off")
+    with pytest.raises(RuntimeError, match="set up the tiles first"):
+        splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, cache="disk", photos=16, only=1)
+    state = splat_tiles.setup(project, 16, on_line=lambda m: None)
+    assert [t["status"] for t in state["tiles"]] == ["pending"] * 4
+    assert all(os.path.exists(os.path.join(splat_tiles.tile_dir(project, k), "transforms.json")) for k in range(4))
+    assert splat_tiles.overlay(project, 99)[1] is False  # the View shows the set-up cells
+
+    trained = []
+    on_tile = lambda k, n, target, label: trained.append(k)  # noqa: E731
+    splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, cache="disk", photos=16, round_steps=0,
+                    on_tile=on_tile)
+    assert trained == [0, 1, 2, 3]
+    assert splat_tiles.merged_tiles(project) == [0, 1, 2, 3]
+    times = [os.path.getmtime(os.path.join(splat_tiles.tile_dir(project, k), "splat", "clean_enu.ply"))
+             for k in range(4)]
+
+    trained[:] = []
+    stats = splat_tiles.run(project, "splatfacto", dict(args, iterations=40), on_line=lambda m: None, cache="disk",
+                            photos=16, on_tile=on_tile, only=2)
+    assert trained == [2]  # in one go, no rounds
+    state = splat_tiles.load(project)
+    assert [t["iterations"] for t in state["tiles"]] == [30, 30, 40, 30]  # its own new settings
+    after = [os.path.getmtime(os.path.join(splat_tiles.tile_dir(project, k), "splat", "clean_enu.ply"))
+             for k in range(4)]
+    assert after[:2] == times[:2] and after[3] == times[3] and after[2] > times[2]
+    assert stats["num_gaussians"] == len(v) and splat_tiles.merged_tiles(project) == [0, 1, 2, 3]
+
+    # the merged splat changes elsewhere: no longer the tiles' merge
+    os.utime(os.path.join(project, "splat", "splat_enu.ply"))
+    assert splat_tiles.merged_tiles(project) is None
+
+
+def test_semantic_per_tile(fake_ns, tmp_path, monkeypatch):  # noqa: F811
+    """Semantic features of a tiled splat: one PCA, per tile from its photos (its cleaned part), merged in the
+    splat's order; a retrained tile alone is recomputed."""
+    from modelforge import semantic
+    project, _ = fake_ns
+    write_scene(project)
+    _spread_source(tmp_path)
+    args = dict(iterations=30, downscale=1, camera_opt="off")
+    splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, cache="disk", photos=16, round_steps=0)
+    calls = []
+
+    def fake_work(job, arrays, out_dir, params, line):  # feature = the Gaussian's x: order checkable
+        os.makedirs(out_dir, exist_ok=True)
+        if params.get("pca_out"):
+            calls.append("pca")
+            np.savez(params["pca_out"], pca_mean=np.zeros(8, "f4"), pca_basis=np.eye(8, 4, dtype="f4"),
+                     explained=np.float32(0.9))
+            return
+        calls.append(out_dir)
+        keep = arrays["keep"]
+        f = np.zeros((len(keep), 4), "f2")
+        f[:, 0] = arrays["means"][keep, 0]
+        np.savez(os.path.join(out_dir, "features.npz"), feats=f, weight=np.ones(len(keep), "f4"))
+        json.dump({"photos": len(arrays["paths"]), "width": 64, "height": 48},
+                  open(os.path.join(out_dir, "stats.json"), "w"))
+    monkeypatch.setattr(semantic, "_work", fake_work)
+    monkeypatch.setattr(semantic, "available", lambda: None)
+    meta = semantic.run(project, on_line=lambda m: None)
+    assert calls[0] == "pca" and len(calls) == 5 and meta["tiles"] == 4
+    merged = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
+    d = np.load(os.path.join(project, semantic.DIR, "features.npz"))
+    assert len(d["feats"]) == len(merged) and np.allclose(d["feats"][:, 0], merged["x"], atol=0.2)  # float16
+    assert semantic.status(project) == "ready"
+
+    splat_tiles.run(project, "splatfacto", args, on_line=lambda m: None, cache="disk", photos=16, only=1)
+    calls[:] = []
+    semantic.run(project, on_line=lambda m: None)
+    assert calls == [splat_tiles.tile_dir(project, 1) + "/semantic"]  # the PCA and the other tiles reused
