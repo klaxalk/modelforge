@@ -213,6 +213,13 @@ class SemanticPanel:
         self._set_objects([])
         self._redraw()
 
+    def clear_for_switch(self):
+        """Another project opens: drop the search, its markers and the loaded features at once (the markers
+        are scene nodes outside the app's layers, so clearing the scene does not remove them)."""
+        self.feats, self.rel, self.means, self.surface, self.query = None, None, None, None, ""
+        self.g_result.content = ""
+        self._set_objects([])
+
     # ------------------------------------------------------------ objects
     def _surface(self):
         """Distances of the Gaussians to the mesh (computed once per splat + mesh, ~10 s; cached on disk)."""

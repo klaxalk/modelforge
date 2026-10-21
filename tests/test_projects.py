@@ -101,6 +101,15 @@ def test_gui_switches_projects(tmp_path):
         assert f"{n} images" in app.g_header.content
 
         import numpy as np
+        app.g_points.value, app.g_cams.value = False, True  # the default view is restored while the scene is empty
+        app.semantic.query = "a car"
+        app.semantic._set_objects([{"center": np.zeros(3), "radius": 1.0, "z0": 0.0, "z1": 1.0, "relevance": 0.7,
+                                    "count": 50}])
+        assert app.semantic._markers
+        app.open_project(real)
+        assert app.snap.name == "refined" and app.g_points.value and not app.g_cams.value
+        assert not app.semantic._markers and not app.semantic.objs  # the old search's markers are gone
+
         app.ingest.g_pv_image.image = np.full((36, 64, 3), 200, np.uint8)  # a frame of the old project
         gen = app.ingest._pv_gen
         app.open_project(os.path.join(root, "fresh"))

@@ -773,6 +773,7 @@ class App:
             self._clear_scene()
             self._default_view()
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
+            self.semantic.clear_for_switch()  # the old project's search markers and results
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self._show_project()
@@ -973,6 +974,8 @@ class App:
     # ------------------------------------------------------------- drawing
     def _draw_points(self):
         s = self.snap
+        if s is None:  # a toggle while the project is still loading (open_project sets the default view first)
+            return
         pts, cols = s.points, s.colors
         if len(pts):
             c = self.project.prior_cams.centers
@@ -989,6 +992,8 @@ class App:
 
     def _draw_cameras(self):
         with self.lock:
+            if self.snap is None:  # a toggle while the project is still loading
+                return
             s, n = self.snap, len(self.project.names)
             colors = self._camera_colors()
             scale = 0.6 * self.g_scale.value
