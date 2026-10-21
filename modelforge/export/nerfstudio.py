@@ -25,8 +25,9 @@ def opencv_params(cam):
     raise ValueError(f"camera model {m} has no OPENCV equivalent for nerfstudio")
 
 
-def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None, lidar=True):
-    """lidar: add the project's coloured LiDAR points (lidar/cloud.ply, kind rosbag) to the initial cloud."""
+def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None, lidar=True, exclude=()):
+    """lidar: add the project's coloured LiDAR points (lidar/cloud.ply, kind rosbag) to the initial cloud.
+    exclude: image names left out of the frames (sfm.isolated)."""
     cams = list(rec.cameras.values())
     if len(cams) != 1:
         raise ValueError(f"expected one shared camera, got {len(cams)}")
@@ -43,6 +44,8 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
     frames = []
     for image_id in sorted(rec.reg_image_ids(), key=lambda i: rec.image(i).name):
         img = rec.image(image_id)
+        if img.name in exclude:
+            continue
         w2c = np.eye(4)
         w2c[:3] = img.cam_from_world().matrix()
         c2w = np.linalg.inv(w2c)

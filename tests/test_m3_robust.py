@@ -154,7 +154,7 @@ def test_settle_rule():
             self.params = np.array([0, 0, 0, 1.0, 0, 0, 0])
 
     class Summary:
-        cost = 1.0
+        cost, iteration, step_is_successful = 1.0, 1, True
 
     poses = [Pose(), Pose()]
     s = refine.Settle(pos_m=0.0005, window=10)
@@ -188,3 +188,21 @@ def test_skip_round_ends_only_the_running_ba():
     assert ba["termination"] == "SKIPPED_ROUND" and ba["iterations"] <= 4 and not ev.is_set()
     ba2 = refine.prior_ba(rec, priors, model, refine_intrinsics=False, skip_round=ev)
     assert ba2["termination"] != "SKIPPED_ROUND" and ba2["iterations"] > 1  # the next round is untouched
+
+
+def test_rejected_steps_do_not_settle():
+    """A run of rejected steps (the cameras do not move) is a stuck solver, not a settled one: only accepted
+    steps count toward the settle window."""
+    import pyceres
+    from types import SimpleNamespace as NS
+    pose = NS(params=np.array([0, 0, 0, 1.0, 0, 0, 0]))
+    s = refine.Settle()
+    prog = refine._Progress(None, [pose], [], s)
+    cont = pyceres.CallbackReturnType.SOLVER_CONTINUE
+    assert prog(NS(cost=1.0, iteration=0, step_is_successful=False)) == cont
+    for k in range(1, 3 * s.window):
+        assert prog(NS(cost=1.0, iteration=k, step_is_successful=False)) == cont
+    assert not prog.settled
+    for k in range(3 * s.window, 4 * s.window + 1):
+        r = prog(NS(cost=1.0, iteration=k, step_is_successful=True))
+    assert prog.settled and r == pyceres.CallbackReturnType.SOLVER_TERMINATE_SUCCESSFULLY

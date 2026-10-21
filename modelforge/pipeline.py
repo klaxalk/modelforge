@@ -35,7 +35,7 @@ from modelforge import dense, jobs
 from modelforge.export import lidar as lidar_mod
 from modelforge.export import nerfstudio
 from modelforge.dji import ingest
-from modelforge.sfm import chunked, features, pairs, priors as priors_mod, reconstruct, refine, robust
+from modelforge.sfm import chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust
 
 SFM_STAGES = ("features", "pairs", "match", "refine", "export")  # DJI: refine from the pose priors
 VIDEO_SFM_STAGES = ("features", "pairs", "match", "reconstruct", "export")  # no metadata: incremental SfM
@@ -258,13 +258,13 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
             out = os.path.join(project, "sparse", f"{prefix}_{i}")
             os.makedirs(out, exist_ok=True)
             rec.write(out)
+        ev = refine.evaluate(rec, pri)  # before the offset / drift shifts move cameras off their points
         offsets = robust.update_source_offsets(model, rec, pri, db_path)
         # not in round 0 (focal length still ~2x off: its split points measure nonsense) and not on the
         # calibration subset (separate blocks: the gaps between them are unconstrained; a chunked refine
         # estimates the drift over all images after the pose graph)
         drift = (robust.update_drift(model, rec, pri, db_path)
                  if write and prefix != "calib" and i >= model.start_round else None)
-        ev = refine.evaluate(rec, pri)
         calib = robust.update(model, rec, pri) if i >= model.start_round else {"model": model.summary(), "skipped": True}
         results[f"{prefix}_{i}"] = {"thresholds": vars(rnd), "after_triangulation": tri, "ba": ba, "after_ba": ev,
                                     "prior_model": calib, "source_offsets": offsets, "drift": drift,
@@ -527,15 +527,49 @@ def stage_reconstruct(project, report, progress=None, token=None, mapper="increm
     return stats
 
 
-def stage_export(project, report, rec=None, lidar=True):
-    """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud."""
+def stage_export(project, report, rec=None, lidar=True, drop_isolated=True):
+    """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud.
+    drop_isolated: leave out photos no other pass ties in whose ground lies off the other passes' (sfm.isolated); the
+    points are then triangulated again from the kept photos alone (poses fixed, as refine's final triangulation,
+    into sparse/export), so the left-out photos neither add points nor pull any into place."""
     if rec is None:
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
     kind = sparse_kind(project)  # a ROS 2 bag of images only: an up-oriented local frame, like a video
     world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
-    path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar)
+    iso = None
+    if drop_isolated and kind != "video":  # metres (the cover distance); a video's frame has no scale
+        t0 = time.time()
+        times = {r["image"]: r.get("time_s") for r in json.load(open(os.path.join(project, "poses.json")))["images"]}
+        iso = isolated.find(rec, times)
+        iso["points_before"] = rec.num_points3D()
+        db_path = os.path.join(project, "database.db")
+        if iso["drop"] and os.path.exists(db_path):
+            log(f"export: triangulating again without the {len(iso['drop'])} photos left out")
+            for name in iso["drop"]:
+                rec.deregister_frame(rec.find_image_with_name(name).frame_id)
+            image_path = os.path.join(project, "images")
+            rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "export"),
+                                     refine.DEFAULT_ROUNDS[-1], refine=True)  # refine's final threshold (4 px)
+            rec.extract_colors_for_all_images(image_path)
+            rec.write(os.path.join(project, "sparse", "export"))  # View: snapshot "export"
+            iso["triangulated"] = True
+        elif iso["drop"]:  # no database (copied model): drop the points only they see
+            isolated.remove(rec, iso["drop"])
+        iso["points"] = rec.num_points3D()
+        iso["points_removed"] = iso["points_before"] - iso["points"]
+        iso["seconds"] = round(time.time() - t0, 1)
+        log(f"export: {len(iso['drop'])} of {iso['photos']} photos left out: weakly tied to other passes and over "
+            f"{isolated.MAX_OFF:.0%} of their ground > {isolated.MAX_DZ} m off the others' ({iso['isolated']} weakly "
+            f"tied); points {iso['points_before']:,} → {iso['points']:,}; stretches (t0, t1, photos, share of cells off) "
+            f"{iso['stretches'][:10]}{' …' if len(iso['stretches']) > 10 else ''}")
+    path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar,
+                             exclude=set(iso["drop"]) if iso else ())
     n_lidar = json.load(open(path)).get("modelforge", {}).get("lidar_points_in_ply", 0)
-    report.set("export", {"transforms": path, "frames": rec.num_reg_images(), "lidar_points": n_lidar})
+    rep = {"transforms": path, "frames": len(json.load(open(path))["frames"]), "lidar_points": n_lidar}
+    if iso:
+        rep["isolated"] = {k: v for k, v in iso.items() if k != "drop"} | {"dropped": len(iso["drop"]),
+                                                                          "names": iso["drop"]}
+    report.set("export", rep)
     log(f"export: {path}")
 
 
@@ -615,6 +649,8 @@ def main():
     ap.add_argument("--no-systematic", action="store_true", help="do not estimate boresight / time offset")
     ap.add_argument("--no-drift", action="store_true",
                     help="do not estimate the position drift over time (revisits of one long flight)")
+    ap.add_argument("--keep-isolated", action="store_true",
+                    help="export every photo, also those no other pass ties in (sfm.isolated)")
     args = ap.parse_args()
     unknown = [s for s in args.stages.split(",") if s not in STAGES and s not in GROUPS]
     if unknown:
@@ -641,7 +677,7 @@ def main():
     if "reconstruct" in stages:
         stage_reconstruct(args.project, report, mapper=args.mapper)
     if "export" in stages:
-        stage_export(args.project, report, rec)
+        stage_export(args.project, report, rec, drop_isolated=not args.keep_isolated)
     methods = dense.MESH_METHODS if args.mesh == "both" else (args.mesh,)
     for stage in DENSE_STAGES:
         if stage in stages:

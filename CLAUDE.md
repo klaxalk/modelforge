@@ -1287,6 +1287,47 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     test_revisit_edges_join_two_passes`): split 0.67 → 0 in one pass, camera spread 0.34 → 0.048 (a global BA with
     those tight priors stays at 0.34). fullrun_test (no real revisits): final error unchanged. Not yet validated on
     dira2k / kladno_dira.
+  - **Loop closures measured on kladno_dira** (2026-10-21, chunked, old pairs): revisit split 1.53 → 0.73 → 0.76 m
+    over 3 passes (p90 3.1 → 2.5 m), drift passes after it 0.74 → 0.51 m; no better than without. Likely cause: the
+    revisit edges go through the same Cauchy (3σ) as the chunk edges, so a 1.5 m split at σ 3 cm (50σ) weighs ~0.4 %
+    (untested), and the chunk edges (5 mm, 0.02°) keep each chunk's drift rigid. Tile 3 retrained on it: no better
+    (held-out 16.3 dB, training views 16.6).
+  - **Global refine on kladno_dira** (2026-10-21, with terrain pairs, stopped after round 1 to diagnose): round 1 BA
+    79 min (158 iterations, 15 CHOLMOD "not positive definite" step failures), point error 1.085 → 0.706 px
+    median, revisits merged (far split 5 cm). Its log said 3.5 px: the after-BA stats were taken after the drift shift
+    had moved the cameras (fixed: `_rounds` evaluates before offsets / drift).
+- **Passes no other pass ties in** (`modelforge/sfm/isolated.py`; the user asked, 2026-10-21): on kladno_dira a
+  crossing at 24-42 m (1586-1613 s, 12-17 m/s) over ground the other passes saw from ~6 m shares no 3D point with
+  any other pass, and only 9-45 points with its neighbours in time; its camera path fits the GPS with scale 0.965
+  (other 20 s segments 0.99-1.02, no trend with speed or altitude), sits 4 m off its priors after rounds 0 and 1
+  (no prior was rejected then: `start_round` 1), and its ground copy lies ~1 m (up to 3.8 m) off the others'.
+  - **SIFT does not bridge it** (`build/hl_match.py`, 24 high/low pairs of the same ground): 8k features 0/24
+    verified, 16k 1-2/24, 32k at 3840 px 2/24; ratio 0.9 gives 24/24 with a uniform ~19 inliers (chance level).
+    Pair selection also misses them: of 1,485 such pairs 35 were in pairs.txt.
+  - **Export leaves them out** (Sparse tab "Export: leave out isolated photos", default on; CLI `--keep-isolated`):
+    a photo with < 2 % of its points also seen > 60 s apart, whose own points lie > 1 m off the other passes'
+    ground in over 20 % of its 1 m cells (per cell and 60 s pass the median height; reference = median over the
+    passes not next to the photo's), is left out of transforms.json, and the points only such photos see out of
+    sparse_pc.ply. Photos over ground no other pass saw stay, and flights without revisits are untouched.
+    report.json `export.isolated`; History "N isolated photos left out".
+    - Per cell, not per photo: a first version used the photo's median height offset (> 0.5 m) and missed the
+      user's ghost in tile 3: those copies are tilted or noisy (dira_48332: median +0.16 m, 63 % of its cells
+      > 1 m off). Per-photo shares of cells > 1 m off: tied photos median 7 % (p90 26 %: steep quarry walls,
+      machines), weakly tied (< 0.5 % linking) 31 %. Linking points alone are too sparse as the reference.
+    - kladno_dira (global refine, round 1 skipped at 75 iterations): 689 weakly tied, 309 dropped (10.7 %),
+      268k of 2.4M points; tile 3's 2 m cells with a pass > 1 m off the others 175 → 52 (the crossing's +1.8 m
+      copy, 77 cells, gone; 30 %: 243 photos, 102 cells). 45 s on 2883 photos. Test: `tests/test_isolated.py`.
+    - **The points are triangulated again without them** (the user asked): their frames are deregistered and
+      `refine.triangulate` (poses fixed, refine's final 4 px threshold, points refined) writes `sparse/export`
+      (a View snapshot "export"), whose points make sparse_pc.ply. Without a database.db only the points the left-out
+      photos alone see are removed. report `export.isolated.points_before / points / triangulated`.
+    - Tile 3 trained on it (global refine + this export, 30k steps ×2, before the re-triangulation): held-out
+      16.89 / 0.269 / 0.653 vs chunked 16.59 / 0.221 / 0.687 (same 15 photos), own training views 18.5 dB (was
+      16.6-17.3).
+- **SfM points as depth targets** (the user asked, 2026-10-21): the Splat tab's depth weight ("Depth weight (LiDAR /
+  SfM points)") is shown for every kind; without LiDAR the lidar-data dataparser takes `ply_file_path`
+  (sparse_pc.ply, per tile its cropped cloud) as the depth points (`splat.depth_source`). Default 0 except ROS 2
+  bags (0.2). CLI `scripts/splat --lidar-depth W`. On karlak (6k steps, MCMC) it was 21.62 vs 22.01 dB without.
 - **Splat on dira2k, still open** (held-out PSNR / LPIPS, ×2, default densification): 4000 steps (camera optimizer
   off): no drift 15.3 / 0.97, chunked + drift 16.5 / 0.92, global + drift 17.0 / 0.86; renders now line up with
   the photos. But longer plan runs get **worse**: 12000 steps 14.9 (chunked and global alike), 36000 steps 12.9;

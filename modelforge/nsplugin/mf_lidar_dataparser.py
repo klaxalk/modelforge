@@ -1,6 +1,7 @@
 """The lidar-data dataparser of splatfacto-lidar (see mf_splatfacto_lidar.py): nerfstudio-data plus the
-LiDAR cloud of transforms.json "lidar_ply_file_path", in nerfstudio's normalized frame as
-metadata["lidar_xyz"]. Imports only the dataparser side of nerfstudio (no circular import)."""
+LiDAR cloud of transforms.json "lidar_ply_file_path" (else the SfM cloud, "ply_file_path": the SfM points as depth
+targets), in nerfstudio's normalized frame as metadata["lidar_xyz"]. Imports only the dataparser side of nerfstudio
+(no circular import)."""
 
 from dataclasses import dataclass, field
 from typing import Type
@@ -27,9 +28,10 @@ class LidarDataParser(Nerfstudio):
         data = self.config.data
         meta = load_from_json(data if data.suffix == ".json" else data / "transforms.json")
         data_dir = data.parent if data.suffix == ".json" else data
-        if "lidar_ply_file_path" in meta:
+        cloud = meta.get("lidar_ply_file_path", meta.get("ply_file_path"))
+        if cloud:
             import open3d as o3d
-            pcd = o3d.io.read_point_cloud(str(data_dir / meta["lidar_ply_file_path"]))
+            pcd = o3d.io.read_point_cloud(str(data_dir / cloud))
             xyz = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
             # world (= transforms.json frame; modelforge writes no applied_transform) -> normalized
             T = out.dataparser_transform.float()

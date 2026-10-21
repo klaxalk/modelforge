@@ -367,6 +367,14 @@ class App:
                 hint="Chunked refine: sweeps of 300-image windows over all images after the pose graph (each window "
                      "adjusted with all its points, the rest held fixed). They also bring in the matches between "
                      "chunks (revisits). 0 = none.")
+            self.g_drop_isolated = gui.add_checkbox(
+                "Export: leave out isolated photos", initial_value=True,
+                hint="Export (transforms.json, sparse_pc.ply, so the splat): leave out photos that share almost no "
+                     "points with other passes (< 2 % of their points seen > 60 s apart) and whose ground lies off the "
+                     "other passes' ground (over 20 % of their 1 m cells more than 1 m off), and the points only they "
+                     "see. Nothing in the images places such a stretch against the rest (e.g. flown 5x higher: SIFT "
+                     "does not match across that), so its copy of the ground lands beside the others' and would be a "
+                     "ghost surface in the splat. Photos over ground no other pass saw stay.")
             self.g_skip = gui.add_button(
                 "Skip refinement", icon=viser.Icon.PLAYER_SKIP_FORWARD, disabled=True,
                 hint="While refine runs: keep the poses as they are now, skip the remaining rounds, and go on "
@@ -502,12 +510,14 @@ class App:
                      "from the images, besides the SfM points, so Gaussians start on the true surfaces even where "
                      "the images lack texture. Re-exports the dataset before training (seconds).")
             self.g_splat_depth = gui.add_number(
-                "LiDAR depth weight", initial_value=splat.DEFAULT_LIDAR_DEPTH, min=0.0, max=10.0, step=0.05,
-                hint="ROS 2 bag projects: weight of the LiDAR depth loss (splatfacto-lidar). Every training step "
-                     "projects the LiDAR points into the training image and penalizes the relative difference "
-                     "between the splat's rendered depth and the LiDAR depth, so Gaussians stay on the measured "
-                     "surfaces, also where the images lack texture. 0 = off (plain splatfacto). The depth error "
-                     "is reported in the log and History.")
+                "Depth weight (LiDAR / SfM points)", initial_value=0.0, min=0.0, max=10.0, step=0.05,
+                hint="Weight of a depth loss (splatfacto-lidar): every training step projects 3D points into the "
+                     "training image (the nearest per pixel; points seen through gaps dropped) and penalizes the "
+                     "relative difference between the splat's rendered depth and theirs, so Gaussians stay on the "
+                     "measured surfaces, also where the images lack texture. The points: the LiDAR cloud in ROS 2 "
+                     "bag projects (default 0.2), else the SfM points of the export (sparse_pc.ply, triangulated "
+                     "without the photos it left out; e.g. 0.2). 0 = off (plain splatfacto). The depth error is "
+                     "reported in the log and History.")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -720,11 +730,11 @@ class App:
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = self.g_skip_round.visible = not video
-        for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish):
+        for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish, self.g_drop_isolated):
             g.visible = not video
         self.g_mapper.visible = video
-        self.g_dense_lidar.visible = self.g_splat_lidar.visible = self.g_splat_depth.visible = \
-            self._kind() == "rosbag"
+        self.g_dense_lidar.visible = self.g_splat_lidar.visible = self._kind() == "rosbag"
+        self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH if self._kind() == "rosbag" else 0.0
         self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
         self.g_sparse_md.content = (
             ("Incremental SfM from the images alone (" + ("ROS 2 bag without camera poses" if self._kind() == "rosbag"
@@ -1220,7 +1230,7 @@ class App:
                     finally:
                         self.g_skip.disabled = self.g_skip_round.disabled = True
                 elif st == "export":
-                    pipeline.stage_export(project, report)
+                    pipeline.stage_export(project, report, drop_isolated=bool(self.g_drop_isolated.value))
                 elif st == "analyze":
                     from modelforge.sfm import overlap
                     if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
@@ -1739,9 +1749,10 @@ class App:
         keep_live = False
         try:
             if self._kind() == "rosbag" and not info:  # the initial cloud with or without the LiDAR points
-                pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value))
+                pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value),
+                                      drop_isolated=bool(self.g_drop_isolated.value))
             weight = float(self.g_splat_depth.value)
-            lidar_depth = weight if self._kind() == "rosbag" and weight > 0 and splat.has_lidar(project) else None
+            lidar_depth = weight if weight > 0 and splat.depth_source(project) else None  # LiDAR, else SfM points
             live = self.g_splat_live.value
             if not live:  # a paused run's preview may still be up
                 self._splat_live_on = False
@@ -1913,7 +1924,13 @@ class App:
                         f"{e.get('median')} px, f = {r['camera']['params'][0]:.0f} px, up from {r['frame']['up']}"
                         + (f", **{len(r['models'])} models** (kept the largest)" if len(r["models"]) > 1 else ""))
             if st == "export":
-                return f"{r['frames']} frames → transforms.json"
+                iso = r.get("isolated") or {}
+                return f"{r['frames']} frames → transforms.json" + (
+                    f" · {iso['dropped']} isolated photos left out (no other pass ties them in; "
+                    f"{len(iso['stretches'])} stretches), points "
+                    + (f"triangulated again without them: {iso['points_before']:,} → {iso['points']:,}"
+                       if iso.get("triangulated") else f"{iso['points_removed']:,} removed")
+                    + ")" if iso.get("dropped") else "")
             if st == "fusion":
                 return f"{r.get('points', r)}"
             if st == "semantic":
@@ -1931,7 +1948,7 @@ class App:
                 return (f"{r['num_gaussians']:,} gaussians, {r['method']} {r['iterations']:,} it"
                         + (f" in {r['tiles']} tiles" if r.get("tiles") else "") + ", "
                         f"training {_fmt_s(r['train_seconds'])}"
-                        + (f", LiDAR depth error median {err['median_pct']:.1f} % / p90 {err['p90_pct']:.1f} %"
+                        + (f", depth error median {err['median_pct']:.1f} % / p90 {err['p90_pct']:.1f} %"
                            if err else ""))
         except (KeyError, TypeError):
             pass

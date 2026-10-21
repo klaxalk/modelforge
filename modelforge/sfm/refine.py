@@ -36,7 +36,7 @@ class Settle:
     """BA is done when, over the last `window` iterations, no camera centre moved more than
     `pos_m`, no camera rotated more than `rot_deg` and no focal length changed more than `focal_px`.
     Displacement is measured across the whole window (not per step), so a slowly creeping camera
-    keeps the solver going. berlin_test (80 images): 834 -> ~125 iterations over 3 rounds, poses
+    keeps the solver going. Only accepted steps count (rejected ones move nothing). berlin_test (80 images): 834 -> ~125 iterations over 3 rounds, poses
     within 0.5 mm / 0.001 deg of running to Ceres' convergence."""
     pos_m: float = 0.0005
     rot_deg: float = 0.001
@@ -153,7 +153,9 @@ class _Progress(pyceres.IterationCallback):
         if self.skip_round is not None and self.skip_round.is_set():  # Skip this round: end this solve only
             return pyceres.CallbackReturnType.SOLVER_TERMINATE_SUCCESSFULLY
         s = self.settle
-        if s and self.poses:
+        # only accepted steps count: a rejected one (e.g. "Matrix not positive definite", Ceres then damps harder)
+        # leaves the cameras where they were, and a run of them is a stuck solver, not a settled one
+        if s and self.poses and (summary.iteration == 0 or summary.step_is_successful):
             self.history = (self.history + [self._state()])[-(s.window + 1):]
             if len(self.history) > s.window:
                 (c0, q0, f0), (c1, q1, f1) = self.history[0], self.history[-1]

@@ -14,9 +14,10 @@ Live preview: with preview_every=N, ns-train saves a checkpoint every N steps; a
 each new one (export/ckpt_dump.py, in nerfstudio's venv) to PROJECT/splat/live.npz and calls
 on_snapshot(step, npz, dataparser_transforms.json). The GUI shows it in the View tab.
 Stats go to report.json["splat"]. The GUI Splat tab and scripts/splat both call `run`.
-LiDAR depth supervision (lidar_depth=weight, projects with lidar/cloud.ply): trains splatfacto-lidar /
-splatfacto-big-lidar from modelforge/nsplugin (registered through nerfstudio's environment variables,
-nothing installed) with the lidar-data dataparser; its "[lidar] ..." depth error lines go to the report.
+Depth supervision (lidar_depth=weight): trains splatfacto-lidar / splatfacto-big-lidar from modelforge/nsplugin
+(registered through nerfstudio's environment variables, nothing installed) with the lidar-data dataparser, against
+the LiDAR points (projects with lidar/cloud.ply) or else the SfM points (sparse_pc.ply); its "[lidar] ..." depth
+error lines go to the report.
 
 Training plan (modelforge/splat_plan.py): iterations, densification strategy (default with a reset
 period scaled to the image count, or MCMC with a Gaussian budget), learning-rate decay length and camera
@@ -144,6 +145,19 @@ def has_lidar(project):
     import json
     path = os.path.join(project, "transforms.json")
     return os.path.exists(path) and "lidar_ply_file_path" in json.load(open(path))
+
+
+def depth_source(project):
+    """What the depth loss (lidar_depth) measures against: "LiDAR" (lidar_ply_file_path), "SfM points" (the
+    dataset's sparse_pc.ply; the lidar-data dataparser falls back to it) or None."""
+    import json
+    path = os.path.join(project, "transforms.json")
+    if not os.path.exists(path):
+        return None
+    t = json.load(open(path))
+    if "lidar_ply_file_path" in t:
+        return "LiDAR"
+    return "SfM points" if os.path.exists(os.path.join(project, t.get("ply_file_path", "sparse_pc.ply"))) else None
 
 
 STRATEGIES = ("default", "mcmc")  # gsplat densification: split/clone/prune, or MCMC with a fixed budget
@@ -344,9 +358,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if ply_count(os.path.join(project, "sparse_pc.ply")) == 0 and not any("random-init" in a for a in extra):
         raise RuntimeError("sparse_pc.ply has no points: SfM found no 3D points to start the splat from (too little "
                            "overlap between the images? see the refine History line; Images used: keep more)")
-    if lidar_depth is not None and not has_lidar(project):
-        raise RuntimeError("LiDAR depth needs LiDAR points (a ROS 2 bag project with point cloud topics); "
-                           "re-run the export stage after extraction")
+    if lidar_depth is not None and depth_source(project) is None:
+        raise RuntimeError("the depth loss needs LiDAR or SfM points (sparse_pc.ply): run the export stage first")
     job = job or Job()
     t0 = time.time()
     lidar_log = []
@@ -532,7 +545,8 @@ def main():
     ap.add_argument("--setup-tiles", action="store_true",
                     help="only divide the scene into tiles (tiles/tiles.json + datasets), without training")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
-                    help=f"LiDAR depth loss weight (ROS 2 bag projects; e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only)")
+                    help=f"depth loss weight (e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only): against the LiDAR points "
+                         "(ROS 2 bags), else the SfM points (sparse_pc.ply)")
     args, extra = ap.parse_known_args()
     project = os.path.abspath(args.project)
     try:
