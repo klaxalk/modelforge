@@ -1476,6 +1476,9 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   never comes from an earlier refine's or export's points. Run SfM (all) and Run full pipeline run export → SfM mesh
   → patch holes; the splat then trains on that export (transforms.json, sparse_pc.ply; tiles set up again when
   transforms.json changed) with the mesh prior ticked when a mesh first appears (a user's untick holds).
+- **View opens on the export model** (the user asked): snapshot **export** whenever `sfm_mesh.model_dir` picks it
+  (not older than refined), else **refined** (`App._main_snapshot`), on start, on opening a project and after
+  refine / export / Run SfM (all) / the full pipeline.
 - **GUI: its own tab "Sparse Mesh"** (right panel, after Sparse; the user asked): **Run all (mesh → patch holes →
   colour)** (stage `sfmmesh-all`; colouring skipped without nerfstudio), **Build mesh**, **Max hole size (m)**,
   **Patch holes**, **Colour from the photos**. With pose priors the hole size starts at the mean distance between

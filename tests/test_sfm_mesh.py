@@ -182,3 +182,28 @@ def test_mesh_uses_the_export_model_only_while_it_is_current(tmp_path):
     assert sfm_mesh.model_dir(str(tmp_path)).endswith("export")  # the export after the refine
     os.utime(ref, (3000, 3000))  # refine ran again since
     assert sfm_mesh.model_dir(str(tmp_path)).endswith("refined")
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "transforms.json")), reason="needs an exported project")
+def test_view_opens_on_the_export_model_while_current(tmp_path):
+    from modelforge.gui.app import App
+    from tests.test_projects import free_port
+    p = tmp_path / "p"
+    (p / "sparse").mkdir(parents=True)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "export")
+    for f in ("poses.json", "transforms.json", "sparse_pc.ply"):
+        shutil.copy(os.path.join(REAL, f), p / f)
+    os.symlink(os.path.abspath(os.path.join(REAL, "images")), p / "images")
+    for f in os.listdir(p / "sparse" / "refined"):
+        os.utime(p / "sparse" / "refined" / f, (1000, 1000))
+    app = App(str(p), port=free_port(), root=str(tmp_path))
+    try:
+        assert app.snap.name == "export"
+        for f in os.listdir(p / "sparse" / "refined"):  # refine ran again since: refined is the current model
+            os.utime(p / "sparse" / "refined" / f, None)
+        os.utime(p / "sparse" / "export" / "points3D.bin", (1000, 1000))
+        app.open_project(str(p))
+        assert app.snap.name == "refined"
+    finally:
+        app.server.stop()

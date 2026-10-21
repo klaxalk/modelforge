@@ -179,7 +179,7 @@ class App:
         self._set_aspect()
         if self.project:
             names = self.project.snapshot_names()
-            self.load_snapshot("refined" if "refined" in names else names[-1])
+            self.load_snapshot(self._main_snapshot(names))
         self._refresh_dense()
         self._set_plan_visible(self.project is None)  # the default view (_default_view): no flight plan
         self.server.on_client_connect(self._on_connect)
@@ -903,7 +903,7 @@ class App:
         else:
             names = tuple(self.project.snapshot_names())
             self.g_snapshot.options = names
-            self.load_snapshot("refined" if "refined" in names else names[-1])
+            self.load_snapshot(self._main_snapshot(names))
         self._refresh_dense()
 
     def _default_view(self):
@@ -1019,9 +1019,22 @@ class App:
             if self.selected is not None:
                 self.select(self.selected)
 
+    def _main_snapshot(self, names):
+        """The snapshot to show first: the export's model (triangulated without the photos it left out) while it
+        belongs to the current refine, as the SfM mesh and the splat use it; else refined; else the last one."""
+        if "export" in names:
+            try:
+                if os.path.basename(sfm_mesh.model_dir(self.path)) == "export":
+                    return "export"
+            except RuntimeError:
+                pass
+        return "refined" if "refined" in names else names[-1]
+
     def refresh_snapshot_list(self, select=None):
         names = tuple(self.project.snapshot_names())
         self.g_snapshot.options = names
+        if select == "main":  # after a run: the model the later stages use
+            select = self._main_snapshot(names)
         if select in names:
             self.g_snapshot.value = select  # triggers load_snapshot
 
@@ -1368,7 +1381,8 @@ class App:
                          "all") or \
                     stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
-            self.refresh_snapshot_list(select="refined" if stage in ("refine", "reconstruct", "sfm", "all") else None)
+            self.refresh_snapshot_list(select="main" if stage in ("refine", "reconstruct", "sfm", "all", "export")
+                                       else None)
             if stage in ("refine", "reconstruct", "sfm"):
                 self._auto_show_sparse()  # nothing else to look at yet
             self._refresh_splat_plan()  # new cameras: new suggestion
