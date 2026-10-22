@@ -299,7 +299,7 @@ class App:
                 for h in (self.g_dense_pts, self.g_mesh, self.g_splat):  # keep the quick bar in step
                     h.on_update(lambda _: self._sync_quickbar())
                 self.g_splat.on_update(lambda _: self._draw_splat())
-            self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="position deviation",
+            self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="time",
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
