@@ -391,6 +391,18 @@ class Project:
             self._thumbs[i] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return self._thumbs[i]
 
+    def photo(self, i, width=640):
+        """Image i at about `width` px, RGB (JPEG decoded at 1/2, 1/4 or 1/8 where that is still wide enough)."""
+        path = os.path.join(self.path, "images", self.names[i])
+        from PIL import Image
+        with Image.open(path) as im:
+            im.draft("RGB", (width, round(width * im.height / im.width)))  # DCT scaling: a 4K photo in ~20 ms
+            img = np.asarray(im.convert("RGB"))
+        h, w = img.shape[:2]
+        if w > width:
+            img = cv2.resize(img, (width, round(h * width / w)), interpolation=cv2.INTER_AREA)
+        return img
+
     def inspect_image(self, snap, i, width=960, residual_gain=10.0):
         """Image with observed keypoints (green), magnified reprojection residuals (red)
         and keypoints without a 3D point (grey)."""

@@ -323,6 +323,8 @@ def test_fly_the_camera_path(app):
     app.g_fly_pos.value = 0.0
     app._fly_scrub(c)  # the slider, while not flying: the view jumps there
     assert np.allclose(c.camera.position, path.centers[0])
+    i = int(path.index[0])  # the Photo window shows the camera the flight is at
+    assert app._photo_shown == i and app.project.names[i] in app.g_photo_md.content
     app.toggle_fly(c)  # and Stop works mid-flight
     time.sleep(0.2)
     app.toggle_fly(c)

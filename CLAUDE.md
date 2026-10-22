@@ -2034,6 +2034,10 @@ Code layout:
       camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
     - The **Position** slider shows progress; dragging it jumps there, also when not flying.
     - Mouse drags pause the flight for 1 s (detected as in Orbit), then it resumes on the path.
+    - **Photo window** (the user asked, 2026-10-22): a floating panel right of the quick bar (`photo_panel`,
+      420 px wide, height from the images' aspect) shows the photo of the camera the flight is nearest to
+      (`FlightPath.pose`'s index), also when the Position slider jumps; decoded at ~630 px with JPEG DCT
+      scaling (`Project.photo`, ~20 ms) only when the camera changes.
     - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,

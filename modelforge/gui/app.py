@@ -115,6 +115,7 @@ COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "t
 SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
 UNITS = {"position deviation": "m", "rotation deviation": "deg", "reprojection error": "px", "time": "s"}
 PRIOR_COLOR = (150, 150, 150)
+PHOTO_PANEL_WIDTH = 420  # px, the Photo window right of the quick bar
 SELECTED_COLOR = (255, 255, 255)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
@@ -737,6 +738,13 @@ class App:
         self.hw_panel = gui.add_panel()
         with self.hw_panel.add_tab("Hardware", viser.Icon.CPU):
             self.hardware = HardwarePanel(self, gui, plot_aspect=0.3)  # the bottom window is low
+        # the photo nearest to the flight's current point (View → Fly), right of the quick bar
+        self.photo_panel = gui.add_panel()
+        with self.photo_panel.add_tab("Photo", viser.Icon.PHOTO):
+            self.g_photo = gui.add_image(np.zeros((9, 16, 3), np.uint8), format="jpeg", jpeg_quality=85)
+            self.g_photo_md = gui.add_markdown("_Fly the camera path (quick bar **Fly**): the photo nearest to the "
+                                               "flight's position shows here_")
+        self._photo_shown = None
         self._place_panels()
 
     def _place_panels(self):
@@ -752,6 +760,22 @@ class App:
         # (the user found one row of 13 too wide, ~1250 px)
         per_row = (len(self._quick_items()) + 1) // 2
         self.quick.float(x=8, y=8, width=24 + 72 * per_row, height=136)
+        self.photo_panel.float(x=16 + 24 + 72 * per_row, y=8, width=PHOTO_PANEL_WIDTH,
+                               height=round(PHOTO_PANEL_WIDTH / self.aspect) + 96)
+
+    def _show_photo(self, i):
+        """Photo window: image i of the project (the camera the flight is nearest to). Decoded only when it
+        changes (a few times a second at most while flying)."""
+        if self.project is None or i is None or i == self._photo_shown or i >= len(self.project.names):
+            return
+        try:
+            self.g_photo.image = self.project.photo(i, width=PHOTO_PANEL_WIDTH * 3 // 2)
+        except (OSError, ValueError):
+            return
+        self._photo_shown = i
+        t = self.project.time[i] if self.project.time is not None and i < len(self.project.time) else None
+        self.g_photo_md.content = f"`{self.project.names[i]}`" + (
+            f" · {t:.1f} s" if t is not None and np.isfinite(t) else "")
 
     # ------------------------------------------------------------- settings
     def _settings_path(self):
@@ -915,6 +939,11 @@ class App:
         self.subset.refresh()
         self._apply_kind()
         self._set_aspect()
+        self.photo_panel.set_height(round(PHOTO_PANEL_WIDTH / self.aspect) + 96)  # portrait videos are taller
+        self._photo_shown = None
+        self.g_photo.image = np.zeros((9, 16, 3), np.uint8)
+        self.g_photo_md.content = ("_Fly the camera path (quick bar **Fly**): the photo nearest to the flight's "
+                                   "position shows here_")
         if self.project is None:
             self.g_snapshot.options = ("priors",)
             self.g_stats.content = self.g_legend.content = ""
@@ -1733,6 +1762,7 @@ class App:
         try:
             _, i = self._fly_set(client, path, t, self._look_distance(path))
             self.g_fly_md.content = f"at {t:.1f} / {path.duration:.1f} m · `{self.project.names[i]}`"
+            self._show_photo(i)
         except Exception:  # the browser went away
             pass
 
@@ -1777,6 +1807,7 @@ class App:
                             self._fly_guard = False
                         self.g_fly_md.content = (f"flying · {t:.1f} / {path.duration:.1f} m · "
                                                  f"`{self.project.names[i]}`")
+                        self._show_photo(i)
                 stop.wait(1.0 / rate_hz)
         except Exception:  # the browser went away
             pass
