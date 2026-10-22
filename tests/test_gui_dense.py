@@ -384,3 +384,33 @@ def test_set_up_tiles(app):
     app._sync_tile_choice()
     assert app.g_splat_train_tiles.options == ("all",) and app.g_splat_train_tiles.value == "all"
     app.g_splat_tile_photos.value = 500
+
+
+def test_pivot_navigation(app):
+    """Ctrl + click: the ray from the camera meets the sparse points (not a stray one in front of them);
+    zooming close to the pivot carries it forward along the view."""
+    pts = app.snap.points[np.all(np.isfinite(app.snap.points), axis=1)]
+    target = np.median(pts, axis=0)
+    origin = target + np.array([0.0, 0.0, 50.0])
+    hit = app.ray_hit(origin, target - origin)
+    assert hit is not None and np.linalg.norm(hit[:2] - target[:2]) < 3.0 and hit[2] < origin[2]
+    app.snap.points = np.vstack([app.snap.points, origin + np.array([0.0, 0.0, -5.0])])  # one stray point
+    try:
+        assert np.linalg.norm(app.ray_hit(origin, target - origin) - hit) < 1e-6  # alone it does not count
+    finally:
+        app.snap.points = app.snap.points[:-1]
+
+    class Camera:
+        position, look_at = (0.0, 0.0, 10.0), (0.0, 0.0, 9.9)
+
+    class Client:
+        client_id, camera = 31, Camera()
+    c = Client()
+    near = max(0.3, 0.01 * app._scene_scale())
+    app.g_pivot_carry.value = True
+    app._carry_pivot(c)
+    assert np.allclose(c.camera.look_at, (0.0, 0.0, 10.0 - 8 * near))  # moved ahead along the view
+    c.camera.look_at = (0.0, 0.0, 9.9)
+    app.g_pivot_carry.value = False
+    app._carry_pivot(c)
+    assert np.allclose(c.camera.look_at, (0.0, 0.0, 9.9))

@@ -2052,6 +2052,12 @@ Code layout:
       420 px wide, height from the images' aspect) shows the photo of the camera the flight is nearest to
       (`FlightPath.pose`'s index), also when the Position slider jumps; decoded at ~630 px with JPEG DCT
       scaling (`Project.photo`, ~20 ms) only when the camera changes.
+    - **Navigation** (the user asked, 2026-10-22: zooming in made moving ever slower): viser orbits a pivot
+      (`look_at`) and its wheel moves a fraction of the distance to it, never past it. **Ctrl + click** sets the pivot
+      to the clicked spot (`App.ray_hit`: the nearest group of >= 3 sparse points within 0.6° of the ray, else the
+      ground; a yellow ball for 2 s); **View → Carry the pivot forward** (default on, `_carry_pivot` on every camera
+      update, not while Orbit / Fly drive it): within 1 % of the scene's size (>= 0.3 m) the pivot moves 8x that far
+      ahead. viser's own keys: W A S D / Q E move at a fixed 2 m/s (its prebuilt client), arrows turn.
     - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,

@@ -192,6 +192,7 @@ class App:
         self._set_plan_visible(self.project is None)  # the default view (_default_view): no flight plan
         self.server.on_client_connect(self._on_connect)
         self.server.on_client_disconnect(self._on_disconnect)
+        self.server.scene.on_click(modifier="cmd/ctrl")(self._pivot_click)  # Ctrl + click: orbit / zoom about there
         threading.Thread(target=self._watch_uploads, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
@@ -297,6 +298,14 @@ class App:
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
+            gui.add_markdown("_Navigation: **Ctrl + click** a spot to orbit and zoom about it; **W A S D** move, "
+                             "**Q E** down / up, **arrow keys** turn (2 m/s, set by viser)._")
+            self.g_pivot_carry = gui.add_checkbox(
+                "Carry the pivot forward", initial_value=True,
+                hint="The mouse wheel zooms towards the point the view orbits about, slower and slower as it gets "
+                     "close, and never past it. On: when the camera comes within 1 % of the scene's size of that "
+                     "point, the point moves further ahead along the view, so zooming keeps going (a slow "
+                     "fly-through). Off: viser's plain behaviour. Ctrl + click sets the point anywhere.")
             gui.add_button("Center the view", icon=viser.Icon.FOCUS_CENTERED,
                            hint="Look at the whole scene (cameras and sparse points) from the south, above it. Use it "
                                 "when the view has wandered off. Also in the quick bar (⌖ Center).").on_click(
@@ -983,6 +992,76 @@ class App:
 
     def _on_connect(self, client):
         self.recenter(client)
+        client.camera.on_update(lambda _: self._carry_pivot(client))
+
+    def _scene_scale(self):
+        """The scene's size (m) for navigation, cached per snapshot."""
+        key = id(self.snap)
+        if getattr(self, "_scale_key", None) != key:
+            f = self._view_frame()
+            self._scale_key, self._scale = key, (f[1] if f else 100.0)
+        return self._scale
+
+    def _carry_pivot(self, client):
+        """Camera moved: if it came close to the point it orbits about (zooming in), move that point ahead along
+        the view so the wheel keeps moving the camera (View → Carry the pivot forward)."""
+        if not self.g_pivot_carry.value or client.client_id in self._flights or client.client_id in self._orbits:
+            return
+        cam = client.camera
+        pos, la = np.array(cam.position, float), np.array(cam.look_at, float)
+        d = float(np.linalg.norm(la - pos))
+        near = max(0.3, 0.01 * self._scene_scale())
+        if 1e-9 < d < near:
+            try:
+                cam.look_at = pos + (la - pos) / d * 8 * near
+            except Exception:  # noqa: BLE001 - the browser went away
+                pass
+
+    def ray_hit(self, origin, direction, cone=0.01):
+        """Where a ray from the camera meets the scene: the nearest group (>= 3) of sparse points within `cone`
+        radians of it (a stray point alone does not count), else the ground (median point height); None."""
+        o, d = np.asarray(origin, float), np.asarray(direction, float)
+        d = d / max(np.linalg.norm(d), 1e-12)
+        pts = self.snap.points if self.snap is not None else np.zeros((0, 3))
+        pts = pts[np.all(np.isfinite(pts), axis=1)] if len(pts) else pts
+        if len(pts):
+            v = pts - o
+            t = v @ d
+            front = t > 1e-6
+            v, t, P = v[front], t[front], pts[front]
+            ang = np.linalg.norm(v - t[:, None] * d, axis=1) / t
+            for c in (cone, 3 * cone):
+                sel = np.flatnonzero(ang < c)
+                if len(sel) >= 3:
+                    ts = np.sort(t[sel])
+                    for i, ti in enumerate(ts[:-2]):
+                        if ts[i + 2] <= ti * 1.03 + 0.5:  # three points within 3 % of each other along the ray
+                            group = sel[(t[sel] >= ti) & (t[sel] <= ts[i + 2])]
+                            return np.median(P[group], axis=0)
+            z = float(np.median(pts[:, 2]))
+        else:
+            z = 0.0
+        if abs(d[2]) > 1e-6 and (z - o[2]) / d[2] > 0:
+            return o + (z - o[2]) / d[2] * d
+        return None
+
+    def _pivot_click(self, ev):
+        """Ctrl + click: the clicked spot becomes the point the view orbits and zooms about (camera stays put)."""
+        hit = self.ray_hit(ev.ray_origin, ev.ray_direction)
+        if hit is None:
+            return
+        try:
+            ev.client.camera.look_at = hit
+        except Exception:  # noqa: BLE001 - the browser went away
+            return
+        r = 0.004 * self._scene_scale()
+        self.server.scene.add_icosphere("/pivot", radius=r, color=(255, 220, 0), position=tuple(float(x) for x in hit))
+        gen = self._pivot_gen = getattr(self, "_pivot_gen", 0) + 1
+
+        def hide():
+            if gen == self._pivot_gen:
+                self.server.scene.remove_by_name("/pivot")
+        threading.Timer(2.0, hide).start()
 
     def _view_frame(self):
         """(centre, extent) of what there is to see: the cameras (or the Ingest flight plan) and the sparse
