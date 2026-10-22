@@ -46,6 +46,72 @@ def depth_cloud(project):
     return os.path.abspath(p) if os.path.exists(p) else None
 
 
+SEED_GAP = 2.5  # mesh seeds only where no SfM point lies within this many spacings
+SEED_CANDIDATES = 4_000_000  # at most this many points sampled on the mesh (a coarser spacing above)
+
+
+def seed_points(mesh, cloud, out, spacing=None, gap=SEED_GAP, on_line=print):
+    """Points on the SfM mesh's surface where the SfM points are thin, as extra starting Gaussians for the splat
+    (Splat tab "Start from the SfM mesh"; the user asked, 2026-10-22: flat single-pass ground stayed empty, as
+    low-texture ground gets few SfM points, few starting Gaussians and weak gradients).
+
+    mesh: sfmmesh/mesh.ply (holes patched if done; its photo colours from mesh_coloured.ply when that exists).
+    cloud: the dataset's sparse_pc.ply (a tile's is cropped): the mesh is cut to its 0.5-99.5 % box (+ 5 m) and
+    a sample is kept only with no point of it within gap x spacing. Samples are spread evenly over the triangles'
+    area at `spacing` (default: the mesh's SfM point spacing, coarser to stay under SEED_CANDIDATES), each with its
+    face normal (the splat starts it flat in the surface) and colour (barycentric). Writes out (x y z, nx ny nz,
+    red green blue); returns the number of seeds."""
+    import cv2
+    import plyfile
+    folder = os.path.dirname(mesh)
+    coloured = os.path.join(folder, "mesh_coloured.ply")
+    v, f = read_mesh(coloured if os.path.exists(coloured) else mesh)
+    V = np.c_[v["x"], v["y"], v["z"]].astype(np.float64)
+    C = np.c_[v["red"], v["green"], v["blue"]].astype(np.float64) if "red" in v.dtype.names else np.full((len(V), 3), 128.0)
+    pc = plyfile.PlyData.read(cloud)["vertex"].data
+    P = np.c_[pc["x"], pc["y"], pc["z"]].astype(np.float64)
+    if spacing is None:
+        try:
+            spacing = float(json.load(open(os.path.join(folder, "stats.json")))["point_spacing"])
+        except (OSError, ValueError, KeyError):
+            spacing = 0.1
+    lo, hi = np.percentile(P[:, :2], 0.5, axis=0) - 5, np.percentile(P[:, :2], 99.5, axis=0) + 5
+    cen = V[f].mean(1)
+    f = f[np.all((cen[:, :2] >= lo) & (cen[:, :2] <= hi), axis=1)]
+    a, b, c = V[f[:, 0]], V[f[:, 1]], V[f[:, 2]]
+    cross = np.cross(b - a, c - a)
+    area = 0.5 * np.linalg.norm(cross, axis=1)
+    spacing = max(spacing, float(np.sqrt(area.sum() / SEED_CANDIDATES)))
+    rng = np.random.default_rng(0)
+    count = np.floor(area / spacing ** 2 + rng.random(len(area))).astype(np.int64)
+    face = np.repeat(np.arange(len(f)), count)
+    r1, r2 = np.sqrt(rng.random(len(face))), rng.random(len(face))
+    w = np.c_[1 - r1, r1 * (1 - r2), r1 * r2]  # uniform on each triangle
+    xyz = w[:, :1] * a[face] + w[:, 1:2] * b[face] + w[:, 2:] * c[face]
+    rgb = w[:, :1] * C[f[face, 0]] + w[:, 1:2] * C[f[face, 1]] + w[:, 2:] * C[f[face, 2]]
+    nrm = cross[face] / np.maximum(np.linalg.norm(cross[face], axis=1, keepdims=True), 1e-12)
+    if len(xyz) and len(P):
+        ctr = P.mean(0)
+        index = cv2.flann_Index((P - ctr).astype(np.float32), dict(algorithm=1, trees=1))
+        # exact (unlimited checks): an approximate nearest point overstates the distance, which seeded
+        # duplicates among the SfM points
+        _, d2 = index.knnSearch((xyz - ctr).astype(np.float32), 1, params=dict(checks=-1))
+        keep = np.sqrt(d2[:, 0]) > gap * spacing
+        xyz, rgb, nrm = xyz[keep], rgb[keep], nrm[keep]
+    vert = np.zeros(len(xyz), [(k, "f4") for k in ("x", "y", "z", "nx", "ny", "nz")] +
+                    [(k, "u1") for k in ("red", "green", "blue")])
+    for i, k in enumerate("xyz"):
+        vert[k], vert["n" + k] = xyz[:, i], nrm[:, i]
+    for i, k in enumerate(("red", "green", "blue")):
+        vert[k] = np.clip(np.round(rgb[:, i]), 0, 255)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    plyfile.PlyData([plyfile.PlyElement.describe(vert, "vertex")], text=False).write(out)
+    on_line(f"splat: {len(vert):,} starting Gaussians from the SfM mesh where the SfM points are thin (spacing "
+            f"{spacing:.2f} m, none within {gap * spacing:.2f} m of the {len(P):,} SfM points; "
+            + ("photo colours)" if os.path.exists(coloured) else "colours of the SfM points)"))
+    return len(vert)
+
+
 def model_dir(project):
     """The export's model (sparse/export: triangulated without the photos it left out) when it belongs to the
     current refine (not older than sparse/refined), else sparse/refined."""

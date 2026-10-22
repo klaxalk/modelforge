@@ -262,3 +262,38 @@ def test_preview_keeps_the_colours(tmp_path):
     src = plyfile.PlyData.read(os.path.join(out, "mesh.ply"))["vertex"].data
     assert "red" in v.dtype.names and v["red"].std() > 5  # colours, not one grey
     assert abs(float(v["green"].mean()) - float(src["green"].mean())) < 15
+
+
+def test_seed_points_fill_where_sfm_points_are_thin(tmp_path):
+    """Mesh seeds: on the surface, only where no SfM point is near, spread at the spacing, normals along the
+    surface's, colours from the mesh."""
+    import plyfile
+    from modelforge import sfm_mesh
+    n = 21  # a 20 x 20 m flat ground at z = 2, two triangles per 1 m cell
+    gx, gy = np.meshgrid(np.arange(n, dtype=float), np.arange(n, dtype=float), indexing="ij")
+    v = np.zeros(n * n, [(c, "f4") for c in "xyz"] + [(c, "u1") for c in ("red", "green", "blue")])
+    v["x"], v["y"], v["z"], v["red"], v["green"], v["blue"] = gx.ravel(), gy.ravel(), 2.0, 200, 100, 50
+    faces = [(i * n + j, (i + 1) * n + j, i * n + j + 1) for i in range(n - 1) for j in range(n - 1)] + \
+        [(i * n + j + 1, (i + 1) * n + j, (i + 1) * n + j + 1) for i in range(n - 1) for j in range(n - 1)]
+    os.makedirs(tmp_path / "sfmmesh")
+    sfm_mesh.write_mesh(str(tmp_path / "sfmmesh" / "mesh.ply"), v, np.array(faces))
+    json.dump({"point_spacing": 0.25}, open(tmp_path / "sfmmesh" / "stats.json", "w"))
+    rng = np.random.default_rng(0)
+    pts = np.c_[rng.uniform(0, 10, 4000), rng.uniform(0, 20, 4000), np.full(4000, 2.0)]  # on the half x < 10 only
+    pc = np.zeros(len(pts), [(c, "f4") for c in "xyz"])
+    pc["x"], pc["y"], pc["z"] = pts.T
+    edge = np.zeros(100, pc.dtype)  # a sparse row along the far edge: the box covers the whole ground
+    edge["x"], edge["y"], edge["z"] = 20.0, np.linspace(0, 20, 100), 2.0
+    pc = np.concatenate([pc, edge])
+    plyfile.PlyData([plyfile.PlyElement.describe(pc, "vertex")]).write(str(tmp_path / "sparse_pc.ply"))
+    out = str(tmp_path / "seeds.ply")
+    lines = []
+    m = sfm_mesh.seed_points(str(tmp_path / "sfmmesh" / "mesh.ply"), str(tmp_path / "sparse_pc.ply"), out,
+                             on_line=lines.append)
+    s = plyfile.PlyData.read(out)["vertex"].data
+    assert m == len(s) and "starting Gaussians" in lines[0]
+    assert s["x"].min() > 10 - 1e-6 + 2.5 * 0.25 - 0.3  # none where the SfM points are (gap 2.5 spacings)
+    free = (20 - 10 - 2 * 2.5 * 0.25) * 20  # between the covered half and the edge row, minus the gaps
+    assert abs(len(s) - free / 0.25 ** 2) < 0.15 * free / 0.25 ** 2  # ~the free area / spacing^2
+    assert np.allclose(np.abs(s["nz"]), 1) and np.allclose(s["z"], 2.0, atol=1e-5)
+    assert (s["red"] == 200).all() and (s["blue"] == 50).all()

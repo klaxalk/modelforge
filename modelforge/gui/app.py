@@ -608,6 +608,12 @@ class App:
                      "every pixel the mesh covers, instead of only its vertices (~1 pixel in 10 on a drone survey). "
                      "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
                      "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
+            self.g_splat_seed = gui.add_checkbox(
+                "Start from the SfM mesh too", initial_value=True,
+                hint="Extra starting Gaussians on the SfM mesh (holes patched) where the SfM points are thin, flat in "
+                     "its surface and coloured from it (from the photos if the Sparse Mesh tab coloured it). Low-texture "
+                     "ground gets few SfM points, so few Gaussians start there and the weak gradients hardly add any: "
+                     "single-pass ground stays empty or soft. Needs the SfM mesh; ignored without one.")
             self.g_splat_flatten = gui.add_number(
                 "Flatten Gaussians (weight)", initial_value=splat.FLATTEN, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's smallest scale relative to its middle one: flat discs on the surface "
@@ -1408,7 +1414,9 @@ class App:
             if stage == "all":
                 seq, skipped = list(sfm), []
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
-                    seq = ["analyze", "keyframes"] + seq
+                    seq = ["analyze", "images"] + seq
+                elif self.subset._images:  # every N-th: applied too when it differs from the images in use
+                    seq = ["images"] + seq
                 if splat.available() is None:
                     seq += ["splat", "splatmesh", "splatmesh-fill"]  # the dense result is the mesh from the splat
                     if self.semantic.g_in_all.value:  # Search tab: a searchable splat at the end
@@ -1488,10 +1496,10 @@ class App:
                                  on_progress=lambda ph, k, n: self._on_count_progress(
                                      "semantic", {"pca": "PCA sample: photo", "image": "photo"}.get(ph, ph), k, n))
                     self.semantic.refresh()
-                elif st == "keyframes":  # the full pipeline with Images used = keyframes
-                    n, total = self.subset.apply_keyframes()
+                elif st == "images":  # the full pipeline applies Images used (keyframes or every N-th) first
+                    n, total, what = self.subset.apply_selection()
                     report, pri = pipeline.Report(project), self.project.priors  # the new image set
-                    self._history(f"✅ **keyframes** ({self.subset.g_level.value}) · {n} of {total} images")
+                    self._history(f"✅ **images used** · {what} · {n} of {total} images")
                     continue
                 elif st == "splat-tiles":
                     state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log,
@@ -2006,6 +2014,7 @@ class App:
                                       drop_isolated=bool(self.g_drop_isolated.value))
             weight = float(self.g_splat_depth.value)
             mesh = sfm_mesh.depth_cloud(project) if self.g_splat_mesh_prior.value else None
+            seed = sfm_mesh.depth_cloud(project) if self.g_splat_seed.value else None
             if mesh and weight <= 0:
                 weight = splat.DEFAULT_LIDAR_DEPTH
                 self._on_log(f"splat: SfM mesh prior with depth weight 0: using {weight}")
@@ -2037,6 +2046,7 @@ class App:
                                      camera_opt=self.g_splat_camopt.value),
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, depth_cloud=mesh,
                                 depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(),
+                                seed_mesh=seed,
                                 on_tile=on_tile,
                                 photos=int(self.g_splat_tile_photos.value), layout=self.g_splat_tile_layout.value,
                                 round_steps=int(self.g_splat_rounds.value), only=only, **common)
@@ -2047,7 +2057,8 @@ class App:
                     self._on_log(f"splat: image cache {cache} ({gb:.1f} GB of decoded photos)")
                 splat.run(project, self.g_splat_method.value, iters, cache=cache,
                           downscale=down, lidar_depth=lidar_depth, schedule=plan, depth_cloud=mesh,
-                          depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(), **common)
+                          depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(),
+                          seed_mesh=seed, **common)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         except splat.Paused:
             keep_live = live  # paused: the last live snapshot stays on screen (the Splat toggle drives it)

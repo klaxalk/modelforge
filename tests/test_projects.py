@@ -284,5 +284,50 @@ def test_gui_subsample(tmp_path):
         assert f"now using {k} of {n}" in s.g_preview.content, s.g_preview.content
         assert len(app.project.names) == k and f"**{k}** of {n}" in s.g_md.content
         assert not os.path.exists(os.path.join(real, "sparse"))  # the old results moved to previous/
+        # Run full pipeline's first step applies the panel's choice: every 2nd now (before, only keyframes were)
+        s.g_every.value = 2
+        used, total, what = s.apply_selection()
+        k2 = len(range(0, n, 2))
+        assert (used, total, what) == (k2, n, "every 2") and len(app.project.names) == k2
+        mtime = os.path.getmtime(os.path.join(real, "poses.json"))
+        assert s.apply_selection()[0] == k2 and os.path.getmtime(os.path.join(real, "poses.json")) == mtime  # no-op
+    finally:
+        app.server.stop()
+
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "images")), reason="needs a project with images "
+                    "(data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
+def test_gui_every_nth_after_keyframes(tmp_path):
+    """A project using keyframes, switched to every N-th in the GUI: the whole flight, not the time-range slider's
+    placeholder of 0-1 s (moric: "now using 1 of 400 images"). One image cannot be applied."""
+    from modelforge.gui.app import App
+    root = str(tmp_path)
+    real = os.path.join(root, "real")
+    shutil.copytree(os.path.join(REAL, "images"), os.path.join(real, "images"))
+    shutil.copy2(os.path.join(REAL, "poses.json"), os.path.join(real, "poses.json"))
+    names = [im["image"] for im in json.load(open(os.path.join(real, "poses.json")))["images"]]
+    projects.apply_subsample(real, names=names[::3], setting={"method": "keyframes", "level": "dense",
+                                                              "min_overlap": 0.2})
+    app = App(real, port=free_port(), root=root)
+    try:
+        s, n = app.subset, len(names)
+        assert s.g_mode.value.startswith("keyframes")
+        s.g_mode.value = "every N-th image"
+        s.g_every.value = 2
+        k2 = len(range(0, n, 2))
+        assert f"→ **{k2}** of {n} images" in s.g_preview.content, s.g_preview.content
+        assert s.g_range.value == (s.g_range.min, s.g_range.max) and not s.g_apply.disabled
+        lo = s.g_range.min
+        s.g_range.value = (lo, lo + 0.01)  # (almost) nothing in range: not applicable
+        assert s.g_apply.disabled
+        # a stored range holding a single image (what the bug applied) opens on the whole flight again
+        t = sorted(im["time_s"] for im in projects.extracted_images(real))
+        projects.apply_subsample(real, every=3, start=t[0], end=t[0] + 0.5 * (t[1] - t[0]))
+        app.load_project()
+        app.refresh_after_images_changed()
+        s.refresh()
+        assert s.g_range.value == (s.g_range.min, s.g_range.max) and s.g_mode.value == "every N-th image"
+        assert f"→ **{len(range(0, n, 3))}** of {n} images" in s.g_preview.content, s.g_preview.content
     finally:
         app.server.stop()

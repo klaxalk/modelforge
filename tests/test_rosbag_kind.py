@@ -310,6 +310,9 @@ def test_splat_lidar_command():
     assert cmd[cmd.index("--pipeline.model.lidar-depth-lambda") + 1] == "0.3" and cmd[-3] == "lidar-data"
     reg = splat.train_command("p", "splatfacto", 100, lidar_depth=0.0, regularize={"flatten": 0.1})
     assert "--pipeline.model.far-mask" not in reg
+    seeded = splat.train_command("p", "splatfacto", 100, lidar_depth=0.0, seed_ply="/x/seeds.ply")
+    assert seeded[seeded.index("--seed-ply") + 1] == "/x/seeds.ply" and seeded.index("--seed-ply") > \
+        seeded.index("lidar-data")  # a dataparser option
     assert reg[reg.index("--pipeline.model.flatten-lambda") + 1] == "0.1"
     assert splat.regularizing({"flatten": 0.1}) and not splat.regularizing({"flatten": 0})
     plain = splat.train_command("p", "splatfacto")
@@ -345,3 +348,6 @@ print("ok")
                        capture_output=True, text=True, timeout=300)
     assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]
     assert "flatten-lambda" in r.stdout
+    r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "lidar-data", "--help"],
+                       env=splat._env(), capture_output=True, text=True, timeout=300)
+    assert "seed-ply" in r.stdout, (r.stdout + r.stderr)[-2000:]

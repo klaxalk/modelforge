@@ -192,7 +192,7 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
-                  depth_maps=None, regularize=None):
+                  depth_maps=None, regularize=None, seed_ply=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
     (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
@@ -200,7 +200,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     makes that work for splatfacto). depth_cloud: the depth loss's points from this ply instead (absolute path;
     the SfM mesh, sfm_mesh.depth_cloud). depth_maps: dense depth targets instead, a folder of per-image maps
     (mesh_depth_maps). regularize: {"flatten": w} for the plugin (see regularizing); needs the -lidar
-    method (lidar_depth 0 = depth loss off)."""
+    method (lidar_depth 0 = depth loss off). seed_ply: extra starting points (sfm_mesh.seed_points), started flat;
+    lidar-data only."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -236,6 +237,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     scale_args = ["--auto-scale-poses", "False", "--scale-factor", f"{float(scale):.8g}"] if scale else []
     depth_args = [] if lidar_depth is None else (["--depth-maps", str(depth_maps)] if depth_maps else
                                                  ["--depth-ply", str(depth_cloud)] if depth_cloud else [])
+    if seed_ply and lidar_depth is not None:
+        depth_args += ["--seed-ply", str(seed_ply)]
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
@@ -371,7 +374,8 @@ def _watch_checkpoints(project, method, t0, on_snapshot, stop, on_line):
 
 def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="disk", downscale=1, preview_every=None, on_snapshot=None, lidar_depth=None, on_prepare=None,
-        schedule=None, pause=None, load_dir=None, stop_at=None, depth_cloud=None, depth_dense=False, regularize=None):
+        schedule=None, pause=None, load_dir=None, stop_at=None, depth_cloud=None, depth_dense=False, regularize=None,
+        seed_mesh=None):
     """Train, export and convert to ENU. Returns stats (also written to report.json["splat"]).
     schedule: densification / learning-rate settings from splat_plan.suggest (or None: splatfacto's).
     Stopping the job (job.cancel) asks the trainer for a checkpoint at the current step first; the run's
@@ -384,7 +388,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     SfM points (sparse_pc.ply), or `depth_cloud` (a ply path: the SfM mesh's vertices) when given; with
     depth_dense the mesh rendered into every training camera instead (mesh_depth_maps, before training).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1).
-    regularize: {"flatten": w}; on without a depth weight trains the -lidar method with the depth loss off (lidar_depth 0)."""
+    regularize: {"flatten": w}; on without a depth weight trains the -lidar method with the depth loss off (lidar_depth 0).
+    seed_mesh: the SfM mesh (sfmmesh/mesh.ply): extra starting Gaussians on it where the SfM points are thin, flat in
+    its surface (sfm_mesh.seed_points -> splat/mesh_seeds.ply; the -lidar method, as above)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     reason = available()
@@ -400,8 +406,10 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         raise RuntimeError(f"depth prior {depth_cloud} missing: run SfM mesh again (Sparse tab)")
     if lidar_depth is not None and not depth_cloud and depth_source(project) is None:
         raise RuntimeError("the depth loss needs LiDAR or SfM points (sparse_pc.ply): run the export stage first")
-    if regularizing(regularize) and lidar_depth is None:
-        lidar_depth = 0.0  # the plugin's model: depth loss off, the regularization on
+    if (regularizing(regularize) or seed_mesh) and lidar_depth is None:
+        lidar_depth = 0.0  # the plugin's model and dataparser: depth loss off, the regularization / seeds on
+    if seed_mesh and not os.path.exists(seed_mesh):
+        raise RuntimeError(f"SfM mesh {seed_mesh} missing: run SfM mesh again (Sparse Mesh tab)")
     job = job or Job()
     t0 = time.time()
     lidar_log = []
@@ -420,7 +428,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
 
     settings = {"method": method, "iterations": iterations, "extra": list(extra), "cache": cache,
                 "downscale": int(downscale), "lidar_depth": lidar_depth, "schedule": schedule,
-                "depth_cloud": depth_cloud, "depth_dense": bool(depth_dense), "regularize": regularize}
+                "depth_cloud": depth_cloud, "depth_dense": bool(depth_dense), "regularize": regularize,
+                "seed_mesh": seed_mesh}
     if load_dir is None:
         _remove(os.path.join(project, RESUME))  # a new run replaces the paused one
     prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
@@ -448,8 +457,16 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     maps = None
     if lidar_depth is not None and depth_cloud and depth_dense:
         maps = mesh_depth_maps(project, depth_cloud, downscale, on_line, job=job, on_count=on_prepare)
+    seeds = None
+    if seed_mesh:
+        from modelforge import sfm_mesh
+        t = json.load(open(os.path.join(project, "transforms.json")))
+        seeds = os.path.join(project, "splat", "mesh_seeds.ply")
+        sfm_mesh.seed_points(seed_mesh, os.path.join(project, t.get("ply_file_path", "sparse_pc.ply")), seeds,
+                             on_line=on_line)
+        seeds = os.path.abspath(seeds)
     cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
-                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize)
+                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 
@@ -505,6 +522,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         stats["resumed_from"] = load_dir
     if regularizing(regularize):
         stats["regularize"] = regularize
+    if seed_mesh:
+        stats["seed_mesh"] = seed_mesh
     if schedule:
         stats["schedule"] = {k: schedule.get(k) for k in ("strategy", "max_gaussians", "stop_split_at",
                                                           "reset_alpha_every", "camera_opt", "scale_factor")
@@ -561,7 +580,8 @@ def resume(project, **kwargs):
     return run(project, info["method"], info["iterations"], tuple(info["extra"]), cache=info["cache"],
                downscale=info["downscale"], lidar_depth=info["lidar_depth"], schedule=info["schedule"],
                load_dir=info["load_dir"], depth_cloud=info.get("depth_cloud"),
-               depth_dense=info.get("depth_dense", False), regularize=info.get("regularize"), **kwargs)
+               depth_dense=info.get("depth_dense", False), regularize=info.get("regularize"),
+               seed_mesh=info.get("seed_mesh"), **kwargs)
 
 
 def _num_vertices(ply):
@@ -608,10 +628,17 @@ def main():
     ap.add_argument("--flatten", type=float, default=FLATTEN, metavar="W",
                     help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; "
                          f"default {FLATTEN}; 0 = off)")
+    ap.add_argument("--seed-mesh", action="store_true",
+                    help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
+                         "flat in its surface")
     args, extra = ap.parse_known_args()
     reg = {"flatten": args.flatten}
     reg = reg if regularizing(reg) else None
     project = os.path.abspath(args.project)
+    from modelforge import sfm_mesh as _sm
+    seed = _sm.depth_cloud(project) if args.seed_mesh else None
+    if args.seed_mesh and seed is None:
+        sys.exit("error: --seed-mesh needs the SfM mesh (python -m modelforge.sfm_mesh PROJECT)")
     try:
         if args.resume:
             resume(project, on_line=lambda m: print(m, flush=True))
@@ -630,6 +657,7 @@ def main():
                             photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE, layout=args.tile_layout,
                             skip=None if args.skip_tiles is None else
                             [int(k) - 1 for k in args.skip_tiles.split(",") if k.strip()], regularize=reg,
+                            seed_mesh=seed,
                             round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps,
                             only=None if args.tile is None else args.tile - 1)
             return
@@ -644,7 +672,7 @@ def main():
             iterations, downscale = schedule["iterations"], schedule["downscale"]
         cache = args.cache if args.cache != "auto" else auto_cache(project, downscale)[0]
         run(project, args.method, iterations, extra, on_line=lambda m: print(m, flush=True), cache=cache,
-            downscale=downscale, lidar_depth=args.lidar_depth, schedule=schedule, regularize=reg)
+            downscale=downscale, lidar_depth=args.lidar_depth, schedule=schedule, regularize=reg, seed_mesh=seed)
     except (RuntimeError, ValueError, Stopped) as e:
         sys.exit(f"error: {e}")
 

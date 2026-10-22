@@ -682,7 +682,8 @@ extract once, then run the pipeline on subsets of it, in the same project):
     keypoints per image. Overlap(a, b) = inliers / min(keypoints): no scene geometry needed.
   - `select_keyframes`: per source, jump to the farthest of the next 16 images with overlap ≥
     min_overlap to the current keyframe and ≥ ½ of that to the keyframe before (≈ 3 views per point);
-    none → the next image. Levels dense / normal / sparse = 0.20 / 0.12 / 0.06, default **dense**.
+    none → the next image. Levels extra dense / dense / normal / sparse = 0.30 / 0.20 / 0.12 / 0.06, default **dense**
+    (extra dense added 2026-10-22, the user asked: more images than dense where the extraction has them).
   - **Default: keyframes, density dense** (the user asked, 2026-10-22; `gui/subset.py DEFAULT_MODE`): a project that
     never chose a subset (none recorded in poses.json) starts on keyframes, so Run full pipeline runs the overlap
     analysis and the keyframe selection first. A chosen every N-th is kept, also every 1 over the whole range ("all
@@ -692,6 +693,9 @@ extract once, then run the pipeline on subsets of it, in the same project):
   - Progress: "features: image k / n · name", then "matching: pair k / n" (the match stage shows
     "pair k / n" too: `pipeline._watch_matches` polls database.db's matches table, as features.db is
     polled for features).
+  - **Run full pipeline applies the panel's choice first** (stage `images`, `SubsetPanel.apply_selection`; 2026-10-22:
+    switched to every N-th, the pipeline stayed on the keyframes, as only keyframes were applied): keyframes as below,
+    or every N-th when it differs from the images in use (else nothing moves).
   - **Run full pipeline with Selection = keyframes** starts with `analyze` (reused when
     `overlap.is_current`: overlap.json covers exactly the extracted images) and `keyframes`
     (`SubsetPanel.apply_keyframes`: applies the chosen density unless those images are in use; the
@@ -1541,6 +1545,17 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Ticking the prior (by itself
   or by hand) sets Depth weight to 0.2 when it is 0 (`App._mesh_prior_weight`; the user asked for 0.2 as the prior's
   default); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags.
+- **Starting Gaussians from the SfM mesh** (the user asked, 2026-10-22: single-pass flat ground stayed empty; Splat
+  tab "Start from the SfM mesh too", default on when the mesh exists; CLI `--seed-mesh`; `splat.run(seed_mesh=)`,
+  also tiles / resume): `sfm_mesh.seed_points` spreads points evenly over the mesh (holes patched; spacing = its SfM
+  point spacing, coarser above 4M candidates), keeps those with no SfM point of the dataset's sparse_pc.ply within
+  2.5 spacings (exact FLANN search: an approximate one overstated distances and seeded duplicates), with face
+  normals and colours (mesh_coloured.ply if coloured) -> `splat/mesh_seeds.ply`; the lidar-data dataparser's
+  `--seed-ply` appends them to the SfM points (metadata "mf_seed_normals", rotated into nerfstudio's frame); the
+  plugin starts them flat: rotation taking z to the normal (`flat_quats`, checked against gsplat), width = the size
+  splatfacto gives (3 nearest points), thickness 0.1 of it. fullrun_test (3000 steps, 8 eval frames, PSNR / SSIM /
+  LPIPS): flatten 0.02 21.26 / 0.521 / 0.454; + seeds (124k on 47.5k SfM points) 21.27 / 0.525 / 0.449, depth error
+  0.69 -> 0.62 %; baseline without either 21.15 / 0.515 / 0.467. Test: `test_seed_points_fill_where_sfm_points_are_thin`.
 - **Flattening** (the user asked, 2026-10-22: flat ground seen from a single straight pass at ~45° stays soft;
   Splat tab "Flatten Gaussians (weight)", CLI `--flatten W`, default 0.02 (`splat.FLATTEN`), 0 = off;
   `splat.run(regularize={"flatten": W})`, also tiles / resume): the plugin adds W x mean(smallest / middle scale),

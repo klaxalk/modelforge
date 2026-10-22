@@ -25,6 +25,10 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     depth_maps: Optional[Path] = None
     """Dense depth targets instead of points: a folder of <image name>.npy z-depth maps (world units, 0 = none) at
     the undistorted training camera (modelforge/export/mesh_depth.py: the SfM mesh rendered)."""
+    seed_ply: Optional[Path] = None
+    """Extra starting points with normals and colours (modelforge sfm_mesh.seed_points: the SfM mesh where the SfM
+    points are thin), appended to the SfM points; the model starts them flat in the surface (metadata
+    "mf_seed_normals", the last len of the points)."""
 
 
 class LidarDataParser(Nerfstudio):
@@ -35,6 +39,18 @@ class LidarDataParser(Nerfstudio):
         data = self.config.data
         meta = load_from_json(data if data.suffix == ".json" else data / "transforms.json")
         data_dir = data.parent if data.suffix == ".json" else data
+        T = out.dataparser_transform.float()
+        if self.config.seed_ply and "points3D_xyz" in out.metadata:
+            import open3d as o3d
+            pcd = o3d.io.read_point_cloud(str(data_dir / self.config.seed_ply))
+            if len(pcd.points):
+                xyz = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+                rgb = torch.from_numpy((np.asarray(pcd.colors) * 255).round().astype(np.uint8))
+                nrm = torch.from_numpy(np.asarray(pcd.normals, dtype=np.float32))
+                out.metadata["points3D_xyz"] = torch.cat([out.metadata["points3D_xyz"],
+                                                          (xyz @ T[:, :3].T + T[:, 3]) * out.dataparser_scale])
+                out.metadata["points3D_rgb"] = torch.cat([out.metadata["points3D_rgb"], rgb])
+                out.metadata["mf_seed_normals"] = nrm @ T[:, :3].T  # rotation only: directions
         if self.config.depth_maps:
             folder = Path(self.config.depth_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]
@@ -47,7 +63,6 @@ class LidarDataParser(Nerfstudio):
             pcd = o3d.io.read_point_cloud(str(data_dir / cloud))
             xyz = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
             # world (= transforms.json frame; modelforge writes no applied_transform) -> normalized
-            T = out.dataparser_transform.float()
             out.metadata["lidar_xyz"] = (xyz @ T[:, :3].T + T[:, 3]) * out.dataparser_scale
         return out
 

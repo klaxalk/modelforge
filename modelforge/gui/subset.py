@@ -58,7 +58,8 @@ class SubsetPanel:
                 hint="From now on every stage runs on this subset of the extracted images (images/ and poses.json "
                      "become the subset; the full extraction stays in extracted/). Results of the current image "
                      "set (features, matches, sparse, dense, splat, ...) move to previous/: run the pipeline "
-                     "again. Keep every 1 over the whole range returns to all images.")
+                     "again. Keep every 1 over the whole range returns to all images. Run full pipeline applies "
+                     "the panel's choice (keyframes or every N-th) by itself as its first step.")
             self.g_apply.on_click(lambda _: self.apply())
             for g in (self.g_mode, self.g_every, self.g_offset, self.g_range, self.g_level):
                 g.on_update(lambda _: self._preview())
@@ -86,15 +87,21 @@ class SubsetPanel:
         hi = max(hi, lo + 1)
         self.g_range.min, self.g_range.max = float(lo), float(hi)
         st = (info or {}).get("setting") or {}
+        # every N-th's fields are set whatever the mode: in keyframes mode (the default) they used to keep their
+        # placeholders, so switching to every N-th selected the first second of the flight only (moric, 2026-10-22:
+        # "now using 1 of 400 images")
+        self.g_every.value, self.g_offset.value = int(st.get("every", 1)), int(st.get("offset", 0))
+        rng = (float(st["start"]) if st.get("start") is not None else float(lo),
+               float(st["end"]) if st.get("end") is not None else float(hi))
+        if self._images and len(projects.subsample_selection(self._images, every=1, start=rng[0], end=rng[1])) < 2:
+            rng = (float(lo), float(hi))  # a stored range that holds (almost) nothing: the whole flight
+        self.g_range.value = rng
         if st.get("method") == "keyframes":
             self.g_mode.value = "keyframes (from the analysis)"
             self.g_level.value = st.get("level", overlap.DEFAULT_LEVEL)
         else:  # every N-th chosen (kept), or none chosen yet: the default
             self.g_mode.value = "every N-th image" if st else DEFAULT_MODE
             self.g_level.value = overlap.DEFAULT_LEVEL
-            self.g_every.value, self.g_offset.value = int(st.get("every", 1)), int(st.get("offset", 0))
-            self.g_range.value = (float(st["start"]) if st.get("start") is not None else float(lo),
-                                  float(st["end"]) if st.get("end") is not None else float(hi))
         if not info or not info["used"]:
             self.g_md.content = "_no extracted images yet (Ingest tab)_"
         elif st.get("method") == "keyframes":
@@ -137,7 +144,7 @@ class SubsetPanel:
             return
         args = self._args()
         n = len(args["names"]) if "names" in args else len(projects.subsample_selection(self._images, **args))
-        self.g_apply.disabled = n == 0
+        self.g_apply.disabled = n < 2  # SfM needs two images; one meant a wrong range
         extra = ""
         if self._overlap:
             names = args.get("names") or [self._images[k]["image"] for k in
@@ -151,6 +158,28 @@ class SubsetPanel:
     def keyframes_selected(self):
         """Selection = keyframes: the full pipeline then analyzes and selects first."""
         return bool(self._images) and self._mode() == "keyframes"
+
+    def apply_selection(self):
+        """In a running job (the full pipeline's first step): use what the panel is set to, keyframes (after the
+        analysis) or every N-th image, unless those images are in use already. Before, only keyframes were
+        applied, so switching the panel to every N-th left the pipeline on the keyframes (the user asked).
+        Returns (images used, images extracted, a description)."""
+        if self._mode() == "keyframes":
+            n, total = self.apply_keyframes()
+            return n, total, f"keyframes ({self.g_level.value})"
+        self._images = projects.extracted_images(self.app.path)
+        args = self._args()
+        names = {self._images[k]["image"] for k in projects.subsample_selection(self._images, **args)}
+        if len(names) < 2:
+            raise RuntimeError(f"Images used: every N-th selects {len(names)} image(s) (check Starting at / Time range)")
+        current = set(self.app.project.names) if self.app.project else set()
+        if names != current:
+            projects.apply_subsample(self.app.path, **args)
+            self.app.load_project()
+            self.app.refresh_after_images_changed()
+        self.refresh()
+        every = f"every {args['every']}" + (f" from #{args['offset']}" if args["offset"] else "")
+        return len(names), len(self._images), every
 
     def apply_keyframes(self):
         """In a running job (full pipeline, after the analysis): use the keyframes at the chosen density

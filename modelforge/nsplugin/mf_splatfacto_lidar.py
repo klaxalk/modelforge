@@ -26,6 +26,9 @@ Every lidar_report_every steps it prints "[lidar] step N: depth error median x% 
 
 Regularization for flights that see the ground from one side only (a single straight pass at ~45 deg: the user
 asked, 2026-10-22; a far-field mask tried alongside did not work well and was removed):
+  mesh seeds      starting points from the SfM mesh (dataparser --seed-ply: metadata "mf_seed_normals", the last
+                  points): they start flat in the surface, the size splatfacto gives them (mean distance to the 3
+                  nearest points) as the width, SEED_THICKNESS of it along the normal.
   flatten_lambda  flatten_lambda x mean(smallest / middle scale) over the Gaussians, the middle scale held fixed
                   (only the smallest axis shrinks): flat discs on the surface (2DGS / PGSR style), and no needles
                   (two small axes) along the few viewing directions. 0 = off.
@@ -42,6 +45,21 @@ import torch.nn.functional as F
 from mf_lidar_dataparser import LidarDataParserConfig
 from nerfstudio.models.splatfacto import SplatfactoModel, SplatfactoModelConfig, get_viewmat
 from nerfstudio.plugins.types import MethodSpecification
+
+
+SEED_THICKNESS = 0.1  # mesh seeds start this thin along the surface normal (x their width)
+
+
+def flat_quats(n):
+    """wxyz quaternions of rotations taking the local z axis to the unit normals n (N, 3)."""
+    n = n / n.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    z = torch.tensor([0.0, 0.0, 1.0], dtype=n.dtype, device=n.device).expand_as(n)
+    axis = torch.cross(z, n, dim=1)
+    w = 1.0 + (z * n).sum(1, keepdim=True)  # half-angle form: q = (1 + z.n, z x n), normalized
+    q = torch.cat([w, axis], 1)
+    flip = w[:, 0] < 1e-6  # n = -z: any half turn about x
+    q[flip] = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=n.dtype, device=n.device)
+    return q / q.norm(dim=1, keepdim=True)
 
 
 def lidar_depth_image(xyz, viewmat, K, W, H, window=5, tol=0.05):
@@ -83,6 +101,14 @@ class SplatfactoLidarModel(SplatfactoModel):
 
     def populate_modules(self):
         super().populate_modules()
+        nrm = (self.kwargs.get("metadata") or {}).get("mf_seed_normals")
+        if nrm is not None and len(nrm) and self.seed_points is not None:  # the mesh seeds: flat in the surface
+            m, n = len(nrm), len(self.gauss_params["means"])
+            with torch.no_grad():
+                self.gauss_params["quats"][n - m:] = flat_quats(nrm.float())
+                s = self.gauss_params["scales"][n - m:]  # log(mean distance to the 3 nearest points), x3
+                s[:, 2] = s[:, 0] + float(np.log(SEED_THICKNESS))
+            print(f"[lidar] {m:,} of {n:,} starting Gaussians from the SfM mesh, flat in its surface", flush=True)
         xyz = (self.kwargs.get("metadata") or {}).get("lidar_xyz")
         if xyz is not None and len(xyz) > self.config.lidar_max_points:
             xyz = xyz[torch.randperm(len(xyz), generator=torch.Generator().manual_seed(0))[

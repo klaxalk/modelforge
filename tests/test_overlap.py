@@ -109,3 +109,13 @@ def test_feature_progress(tmp_path):
     stats = features.extract(str(tmp_path), progress=lambda k, n, name: seen.append((k, n, name)))
     assert stats["images"] == 12 and seen[-1] == (12, 12, "im_11.jpg")
     assert all(n == 12 for _, n, _ in seen) and [k for k, _, _ in seen] == sorted(k for k, _, _ in seen)
+
+
+def test_levels_ordered():
+    """extra dense keeps more keyframes than dense, dense >= normal >= sparse; dense stays the default."""
+    ims = images(40)
+    data = table(ims, lambda i, j: max(0.0, 0.45 - 0.05 * (j - i - 1)))
+    n = {lv: len(overlap.select_keyframes(ims, data, min_overlap=v)) for lv, v in overlap.LEVELS.items()}
+    assert n["extra dense"] > n["dense"] >= n["normal"] >= n["sparse"]
+    assert overlap.DEFAULT_LEVEL == "dense" and list(overlap.LEVELS)[0] == "extra dense"
+    assert set(overlap.QUALITY) == set(overlap.LEVELS)
