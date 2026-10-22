@@ -1460,6 +1460,10 @@ helped little):
   iterated local updates could not move seams. Training comparison (two tiles each, 30k steps, held-out photos near
   the seams; `build/tiles_cmp.py`) running. Not yet for 10k photos (dense n x n graph, dense eigh).
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
+- **Unrecorded checkpoints** (berlin, 2026-10-22: a tile saved its round checkpoint, the run then ended before
+  recording it, and Resume started the tile from scratch): a tile marked training at step 0 adopts the newest
+  checkpoint in its own folder (`adopt_checkpoint` writes its splat/resume.json; a new run or set-up clears the
+  folder, so only this run's are there). Test: `test_unrecorded_checkpoint_is_adopted`.
 - **Leaving tiles out** (the user asked: edge tiles may not be worth training): View → Tile boundaries draws a ball
   under each tile's label, green = included, grey = left out; a click toggles it (`App._toggle_tile`; a set-up is
   needed). `tiles/skip.json` (`splat_tiles.skipped / set_skipped`; not tiles.json, which a running job rewrites):

@@ -556,6 +556,11 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             tile["schedule"] = splat_plan.suggest(splat_plan.survey(tile_dir(project, k)), **plan_args, tiles="off")
             tile["iterations"] = tile["schedule"]["iterations"]
         tile.setdefault("step", 0)
+        if k in targets and tile.get("status") == "training" and not tile["step"]:
+            step = adopt_checkpoint(project, k, tile, state, down)
+            if step:
+                on_line(f"splat: tile {k + 1}: continuing from its checkpoint at step {step:,} (saved, but the run "
+                        "ended before recording it)")
         if on_snapshot and os.path.exists(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")):
             done_parts[k] = _band0(_read(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")))
     save_state()
@@ -675,6 +680,33 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     splat._remove(os.path.join(project, splat.RESUME))
     splat._remove(os.path.join(project, LIVE))
     return _report(project, state, total, t0)
+
+
+def adopt_checkpoint(project, k, tile, state, down):
+    """A tile marked training at step 0 whose run saved a checkpoint and then ended before recording it (berlin,
+    2026-10-22: the trainer exited with an error right after its round's checkpoint, and Resume started the tile
+    from scratch): write its splat/resume.json for the newest checkpoint so it continues from there. Its folder only
+    holds this run's checkpoints (a new run or set-up clears it). Returns the step, or None."""
+    import glob
+    import re
+    best = None
+    for ck in glob.glob(os.path.join(tile_dir(project, k), "nerfstudio", "**", "step-*.ckpt"), recursive=True):
+        m = re.search(r"step-(\d+)\.ckpt$", ck)
+        if m and (best is None or int(m.group(1)) > best[0]):
+            best = (int(m.group(1)), os.path.dirname(ck))
+    if best is None or best[0] <= 0 or best[0] >= tile.get("iterations", 0):
+        return None
+    tdir = tile_dir(project, k)
+    cache = state["cache"] if state["cache"] != "auto" else splat.auto_cache(tdir, down)[0]
+    os.makedirs(os.path.join(tdir, "splat"), exist_ok=True)
+    json.dump({"method": state["method"], "iterations": tile["iterations"], "extra": list(state["extra"]),
+               "cache": cache, "downscale": int(down), "lidar_depth": state["lidar_depth"],
+               "schedule": tile["schedule"], "depth_cloud": state.get("depth_cloud"),
+               "depth_dense": bool(state.get("depth_dense")), "load_dir": best[1], "step": best[0],
+               "transforms_mtime": os.path.getmtime(os.path.join(tdir, "transforms.json"))},
+              open(os.path.join(tdir, splat.RESUME), "w"), indent=1)
+    tile.update(step=best[0], status="round")
+    return best[0]
 
 
 def _resume_file(project, state, k):

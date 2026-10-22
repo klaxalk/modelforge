@@ -320,3 +320,26 @@ def test_skip_tiles(fake_ns, tmp_path):  # noqa: F811
     assert [c["skipped"] for c in cells] == [True, False, False, True]
     splat_tiles.set_skipped(project, 3, False)
     assert splat_tiles.skipped(project) == {0}
+
+
+def test_unrecorded_checkpoint_is_adopted(tmp_path):
+    """A tile marked training at step 0 whose run saved a checkpoint and ended before recording it continues from
+    that checkpoint on resume instead of starting over."""
+    project = str(tmp_path)
+    write_scene(project)
+    state = splat_tiles.setup(project, 16, on_line=lambda m: None)
+    tile = state["tiles"][1]
+    tile.update(status="training", step=0, iterations=50, schedule={"iterations": 50})
+    state.update(method="splatfacto", extra=[], cache="disk", lidar_depth=0.2, depth_cloud=None, depth_dense=False)
+    run_dir = os.path.join(splat_tiles.tile_dir(project, 1), "nerfstudio", "tile_01", "splatfacto-lidar", "run",
+                           "nerfstudio_models")
+    os.makedirs(run_dir)
+    for step in (20, 41):
+        open(os.path.join(run_dir, f"step-{step:09d}.ckpt"), "w").write("x")
+    assert splat_tiles.adopt_checkpoint(project, 1, tile, state, 1) == 41
+    assert tile["step"] == 41 and tile["status"] == "round"
+    info = splat.resume_info(splat_tiles.tile_dir(project, 1))
+    assert info and info["load_dir"] == run_dir and info["step"] == 41 and info["cache"] == "disk"
+    other = state["tiles"][2]
+    other.update(status="training", step=0, iterations=50, schedule={})
+    assert splat_tiles.adopt_checkpoint(project, 2, other, state, 1) is None and other["step"] == 0
