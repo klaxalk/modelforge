@@ -1533,12 +1533,16 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   default); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags.
 - **Far-field mask and flattening** (the user asked, 2026-10-22: flat ground seen from a single straight pass at
   ~45° stays soft; Splat tab "Far-field mask (× median depth)" / "Flatten Gaussians (weight)", CLI `--far-mask K
-  --flatten W`, default 0 = off; `splat.run(regularize=)`, also tiles / resume): in the plugin, with the dense mesh
+  --flatten W`, **defaults 1.5 / 0.02** (the user's choice; `splat.FAR_MASK / FLATTEN`; 0 = off); `splat.run(regularize=)`, also tiles / resume): in the plugin, with the dense mesh
   depth maps, pixels deeper than K x the photo's median depth leave the colour (render replaced by the photo there:
   no gradient, no densification) and depth losses; flattening adds W x mean(smallest / middle scale). Either on
-  without a depth weight trains the -lidar method at weight 0. Check on fullrun_test (`build/reg_check.py`, 3000
-  steps, nerfstudio's eval frames) running; the real target, novel views of single-pass ground, is not measured
-  by same-pass held-out photos.
+  without a depth weight trains the -lidar method at weight 0. fullrun_test (`build/reg_check.py`, 3000 steps, 8 eval
+  frames, PSNR / LPIPS): base 21.15 / 0.467; far 2.5 21.13 / 0.478 (5 % of pixels masked); flatten 0.1 20.98 / 0.467
+  (min / mid scale median 0.51 -> 0.00, needles 16.6 -> 0 %, +18 % Gaussians; that run had the bug below, so the
+  flatten numbers are void). **Bug fixed:** the ratio's middle scale was free, so the optimizer shrank the ratio by
+  widening Gaussians into huge sheets: berlin tile 1 ran out of GPU memory at step ~1500 (21.7 GB vs 1.8 GB without;
+  `build/oom_check.py`); now the middle scale is detached (only the smallest axis shrinks): 1.8 GB. The real target, novel views of
+  single-pass ground, is not measured by same-pass held-out photos.
 - **Dense mesh prior** (Splat tab "Mesh prior: dense (rendered depth)", default on; the user asked: the vertices
   supervise only ~1 pixel in 10 at ×2 on kladno_dira): `export/mesh_depth.py` (nerfstudio's venv, Open3D CPU
   raycasting) renders the mesh's z-depth at every training camera **as nerfstudio trains it**: intrinsics × 1/N,

@@ -30,8 +30,9 @@ asked, 2026-10-22):
                   and depth losses (the rendered colour is replaced by the photo's there: no loss, no gradient, no
                   densification). The far, grazing part of an oblique photo is low resolution and smeared along the
                   flight; it pulls the Gaussians the sharp near views refine towards a blur. 0 = off.
-  flatten_lambda  flatten_lambda x mean(smallest / middle scale) over the Gaussians: flat discs on the surface
-                  (2DGS / PGSR style), and no needles (two small axes) along the few viewing directions. 0 = off.
+  flatten_lambda  flatten_lambda x mean(smallest / middle scale) over the Gaussians, the middle scale held fixed
+                  (only the smallest axis shrinks): flat discs on the surface (2DGS / PGSR style), and no needles
+                  (two small axes) along the few viewing directions. 0 = off.
 """
 
 from copy import deepcopy
@@ -146,8 +147,10 @@ class SplatfactoLidarModel(SplatfactoModel):
             outputs = dict(outputs, rgb=torch.where(far, gt, outputs["rgb"]))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
         if self.training and self.config.flatten_lambda > 0:
+            # only the smallest axis may give: with the middle one free, the optimizer shrank the ratio by
+            # widening the Gaussians into huge sheets (berlin tile 1: 1.8 -> 21.7 GB of GPU memory, out of memory)
             s = torch.sort(torch.exp(self.scales), dim=-1).values
-            loss["flatten"] = self.config.flatten_lambda * (s[:, 0] / s[:, 1].clamp(min=1e-12)).mean()
+            loss["flatten"] = self.config.flatten_lambda * (s[:, 0] / s[:, 1].detach().clamp(min=1e-12)).mean()
         target = outputs.get("lidar_depth")
         if target is None:
             return loss

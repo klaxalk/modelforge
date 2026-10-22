@@ -609,16 +609,17 @@ class App:
                      "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
                      "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
             self.g_splat_far = gui.add_number(
-                "Far-field mask (× median depth)", initial_value=0.0, min=0.0, step=0.5,
+                "Far-field mask (× median depth)", initial_value=splat.FAR_MASK, min=0.0, step=0.25,
                 hint="With the dense mesh prior: each photo's pixels deeper than this × its median depth are left "
                      "out of the colour and depth losses. The far, grazing part of an oblique photo is low "
                      "resolution and smeared along the flight; on ground seen from one side only (a single pass at "
-                     "~45°) it pulls the Gaussians that the sharp near views refine towards a blur. 0 = off; try 2-3.")
+                     "~45°) it pulls the Gaussians that the sharp near views refine towards a blur. Default 1.5 (at ~45° about "
+                     "the top third of each photo; 2.5 masked only 5 % on fullrun_test). 0 = off.")
             self.g_splat_flatten = gui.add_number(
-                "Flatten Gaussians (weight)", initial_value=0.0, min=0.0, step=0.05,
+                "Flatten Gaussians (weight)", initial_value=splat.FLATTEN, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's smallest scale relative to its middle one: flat discs on the surface "
-                     "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. 0 = off; try "
-                     "0.05-0.2. Either setting trains splatfacto's -lidar variant (depth loss off without a depth "
+                     "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. Default 0.02 (0.1 "
+                     "flattened every Gaussian completely, -0.17 dB on fullrun_test). 0 = off. Either setting trains splatfacto's -lidar variant (depth loss off without a depth "
                      "weight).")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,

@@ -241,6 +241,10 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
+FAR_MASK = 1.5  # default far-field mask (x median depth): at ~45 deg pitch about the top third of a photo
+FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
+
+
 def regularizing(regularize):
     """True when the far-field mask or flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
     return bool(regularize) and any(float(v or 0) > 0 for v in regularize.values())
@@ -609,11 +613,12 @@ def main():
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"depth loss weight (e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only): against the LiDAR points "
                          "(ROS 2 bags), else the SfM points (sparse_pc.ply)")
-    ap.add_argument("--far-mask", type=float, default=0.0, metavar="K",
+    ap.add_argument("--far-mask", type=float, default=FAR_MASK, metavar="K",
                     help="with the dense mesh prior: leave pixels deeper than K x the photo's median depth out of the "
-                         "losses (single oblique passes; try 2-3; 0 = off)")
-    ap.add_argument("--flatten", type=float, default=0.0, metavar="W",
-                    help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; try 0.05-0.2)")
+                         f"losses (single oblique passes; default {FAR_MASK}; 0 = off)")
+    ap.add_argument("--flatten", type=float, default=FLATTEN, metavar="W",
+                    help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; "
+                         f"default {FLATTEN}; 0 = off)")
     args, extra = ap.parse_known_args()
     reg = {"far_mask": args.far_mask, "flatten": args.flatten}
     reg = reg if regularizing(reg) else None
