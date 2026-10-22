@@ -108,6 +108,10 @@ RUN sed -i 's|<title>Viser</title>|<title>ModelForge</title>|' \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" && \
     grep -q "<title>ModelForge</title>" \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
+# Camera keys R / F for up / down instead of viser's E / Q (the user asked).
+COPY docker/patch_viser_keys.sh /tmp/patch_viser_keys.sh
+RUN sh /tmp/patch_viser_keys.sh \
+        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
 
 # Run as the host user so files written to the bind-mounted repo are not root-owned.
 RUN (getent passwd ${UID} | cut -d: -f1 | xargs -r userdel -r) 2>/dev/null; \

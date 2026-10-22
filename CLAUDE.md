@@ -2057,7 +2057,7 @@ Code layout:
       to the clicked spot (`App.ray_hit`: the nearest group of >= 3 sparse points within 0.6° of the ray, else the
       ground; a yellow ball for 2 s); **View → Carry the pivot forward** (default on, `_carry_pivot` on every camera
       update, not while Orbit / Fly drive it): within 1 % of the scene's size (>= 0.3 m) the pivot moves 8x that far
-      ahead. viser's own keys: W A S D / Q E move at a fixed 2 m/s (its prebuilt client), arrows turn.
+      ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E, remapped by `docker/patch_viser_keys.sh` in its bundle's loader), at a fixed 2 m/s (its prebuilt client), arrows turn.
     - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,

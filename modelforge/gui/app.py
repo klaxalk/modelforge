@@ -299,7 +299,7 @@ class App:
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
             gui.add_markdown("_Navigation: **Ctrl + click** a spot to orbit and zoom about it; **W A S D** move, "
-                             "**Q E** down / up, **arrow keys** turn (2 m/s, set by viser)._")
+                             "**R F** up / down, **arrow keys** turn (2 m/s, set by viser)._")
             self.g_pivot_carry = gui.add_checkbox(
                 "Carry the pivot forward", initial_value=True,
                 hint="The mouse wheel zooms towards the point the view orbits about, slower and slower as it gets "
