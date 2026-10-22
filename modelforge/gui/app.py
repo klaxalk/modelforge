@@ -1535,7 +1535,7 @@ class App:
                     continue
                 elif st == "splat-tiles":
                     state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log,
-                                              layout=self.g_splat_tile_layout.value)
+                                              layout=self.g_splat_tile_layout.value, job=self._token)
                     self._sync_tile_choice()
                     if self.g_tiles_view.value:
                         self._draw_tiles()

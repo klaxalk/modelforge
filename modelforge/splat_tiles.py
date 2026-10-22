@@ -14,7 +14,11 @@ are in the project's ENU frame (one global SfM), so they join by concatenation (
              photos: those looking into it plus every photo with >= MIN_VISIBLE of its seen points inside it,
              or >= MIN_IN_CELL inside and its look-at point within half the margin of the cell (far-side
              views of objects near the edge; on kladno_dira +12 % photos, a cell + margin share rule +37 %).
-             Outer cells extend to infinity.
+             With an SfM mesh (setup), also every photo with >= MIN_PIXELS of its image showing the cell: the mesh
+             raycast from each camera (export/mesh_share.py), each hit labelled by its cell. Sparse points counted
+             one by one undercount what is near: on berlin a low oblique pass had 1 % of its seen points but 67 %
+             of its pixels on one tile's building, never joined that tile, and the merge kept only that tile's
+             junk there (2026-10-22). Outer cells extend to infinity.
   train      PROJECT/tiles/tile_KK/: transforms.json with the tile's frames, sparse_pc.ply cropped to the cell
              + margin, images/ and images_N/ as links to the project's; then splat.run with its own plan
              (splat_plan.suggest on the tile: steps from its photo count), one tile after the other. With an
@@ -54,6 +58,9 @@ TILE_ABOVE = 800  # training images; more -> tiles (worlds up to ~800 photos tra
 PHOTOS_PER_TILE = 500  # cameras looking into a cell (its photos also include oblique views from neighbours)
 MIN_VISIBLE = 0.25  # a photo joins a tile when this share of its seen sparse points lies in the cell, or ...
 MIN_IN_CELL = 0.10  # ... this share in the cell when looking at most half the margin beyond its edge
+MIN_PIXELS = 0.05  # ... or (with an SfM mesh) this share of its pixels showing the cell (berlin: covers every view
+#                    the merge broke, +13 % photos; any pixel at all: +26 %, mostly slivers at the horizon)
+SHARE_WIDTH = 240  # pixels across the mesh raycast of each camera
 SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off the balanced position (tiles of
 #                   up to ~2x the photos still train well, the user found)
 BALANCE = 0.3  # weight of being off balance (1 at the slack's end) against the cut's cost in median costs
@@ -149,10 +156,41 @@ def _inside(xy, cell, pad=0.0):
     return (xy[:, 0] >= x0 - pad) & (xy[:, 0] < x1 + pad) & (xy[:, 1] >= y0 - pad) & (xy[:, 1] < y1 + pad)
 
 
-def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="rectangles"):
+def mesh_shares(project, mesh, labels, on_line=print, job=None):
+    """(frames x tiles) share of each transforms.json camera's pixels whose SfM mesh hit lies in each tile:
+    labels = tile_regions.Regions over the ground (export/mesh_share.py in nerfstudio's venv)."""
+    import tempfile
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "mesh_share.py")
+    with tempfile.TemporaryDirectory(dir=os.path.join(project)) as tmp:
+        lab, out = os.path.join(tmp, "labels.npz"), os.path.join(tmp, "share.npz")
+        labels.save(lab)
+        splat._stream([os.path.join(splat.NS_BIN, "python"), script, project, mesh, lab, out,
+                       "--width", str(SHARE_WIDTH)], on_line, job or jobs.Token())
+        return np.load(out)["share"]
+
+
+def _cell_labels(leaves, xy):
+    """Rectangle cells as a label map (tile_regions.Regions) over the points: they tile the plane, and positions
+    beyond the map take the edge cell's label, as the open outer cells do."""
+    from modelforge import tile_regions
+    lo, hi = xy.min(0) - 1.0, xy.max(0) + 1.0
+    grid = max(1.0, float(max(hi - lo)) / 2000)
+    w, h = int(math.ceil((hi[0] - lo[0]) / grid)), int(math.ceil((hi[1] - lo[1]) / grid))
+    cx, cy = np.meshgrid(lo[0] + (np.arange(w) + 0.5) * grid, lo[1] + (np.arange(h) + 0.5) * grid)
+    centres = np.stack([cx.ravel(), cy.ravel()], 1)
+    labels = np.zeros(len(centres), np.int32)
+    for k, (cell, _) in enumerate(leaves):
+        labels[_inside(centres, cell)] = k
+    return tile_regions.Regions(lo, grid, labels.reshape(h, w))
+
+
+def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="rectangles", mesh=None,
+              on_line=print, job=None):
     """Cells and their photos: [{"cell": [x0, y0, x1, y1] (±inf outside), "margin": m, "frames": [frame indices],
     "core": cameras looking into it}], plus the scene box [x0, y0, x1, y1] (sampled points 1-99 % + margin) and,
-    for layout "covisibility", the Regions (each tile then has "region": its label; "cell" is the region's box)."""
+    for layout "covisibility", the Regions (each tile then has "region": its label; "cell" is the region's box).
+    mesh (the SfM mesh's path): photos also join the cells that fill >= MIN_PIXELS of their image (mesh_shares);
+    the tiles then record "by_pixels", the photos only that rule added."""
     C, R, fx, w, h, _ = splat_plan._cameras(project)
     xyz = splat_plan._points(project, max_points)
     if xyz is None or len(xyz) < 10:
@@ -179,6 +217,11 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="re
     for i, s in enumerate(seen):
         if len(s):
             share[i] = np.bincount(point_cell[s][point_cell[s] >= 0], minlength=len(leaves)) / len(s)
+    pixels = None
+    if mesh:
+        on_line(f"splat: which tiles each photo shows (the SfM mesh from {len(C)} cameras)")
+        pixels = mesh_shares(project, mesh, regions if regions is not None else _cell_labels(leaves, xyz[:, :2]),
+                             on_line, job)
     tiles, pad = [], 0.0
     for k, (cell, ids) in enumerate(leaves):
         finite = np.array([max(cell[0], lo[0]), max(cell[1], lo[1]), min(cell[2], hi[0]), min(cell[3], hi[1])])
@@ -189,9 +232,14 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="re
         # looking just across the edge: far-side views of edge objects
         near = regions.inside(looks, k, margin / 2) if regions is not None else _inside(looks, cell, margin / 2)
         joins = (share[:, k] >= MIN_VISIBLE) | ((share[:, k] >= MIN_IN_CELL) & near)
-        frames = sorted(set(ids.tolist()) | set(np.flatnonzero(joins).tolist()))
-        tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": frames, "core": len(ids)}
-                     | ({"region": k} if regions is not None else {}))
+        frames = set(ids.tolist()) | set(np.flatnonzero(joins).tolist())
+        extra = {}
+        if pixels is not None:
+            more = set(np.flatnonzero(pixels[:, k] >= MIN_PIXELS).tolist()) - frames
+            frames |= more
+            extra["by_pixels"] = len(more)
+        tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": sorted(frames), "core": len(ids)}
+                     | ({"region": k} if regions is not None else {}) | extra)
     box = [float(lo[0] - pad), float(lo[1] - pad), float(hi[0] + pad), float(hi[1] + pad)]
     return (tiles, box, regions) if layout == "covisibility" else (tiles, box)
 
@@ -426,18 +474,22 @@ def _write_live(project, parts, step):
     return path, ident
 
 
-def setup(project, photos=PHOTOS_PER_TILE, on_line=print, layout="rectangles"):
+def setup(project, photos=PHOTOS_PER_TILE, on_line=print, layout="rectangles", job=None):
     """Divide the scene into tiles and write each tile's dataset (cameras, cropped points; links to the photos):
     tiles.json with every tile pending, nothing trained. Replaces an earlier set-up and its trained tiles (tiles/
-    is removed); the merged splat/splat_enu.ply stays until a run merges again."""
+    is removed); the merged splat/splat_enu.ply stays until a run merges again. With an SfM mesh (and nerfstudio's
+    venv for the raycast) photos also join the tiles they show (MIN_PIXELS)."""
     import shutil
+
+    from modelforge import sfm_mesh
     if layout not in LAYOUTS:
         raise ValueError(f"tile layout must be one of {LAYOUTS}")
+    mesh = sfm_mesh.depth_cloud(project) if splat.available() is None else None
     reg = None
     if layout == "covisibility":
-        tiles, box, reg = partition(project, photos, layout=layout)
+        tiles, box, reg = partition(project, photos, layout=layout, mesh=mesh, on_line=on_line, job=job)
     else:
-        tiles, box = partition(project, photos)
+        tiles, box = partition(project, photos, mesh=mesh, on_line=on_line, job=job)
     shutil.rmtree(os.path.join(project, DIR), ignore_errors=True)
     if reg is not None:
         os.makedirs(os.path.join(project, DIR), exist_ok=True)
@@ -454,7 +506,9 @@ def setup(project, photos=PHOTOS_PER_TILE, on_line=print, layout="rectangles"):
     json.dump(state, open(os.path.join(project, STATE), "w"), indent=1)
     on_line(f"splat: {len(tiles)} {layout} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
             f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
-            f"+ views from the neighbours)")
+            f"+ views from the neighbours"
+            + (f"; {', '.join(str(t['by_pixels']) for t in tiles)} of them because they show the tile in "
+               f">= {MIN_PIXELS:.0%} of the image (SfM mesh)" if mesh else "") + ")")
     return state
 
 
@@ -520,7 +574,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             if not 0 <= only < len(state["tiles"]):
                 raise RuntimeError(f"there is no tile {only + 1} (tiles 1–{len(state['tiles'])})")
         elif not fits or state.get("photos") != int(photos) or state.get("layout", "rectangles") != layout:
-            state = setup(project, photos, on_line, layout)
+            state = setup(project, photos, on_line, layout, job=job)
         if skip is not None:
             for k in range(len(state["tiles"])):
                 set_skipped(project, k, k in set(skip))

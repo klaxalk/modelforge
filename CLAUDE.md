@@ -1490,6 +1490,21 @@ helped little):
     365 / 305). Flattening and mesh seeds became GUI defaults later; the script passes neither, so the four tiles
     stay comparable.
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
+- **Photos join the tiles they show, by the SfM mesh** (berlin, 2026-10-22; the user's idea): a building shot from
+  a low oblique pass (berlin_3_1_12380-12585) rendered at 11.7 dB in the merged splat, 20.1 dB in tile 1's own
+  splat. It lay 90 % in tile 3's region, but the pass trained only tiles 0 and 1: such a photo sees half the site in
+  the distance (12447: 43k of the 50k sampled sparse points), so by count only 1 % of its points were in region 3
+  (rule MIN_VISIBLE 25 %), while 67 % of its pixels were. Tile 1's good copy was cut by the clean (outside its
+  region), tile 3 had only junk. Over all 2047 training views, merged vs the best own tile: 311 lost > 2 dB, 83 > 4 dB;
+  pixel share in tiles lacking the photo correlated 0.68 with the loss (> 4 dB: median 0.60; < 1 dB: 0.00).
+  - Now `setup` raycasts the SfM mesh from every camera (`export/mesh_share.py`, nerfstudio's venv, Open3D, 240 px
+    wide; berlin 17 s for 2047 cameras), labels each hit by region / cell (`_cell_labels` for rectangles), and a photo
+    also joins every tile with >= `MIN_PIXELS` (5 %) of its pixels (`partition(mesh=)`, tile `by_pixels`). berlin:
+    1008 / 1106 / 715 / 355 / 713 -> 1169 / 1235 / 752 / 441 / 824 photos (+13 %), covering all 83 broken views (1 %
+    "any pixel": +26 %, tile 3 355 -> 635, mostly horizon slivers). Without a mesh or nerfstudio: the old rule only.
+    The View's planned overlay (no tiles.json) does not raycast. Needs Set up tiles again (and a retrain).
+  - Diagnostics in `build/tile_diag/` (gitignored): `render.py` (photo vs splats at a camera), `scan.py` (every view,
+    merged vs own tiles), `mesh_share.py`, `rules.py`.
 - **Unrecorded checkpoints** (berlin, 2026-10-22: a tile saved its round checkpoint, the run then ended before
   recording it, and Resume started the tile from scratch): a tile marked training at step 0 adopts the newest
   checkpoint in its own folder (`adopt_checkpoint` writes its splat/resume.json; a new run or set-up clears the

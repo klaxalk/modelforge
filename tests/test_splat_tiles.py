@@ -47,6 +47,46 @@ def test_partition(tmp_path):
     assert box[0] < -100 and box[2] > 100
 
 
+def write_ground_mesh(project, half=300.0):
+    """A flat ground quad at z = 0 as the SfM mesh."""
+    v = np.array([(-half, -half, 0), (half, -half, 0), (half, half, 0), (-half, half, 0)],
+                 dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+    f = np.array([([0, 1, 2],), ([0, 2, 3],)], dtype=[("vertex_indices", "i4", (3,))])
+    os.makedirs(os.path.join(project, "sfmmesh"), exist_ok=True)
+    path = os.path.join(project, "sfmmesh", "mesh.ply")
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex"), plyfile.PlyElement.describe(f, "face")]).write(path)
+    return path
+
+
+@pytest.mark.skipif(splat.available() is not None, reason="needs nerfstudio's venv (Open3D)")
+def test_photos_join_the_tiles_they_show(tmp_path):
+    """The SfM mesh raycast gives each photo's pixel share per tile; every photo showing a tile in >= MIN_PIXELS
+    of its image trains it."""
+    from modelforge import tile_regions
+    project = str(tmp_path)
+    n = write_scene(project)
+    mesh = write_ground_mesh(project)
+    # two labels split at x = 0; the first camera (x = -100) sees x in [-150, -50]: all label 0; one at x = -100 / 7
+    # sees [-64.3, 35.7]: 35.7 % label 1
+    labels = tile_regions.Regions((-400.0, -400.0), 1.0, np.repeat([[0] * 400 + [1] * 400], 800, 0))
+    share = splat_tiles.mesh_shares(project, mesh, labels, on_line=lambda m: None)
+    assert share.shape == (n, 2)
+    assert np.allclose(share[0], [1, 0], atol=0.01)
+    xs = np.array([json.load(open(os.path.join(project, "transforms.json")))["frames"][i]["transform_matrix"][0][3]
+                   for i in range(n)])
+    i = int(np.argmin(np.abs(xs + 100 / 7)))
+    assert abs(share[i, 1] - 35.7 / 100) < 0.01
+    old, _ = splat_tiles.partition(project, photos=16)
+    new, _ = splat_tiles.partition(project, photos=16, mesh=mesh, on_line=lambda m: None)
+    cells = splat_tiles._cell_labels([(t["cell"], None) for t in new], np.array([[-200.0, -200], [200, 200]]))
+    pixels = splat_tiles.mesh_shares(project, mesh, cells, on_line=lambda m: None)
+    for k, (a, b) in enumerate(zip(old, new)):
+        assert set(a["frames"]) <= set(b["frames"])
+        assert set(np.flatnonzero(pixels[:, k] >= splat_tiles.MIN_PIXELS)) <= set(b["frames"])
+        assert b["by_pixels"] == len(b["frames"]) - len(a["frames"])
+    assert sum(t["by_pixels"] for t in new) > 0
+
+
 def test_cut_avoids_an_orbited_object():
     """Photos spread evenly along x, one object at the balanced cut seen by many of them: the cut moves off it,
     staying within the size slack."""
