@@ -1653,9 +1653,12 @@ fine detail, a sidecar so the normal splat export stays unchanged):
 - **Near the mesh only** (default on, tolerance 3 mesh voxels; the user asked to prune with the mesh):
   matches whose centre is farther than the tolerance from the mesh count as 0 for the highlight, the counts
   and the objects. `semantic.search_mesh`: the splat mesh (its TSDF voxel) else COLMAP's Delaunay / Poisson
-  (median edge length); `surface_distance`: nearest mesh vertex per Gaussian (OpenCV FLANN, approximate,
-  ~10 s for 1M × 550k), cached in `splat/semantic/surface.npz` per splat + mesh (size + mtime), computed in
-  the background when a project opens. On kladno_dopravnik (splat mesh, 10.7 cm voxel) only 54 % of the
+  (median edge length); `Surface`: nearest mesh vertex per Gaussian (OpenCV FLANN, approximate), **measured
+  only for the matches** (relevance ≥ min(threshold, the auto floor 0.55)) and remembered while the mesh and the
+  splat stay the same; the k-d tree is built in the background when a project opens (~15 s at 12M vertices).
+  Before (2026-10-22) every Gaussian was measured once per splat + mesh: on kladno_dira (4.0M Gaussians, the
+  patched 12.4M-vertex splat mesh) a search hung for minutes, also because plyfile read the mesh's 24M faces as
+  Python objects (~20 GB); the user suggested checking only what the objects are made of. On kladno_dopravnik (splat mesh, 10.7 cm voxel) only 54 % of the
   Gaussians lie within 3 voxels of the mesh (74 % within 1 m: floaters, haze, terrain beyond the mesh's
   range); "a machine" at 0.66 → 1 object instead of 3 (944 floating matches ignored), "a car" loses 16 %
   of its matches (glossy parts), "gravel pile" 20 → 18 objects. It cannot fix matches bleeding onto real

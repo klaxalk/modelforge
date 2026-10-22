@@ -31,7 +31,7 @@ class SemanticPanel:
         self.app = app
         self.feats, self.encoder, self.rel, self.query = None, semantic.TextEncoder(), None, ""
         self.means, self.objs, self._markers, self._frames, self._spin = None, [], [], [], None
-        self.surface = None  # (distance to the mesh per Gaussian, mesh voxel, mesh path) or None
+        self.surface = None  # semantic.Surface (distances to the mesh, measured for the matches), False: no mesh
         with contextlib.nullcontext():  # the panel fills its own tab
             self.g_md = gui.add_markdown("")
             self.g_text_md = gui.add_markdown("")
@@ -121,7 +121,9 @@ class SemanticPanel:
             if path == self.app.path:
                 self._features()
                 self._splat_means()
-                self._surface()
+                srf = self._surface()
+                if srf is not None:
+                    srf.index()  # the k-d tree (seconds for large meshes) before the first search
         except Exception:  # noqa: BLE001 - the search loads them again and reports errors
             traceback.print_exc()
 
@@ -222,9 +224,14 @@ class SemanticPanel:
 
     # ------------------------------------------------------------ objects
     def _surface(self):
-        """Distances of the Gaussians to the mesh (computed once per splat + mesh, ~10 s; cached on disk)."""
+        """The Gaussians' distances to the mesh (semantic.Surface: measured for the matches only), or None."""
+        if self.surface and not self.surface.current(self.app.path):
+            self.surface = None  # the mesh (e.g. patched) or the splat changed
         if self.surface is None:
-            self.surface = semantic.surface_distance(self.app.path) or False
+            try:
+                self.surface = semantic.Surface(self.app.path, self._splat_means())
+            except (FileNotFoundError, KeyError):
+                self.surface = False
         return self.surface or None
 
     def _rel(self):
@@ -233,9 +240,10 @@ class SemanticPanel:
         if self.rel is None:
             return None, 0
         srf = self._surface() if self.g_near.value else None
-        if srf is None or len(srf[0]) != len(self.rel):
+        if srf is None or len(srf.d) != len(self.rel):
             return self.rel, 0
-        far = srf[0] > float(self.g_tol.value) * srf[1]
+        need = self.rel >= min(float(self.g_thr.value), semantic.AUTO_FLOOR)  # the rest never counts as a match
+        far = need & (srf.distance(need) > float(self.g_tol.value) * srf.voxel)
         dropped = int(((self.rel >= self.g_thr.value) & far).sum())
         return np.where(far, 0.0, self.rel), dropped
 

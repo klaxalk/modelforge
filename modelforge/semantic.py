@@ -275,41 +275,60 @@ def search_mesh(project):
 
 
 def _edge_length(path):
-    import plyfile
-    d = plyfile.PlyData.read(path)
-    v = np.stack([d["vertex"][k] for k in ("x", "y", "z")], 1)
-    f = np.vstack(d["face"].data["vertex_indices"][:20000])
+    from modelforge import sfm_mesh
+    d, f = sfm_mesh.read_mesh(path)  # one block, not a Python object per face (24M faces on kladno_dira)
+    v = np.stack([d[k] for k in ("x", "y", "z")], 1)
+    f = f[:20000]
     return float(np.median(np.linalg.norm(v[f[:, 0]] - v[f[:, 1]], axis=1)))
 
 
-def surface_distance(project):
-    """(distance m (N,) of every Gaussian centre to the nearest mesh vertex, mesh voxel m, mesh path), cached
-    in splat/semantic/surface.npz per splat + mesh (size + mtime); None without a mesh. The nearest vertex
-    stands in for the surface (vertices are ~1 voxel apart), via OpenCV's FLANN k-d tree."""
-    import cv2
-    import plyfile
-    mesh = search_mesh(project)
-    sp = splat_mesh.splat_path(project)
-    if mesh is None or not sp or not os.path.exists(sp):
-        return None
-    path, voxel = mesh
-    st_m, st_s = os.stat(path), os.stat(sp)
-    key = np.array([st_m.st_size, st_m.st_mtime_ns, st_s.st_size, st_s.st_mtime_ns], np.int64)
-    cache = os.path.join(project, DIR, "surface.npz")
-    if os.path.exists(cache):
-        c = np.load(cache)
-        if np.array_equal(c["key"], key):
-            return c["distance"].astype(np.float32), float(c["voxel"]), path
-    mv = plyfile.PlyData.read(path)["vertex"].data
-    V = np.ascontiguousarray(np.stack([mv["x"], mv["y"], mv["z"]], 1), np.float32)
-    sv = plyfile.PlyData.read(sp)["vertex"].data
-    G = np.ascontiguousarray(np.stack([sv["x"], sv["y"], sv["z"]], 1), np.float32)
-    index = cv2.flann_Index(V, dict(algorithm=1, trees=4))
-    _, d2 = index.knnSearch(G, 1, params=dict(checks=32))
-    d = np.sqrt(d2[:, 0]).astype(np.float32)
-    os.makedirs(os.path.dirname(cache), exist_ok=True)
-    np.savez(cache, distance=d.astype(np.float16), voxel=np.float32(voxel), key=key)
-    return d, float(voxel), path
+class Surface:
+    """Distances of Gaussian centres to the nearest vertex of the search mesh (`search_mesh`; the nearest vertex
+    stands in for the surface, vertices are ~1 voxel apart), measured only for the Gaussians a search asks about
+    (its matches) and remembered while the mesh and the splat stay the same. All Gaussians at once took minutes
+    on kladno_dira (4.0M against 12.4M vertices: ~250 s on one core), a query's matches take seconds. The k-d tree
+    (OpenCV FLANN, approximate) is built once (~15 s at 12M vertices); queries run on all cores."""
+
+    def __init__(self, project, means):
+        mesh = search_mesh(project)
+        if mesh is None:
+            raise FileNotFoundError("no mesh")
+        self.path, self.voxel = mesh
+        self.means = np.ascontiguousarray(means, np.float32)
+        self.key = self._key(project)
+        self.d = np.full(len(means), np.nan, np.float32)
+        self._index, self._lock = None, threading.Lock()
+
+    def _key(self, project):
+        sp = splat_mesh.splat_path(project)
+        return tuple((os.stat(f).st_size, os.stat(f).st_mtime_ns) for f in (self.path, sp) if f and os.path.exists(f))
+
+    def current(self, project):
+        mesh = search_mesh(project)
+        return mesh is not None and mesh[0] == self.path and self._key(project) == self.key
+
+    def index(self):
+        import cv2
+        if self._index is None:
+            from modelforge import sfm_mesh
+            mv = sfm_mesh.read_mesh(self.path)[0]  # the faces as one block: plyfile's per-face objects took minutes
+            V = np.ascontiguousarray(np.stack([mv["x"], mv["y"], mv["z"]], 1), np.float32)
+            self._index = cv2.flann_Index(V, dict(algorithm=1, trees=4))
+        return self._index
+
+    def distance(self, need):
+        """The distances (N,), measured where `need` (bool per Gaussian) and not yet known; NaN elsewhere."""
+        from concurrent.futures import ThreadPoolExecutor
+        with self._lock:
+            todo = np.flatnonzero(need & np.isnan(self.d))
+            if len(todo):
+                index = self.index()
+                parts = np.array_split(todo, max(1, min(len(todo) // 20000, 4 * (os.cpu_count() or 1))))
+                with ThreadPoolExecutor(os.cpu_count()) as ex:  # OpenCV releases the GIL in the search
+                    for part, d2 in zip(parts, ex.map(
+                            lambda k: index.knnSearch(self.means[k], 1, params=dict(checks=32))[1][:, 0], parts)):
+                        self.d[part] = np.sqrt(d2)
+        return self.d
 
 
 def _components(keys):

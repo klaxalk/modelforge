@@ -120,7 +120,7 @@ def test_cylinder_and_best_view():
 
 
 def test_surface_distance_and_near_mesh_filter(tmp_path):
-    """Gaussians off the mesh surface are measured (cached per splat + mesh) and dropped from the matches."""
+    """Gaussians off the mesh surface are measured (only the matches) and dropped from the matches."""
     import plyfile
     from modelforge.gui.semantic import SemanticPanel
     p = str(tmp_path)
@@ -139,10 +139,13 @@ def test_surface_distance_and_near_mesh_filter(tmp_path):
     sv["x"], sv["y"], sv["z"] = [5, 5, 5, 5], [5, 5, 5, 5], [0.0, 0.5, 2.0, 30.0]  # on, near, off, a floater
     plyfile.PlyData([plyfile.PlyElement.describe(sv, "vertex")]).write(os.path.join(p, "splat", "splat_enu.ply"))
     assert semantic.search_mesh(p)[1] == 0.25
-    d, voxel, _ = semantic.surface_distance(p)
-    assert np.allclose(d, [0, 0.5, 2.0, 30.0], atol=0.05) and voxel == 0.25  # FLANN is approximate
-    assert os.path.exists(os.path.join(p, semantic.DIR, "surface.npz"))
-    assert np.allclose(semantic.surface_distance(p)[0], d, atol=0.01)  # from the cache (float16)
+    means = np.c_[sv["x"], sv["y"], sv["z"]]
+    srf = semantic.Surface(p, means)
+    d = srf.distance(np.array([True, True, False, False]))  # only what is asked for
+    assert np.allclose(d[:2], [0, 0.5], atol=0.05) and np.isnan(d[2:]).all() and srf.voxel == 0.25
+    d = srf.distance(np.ones(4, bool))
+    assert np.allclose(d, [0, 0.5, 2.0, 30.0], atol=0.05)  # FLANN is approximate
+    assert srf.current(p)
 
     class V:
         def __init__(self, v):
@@ -151,7 +154,7 @@ def test_surface_distance_and_near_mesh_filter(tmp_path):
     class App:
         path = p
     panel = SemanticPanel.__new__(SemanticPanel)
-    panel.app, panel.surface = App(), None
+    panel.app, panel.surface, panel.means = App(), None, means
     panel.rel = np.array([0.9, 0.9, 0.9, 0.9])
     panel.g_thr, panel.g_near, panel.g_tol = V(0.6), V(True), V(3.0)  # 3 voxels = 0.75 m
     rel, dropped = panel._rel()
