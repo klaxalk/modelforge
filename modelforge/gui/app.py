@@ -1537,7 +1537,10 @@ class App:
                     state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log,
                                               layout=self.g_splat_tile_layout.value)
                     self._sync_tile_choice()
-                    self._draw_tiles()
+                    if self.g_tiles_view.value:
+                        self._draw_tiles()
+                    else:  # show the new tiles (its update draws them and syncs the quick bar)
+                        self.g_tiles_view.value = True
                     self._history(f"✅ **set up tiles** · {len(state['tiles'])} tiles of "
                                   f"{', '.join(str(len(t['frames'])) for t in state['tiles'])} photos")
                     continue

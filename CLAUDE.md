@@ -1445,6 +1445,7 @@ helped little):
   (cropped to its cell) through `splat/live_tiles.npz` and an identity transform. Progress "tile k / n: training
   step …"; report.json `splat.tiles`, `per_tile`.
 - `tiles/` is an intermediate (Clean), archived on re-extraction.
+- **Set up tiles turns View → Tile boundaries on** (the user asked, 2026-10-22), so the new cells show at once.
 - **Set up tiles / Train tiles** (the user asked, 2026-10-21; Splat tab, CLI `--setup-tiles`, `--tile K`):
   `splat_tiles.setup` = partition + every tile's dataset, all pending, nothing trained (replaces tiles/; the GUI asks
   when trained tiles would go). A run reuses the set-up while Photos per tile and transforms.json are the same
