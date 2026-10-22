@@ -698,6 +698,10 @@ extract once, then run the pipeline on subsets of it, in the same project):
   - **Run full pipeline applies the panel's choice first** (stage `images`, `SubsetPanel.apply_selection`; 2026-10-22:
     switched to every N-th, the pipeline stayed on the keyframes, as only keyframes were applied): keyframes as below,
     or every N-th when it differs from the images in use (else nothing moves).
+  - **Every N-th after keyframes** (moric, 2026-10-22: "now using 1 of 400 images"): in keyframes mode the panel never
+    set Keep every / Starting at / Time range, so switching to every N-th used the slider's placeholder 0-1 s, and
+    that range got stored. Now `refresh` always sets them, a stored range holding < 2 images opens on the whole
+    flight, and fewer than 2 images cannot be applied. Test: `test_gui_every_nth_after_keyframes`.
   - **Run full pipeline with Selection = keyframes** starts with `analyze` (reused when
     `overlap.is_current`: overlap.json covers exactly the extracted images) and `keyframes`
     (`SubsetPanel.apply_keyframes`: applies the chosen density unless those images are in use; the
@@ -1339,6 +1343,9 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     - kladno_dira (global refine, round 1 skipped at 75 iterations): 689 weakly tied, 309 dropped (10.7 %),
       268k of 2.4M points; tile 3's 2 m cells with a pass > 1 m off the others 175 → 52 (the crossing's +1.8 m
       copy, 77 cells, gone; 30 %: 243 photos, 102 cells). 45 s on 2883 photos. Test: `tests/test_isolated.py`.
+    - **Open (berlin, 2026-10-22):** its export left out **801 of 2535** photos (a third). The rule was tuned on the
+      kladno quarry; in a city, roofs, walls and trees likely put many passes > 1 m off in over 20 % of their cells.
+      Not checked yet; worth a look before judging berlin's splats.
     - **Progress** (the user asked): `stage_export(progress=)` shows reading / finding isolated photos (point k / n,
       photo k / n) / "triangulating: image k / n" (COLMAP reports it only in its log: `jobs.stderr_lines` taps file
       descriptor 2 during `pycolmap.triangulate_points`, `refine.triangulate(progress=)`) / "refining points: batch
@@ -1473,8 +1480,14 @@ helped little):
   margin = 0.25 x sqrt(region area)). berlin (1734 photos, 4 tiles; prototype `build/covis_tiles.py`): points > 3 m
   above ground within 3 / 10 m of a seam 1.2 / 3.9 % vs rectangles 2.4 / 9.5 %, seams 1.9 vs 1.7 km; the right-hand
   orbits stay in one tile (the rectangles cut them). Plain vote maps were ragged (seams 3x longer) and an MRF with
-  iterated local updates could not move seams. Training comparison (two tiles each, 30k steps, held-out photos near
-  the seams; `build/tiles_cmp.py`) running. Not yet for 10k photos (dense n x n graph, dense eigh).
+  iterated local updates could not move seams. Not yet for 10k photos (dense n x n graph, dense eigh).
+  - **Training comparison, paused for the user** (`build/tiles_cmp.py`, workspaces `build/tiles_cmp/{rectangles,
+    covisibility}` linking berlin; 30000 steps x1, mesh prior 0.2 dense; 200 held-out frames looking into both pairs'
+    area, `holdout.json` / `located.json`, 26 / 18 within 15 m of the rectangles' / covisibility seam): rectangles
+    tiles 2 + 3 trained (28 / 24 min); **to do**: `train covisibility 0`, `train covisibility 1`, then
+    `score 2,3 0,1`. Its covisibility set-up already has slack 0.25 and the area-based margin (cores 403 / 661 /
+    365 / 305). Flattening and mesh seeds became GUI defaults later; the script passes neither, so the four tiles
+    stay comparable.
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
 - **Unrecorded checkpoints** (berlin, 2026-10-22: a tile saved its round checkpoint, the run then ended before
   recording it, and Resume started the tile from scratch): a tile marked training at step 0 adopts the newest
@@ -2026,6 +2039,8 @@ Code layout:
     pipeline" (off by default). A project without images is extracted first from
     its Ingest plan (`IngestPanel.extract_now`). Splat / dense are skipped, with a
     History note, without nerfstudio / CUDA.
+  - **Stop asks first** (2026-10-22, the user asked: a misclick cost a long run): a "Stop?" box naming the job, Stop /
+    Keep running (`App._stop_clicked`; without a browser client, e.g. tests, it stops at once).
   - **Stop** (`App.stop`, `modelforge/jobs.py`) stops whatever runs: a
     stage, the full pipeline, splat training or an extraction. Every job
     gets a `jobs.Token`:
@@ -2112,7 +2127,7 @@ Code layout:
     - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
-    time, or source. Stats list the per-source offsets.
+    time, or source; **time is the default** (2026-10-22, the user asked). Stats list the per-source offsets.
   - **Inspect**: click a camera to see its image, with observations in green,
     residuals × gain in red, and unmatched keypoints in grey.
   - **Sparse**: "Run SfM (all)", or features, pairs, match, refine (live),
