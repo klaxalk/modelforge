@@ -14,6 +14,7 @@ from modelforge import projects
 from modelforge.sfm import overlap
 
 MODES = {"every N-th image": "every", "keyframes (from the analysis)": "keyframes"}
+DEFAULT_MODE = "keyframes (from the analysis)"  # a project that never chose a subset; Run full pipeline analyzes
 
 
 class SubsetPanel:
@@ -23,10 +24,11 @@ class SubsetPanel:
         with gui.add_folder("Images used", expand_by_default=False):
             self.g_md = gui.add_markdown("")
             self.g_mode = gui.add_dropdown(
-                "Selection", options=tuple(MODES), initial_value="every N-th image",
-                hint="every N-th image: uniform along each source. keyframes: as few images as keep enough overlap "
-                     "between neighbours, measured on the images (needs Analyze below): fewer on straight "
-                     "cruising, more in turns and close passes.")
+                "Selection", options=tuple(MODES), initial_value=DEFAULT_MODE,
+                hint="every N-th image: uniform along each source. keyframes (default; density dense): as few "
+                     "images as keep enough overlap between neighbours, measured on the images (Analyze below; "
+                     "Run full pipeline analyzes and selects by itself): fewer on straight cruising, more in turns "
+                     "and close passes. A project that chose every N-th image keeps it.")
             self.g_every = gui.add_number(
                 "Keep every", initial_value=1, min=1, step=1,
                 hint="1 = all extracted images (in the time range), 2 = every other one, 3 = one in three, ... "
@@ -87,7 +89,9 @@ class SubsetPanel:
         if st.get("method") == "keyframes":
             self.g_mode.value = "keyframes (from the analysis)"
             self.g_level.value = st.get("level", overlap.DEFAULT_LEVEL)
-        else:
+        else:  # every N-th chosen (kept), or none chosen yet: the default
+            self.g_mode.value = "every N-th image" if st else DEFAULT_MODE
+            self.g_level.value = overlap.DEFAULT_LEVEL
             self.g_every.value, self.g_offset.value = int(st.get("every", 1)), int(st.get("offset", 0))
             self.g_range.value = (float(st["start"]) if st.get("start") is not None else float(lo),
                                   float(st["end"]) if st.get("end") is not None else float(hi))
@@ -96,6 +100,8 @@ class SubsetPanel:
         elif st.get("method") == "keyframes":
             self.g_md.content = (f"using **{info['used']}** of {info['extracted']} extracted images "
                                  f"(keyframes, {st.get('level')}: overlap ≥ {st.get('min_overlap')})")
+        elif st and info["used"] == info["extracted"]:
+            self.g_md.content = f"using all **{info['used']}** extracted images (every N-th image)"
         elif st:
             self.g_md.content = (f"using **{info['used']}** of {info['extracted']} extracted images "
                                  f"(every {st['every']}" + (f" from #{st['offset']}" if st["offset"] else "")

@@ -216,7 +216,7 @@ def test_subsample(tmp_path):
     with pytest.raises(ValueError):
         projects.apply_subsample(p, start=50, end=60)  # nothing in that window
     n, _, _ = projects.apply_subsample(p)  # all again
-    assert n == 16 and "subsample" not in json.load(open(os.path.join(p, "poses.json")))
+    assert n == 16 and json.load(open(os.path.join(p, "poses.json")))["subsample"]["every"] == 1  # the choice stays
     assert len(os.listdir(os.path.join(p, "images"))) == 16 and len(projects.extracted_images(p)) == 16
     assert "extracted" in projects.KEEP_ON_CLEAN and "extracted" in ingest.OUTPUTS  # re-extraction archives it
 
@@ -272,6 +272,8 @@ def test_gui_subsample(tmp_path):
         n = len(app.project.names)
         s = app.subset
         assert f"all **{n}**" in s.g_md.content
+        assert s.g_mode.value.startswith("keyframes") and s.g_level.value == "dense"  # the default
+        s.g_mode.value = "every N-th image"
         s.g_every.value = 4
         assert f"of {n} images" in s.g_preview.content
         s.apply()

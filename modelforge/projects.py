@@ -189,11 +189,12 @@ def apply_subsample(path, every=1, offset=0, start=None, end=None, names=None, s
             shutil.copy2(a, b)
     full = len(keep) == len(poses["images"])
     out = dict(poses, images=kept)
-    if not full:
-        out["subsample"] = (dict(setting or {"method": "list"}, images_extracted=len(poses["images"]))
-                            if names is not None else
-                            {"every": max(1, int(every)), "offset": max(0, int(offset)), "start": start, "end": end,
-                             "images_extracted": len(poses["images"])})
+    if names is not None:
+        if not full:
+            out["subsample"] = dict(setting or {"method": "list"}, images_extracted=len(poses["images"]))
+    else:  # also all of them: the choice of every N-th (here every 1) is kept, not replaced by the default keyframes
+        out["subsample"] = {"every": max(1, int(every)), "offset": max(0, int(offset)), "start": start, "end": end,
+                            "images_extracted": len(poses["images"])}
     json.dump(out, open(os.path.join(path, "poses.json"), "w"), indent=1)
     names = {im["image"] for im in kept}
     if os.path.exists(os.path.join(pool, "poses.csv")):

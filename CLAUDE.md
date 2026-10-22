@@ -673,6 +673,10 @@ extract once, then run the pipeline on subsets of it, in the same project):
   - `select_keyframes`: per source, jump to the farthest of the next 16 images with overlap ≥
     min_overlap to the current keyframe and ≥ ½ of that to the keyframe before (≈ 3 views per point);
     none → the next image. Levels dense / normal / sparse = 0.20 / 0.12 / 0.06, default **dense**.
+  - **Default: keyframes, density dense** (the user asked, 2026-10-22; `gui/subset.py DEFAULT_MODE`): a project that
+    never chose a subset (none recorded in poses.json) starts on keyframes, so Run full pipeline runs the overlap
+    analysis and the keyframe selection first. A chosen every N-th is kept, also every 1 over the whole range ("all
+    images": `apply_subsample` now records it instead of nothing).
   - GUI: Selection "every N-th image" / "keyframes", Keyframe density; the preview shows the
     neighbours' overlap (weakest / 5% / median) for either selection once the analysis exists.
   - Progress: "features: image k / n · name", then "matching: pair k / n" (the match stage shows
