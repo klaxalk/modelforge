@@ -214,7 +214,7 @@ class App:
                                           "triangulation and fusion stop when their current call returns. Splat "
                                           "training saves a checkpoint at the current step, then exports that "
                                           "partial splat (shown and exportable; Splat tab → Resume continues).")
-        self.g_stop.on_click(lambda _: self.stop())
+        self.g_stop.on_click(lambda ev: self._stop_clicked(ev.client))
         # Two panels: the right (main) one runs the methods, the left one holds everything else.
         self.left = gui.add_panel()
         tabs = gui.add_tab_group()
@@ -1474,8 +1474,24 @@ class App:
                 f"{info['iterations'] or splat.DEFAULT_ITERATIONS:,}"
                 " · **Resume training** continues with its settings (×" + str(info["downscale"]) + ")")
 
+    def _stop_clicked(self, client):
+        """Stop button: asks first (a stopped refine or extraction starts over; a misclick cost a long run)."""
+        if client is None:
+            self.stop()
+            return
+        job = (getattr(self, "_job", None) or {}).get("label") if self.running else None
+        what = (f"the running job (**{job}**)" if job else "the running job") + \
+            (" and the extraction" if self.running and self.ingest.running else "") if self.running else \
+            "the extraction"
+        with client.gui.add_modal("Stop?") as m:
+            client.gui.add_markdown(
+                f"Stop {what}? A stopped stage starts over when run again; splat training saves a checkpoint "
+                "and can be resumed (Splat tab).")
+            row = client.gui.add_button_group("", options=("Stop", "Keep running"))
+        row.on_click(lambda ev: (m.close(), self.stop() if ev.target.value == "Stop" else None))
+
     def stop(self):
-        """Stop button: cancel the running job and / or an extraction (in a thread: killing a
+        """Stop (after the confirmation): cancel the running job and / or an extraction (in a thread: killing a
         subprocess may wait a few seconds)."""
         tokens = [t for t in (self._token if self.running else None,
                               self.ingest.token if self.ingest.running else None) if t is not None]
@@ -2213,7 +2229,10 @@ class App:
                                    + (f" / {cap}" if cap else "") + f", cost {ev['cost']:.4g}")
             if stage == "polish" and ev.get("windows"):
                 self.g_progress.value = 88.0 + 10.0 * (ev["window"] + 1) / ev["windows"]
-            self._update_cameras_live(ev["rec"])
+            try:
+                self._update_cameras_live(ev["rec"])
+            except Exception:  # noqa: BLE001 - the live view never stops a refine (this runs inside Ceres)
+                traceback.print_exc()
         elif phase in ("round_done", "done"):
             if ev.get("ba"):  # the round's final iteration count, e.g. 120 / 500 (SETTLED)
                 ba = ev["ba"]
@@ -2238,10 +2257,15 @@ class App:
     def _update_cameras_live(self, rec):
         """Move existing frustums to the poses Ceres is currently evaluating (cheap: no re-adding)."""
         cams = self.project.poses_from_reconstruction(rec)
-        for i, h in self.cam_handles.items():
-            if cams.valid[i]:
-                h.position = cams.centers[i]
-                h.wxyz = cams.wxyz(i)
+        with self.lock:  # a redraw (View toggles, a snapshot) replaces the frustums meanwhile
+            handles = list(self.cam_handles.items())
+        for i, h in handles:
+            if i < len(cams.valid) and cams.valid[i]:
+                try:
+                    h.position = cams.centers[i]
+                    h.wxyz = cams.wxyz(i)
+                except RuntimeError:  # removed by a redraw just now: the new one shows the next update
+                    pass
         self._draw_lines(cams)
 
     # ------------------------------------------------------------- dense / splat
