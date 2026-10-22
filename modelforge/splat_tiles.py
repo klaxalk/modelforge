@@ -487,7 +487,7 @@ def _reset(project, k, tile):
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
         lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None, depth_cloud=None,
-        depth_dense=False, layout="rectangles", skip=None):
+        depth_dense=False, layout="rectangles", skip=None, regularize=None):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
@@ -495,7 +495,8 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     carry on as in one run), and the tiles are merged after each round; 0 = one tile after the other.
     The tiles of `setup` are used when they fit (same photos per tile, same cameras), else it runs first.
     only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged.
-    skip: tile indices to leave out (written after a new set-up; None keeps tiles/skip.json as it is)."""
+    skip: tile indices to leave out (written after a new set-up; None keeps tiles/skip.json as it is).
+    regularize: the far-field mask / flattening for every tile (splat.run)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     job = job or jobs.Token()
@@ -527,6 +528,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             _reset(project, k, state["tiles"][k])
         state.update(method=method, plan_args=dict(plan_args, downscale=down), extra=list(extra), cache=cache,
                      lidar_depth=lidar_depth, depth_cloud=depth_cloud, depth_dense=bool(depth_dense),
+                     regularize=regularize,
                      round_steps=0 if only is not None else int(round_steps or 0),
                      only=only, round=1)
         json.dump(state, open(state_path, "w"), indent=1)
@@ -623,7 +625,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             else:
                 stats = splat.run(tdir, method, iters, extra, cache=tile_cache, downscale=down,
                                   lidar_depth=lidar_depth, schedule=tile["schedule"], depth_cloud=depth_cloud,
-                                  depth_dense=depth_dense,
+                                  depth_dense=depth_dense, regularize=state.get("regularize"),
                                   **common)
         except splat.Paused:
             tile["status"] = "paused"
@@ -699,8 +701,12 @@ def adopt_checkpoint(project, k, tile, state, down):
     tdir = tile_dir(project, k)
     cache = state["cache"] if state["cache"] != "auto" else splat.auto_cache(tdir, down)[0]
     os.makedirs(os.path.join(tdir, "splat"), exist_ok=True)
+    lidar = state["lidar_depth"]
+    if lidar is None and splat.regularizing(state.get("regularize")):
+        lidar = 0.0  # as splat.run trained it: the plugin's model
     json.dump({"method": state["method"], "iterations": tile["iterations"], "extra": list(state["extra"]),
-               "cache": cache, "downscale": int(down), "lidar_depth": state["lidar_depth"],
+               "cache": cache, "downscale": int(down), "lidar_depth": lidar,
+               "regularize": state.get("regularize"),
                "schedule": tile["schedule"], "depth_cloud": state.get("depth_cloud"),
                "depth_dense": bool(state.get("depth_dense")), "load_dir": best[1], "step": best[0],
                "transforms_mtime": os.path.getmtime(os.path.join(tdir, "transforms.json"))},

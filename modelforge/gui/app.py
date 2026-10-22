@@ -608,6 +608,18 @@ class App:
                      "every pixel the mesh covers, instead of only its vertices (~1 pixel in 10 on a drone survey). "
                      "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
                      "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
+            self.g_splat_far = gui.add_number(
+                "Far-field mask (× median depth)", initial_value=0.0, min=0.0, step=0.5,
+                hint="With the dense mesh prior: each photo's pixels deeper than this × its median depth are left "
+                     "out of the colour and depth losses. The far, grazing part of an oblique photo is low "
+                     "resolution and smeared along the flight; on ground seen from one side only (a single pass at "
+                     "~45°) it pulls the Gaussians that the sharp near views refine towards a blur. 0 = off; try 2-3.")
+            self.g_splat_flatten = gui.add_number(
+                "Flatten Gaussians (weight)", initial_value=0.0, min=0.0, step=0.05,
+                hint="Loss on each Gaussian's smallest scale relative to its middle one: flat discs on the surface "
+                     "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. 0 = off; try "
+                     "0.05-0.2. Either setting trains splatfacto's -lidar variant (depth loss off without a depth "
+                     "weight).")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -1914,6 +1926,11 @@ class App:
                                job=self._token)
         return stats
 
+    def _regularize(self):
+        """Splat tab → Far-field mask / Flatten Gaussians for splat.run (None when both are off)."""
+        reg = {"far_mask": float(self.g_splat_far.value), "flatten": float(self.g_splat_flatten.value)}
+        return reg if splat.regularizing(reg) else None
+
     def _splat_survey(self, project):
         """splat_plan.survey of the project, cached by its camera files' times."""
         key = (project,) + tuple(os.path.getmtime(os.path.join(project, f)) if os.path.exists(os.path.join(project, f))
@@ -2025,7 +2042,7 @@ class App:
                                      max_gaussians=int(float(self.g_splat_maxg.value) * 1e6),
                                      camera_opt=self.g_splat_camopt.value),
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, depth_cloud=mesh,
-                                depth_dense=bool(self.g_splat_mesh_dense.value),
+                                depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(),
                                 on_tile=on_tile,
                                 photos=int(self.g_splat_tile_photos.value), layout=self.g_splat_tile_layout.value,
                                 round_steps=int(self.g_splat_rounds.value), only=only, **common)
@@ -2036,7 +2053,7 @@ class App:
                     self._on_log(f"splat: image cache {cache} ({gb:.1f} GB of decoded photos)")
                 splat.run(project, self.g_splat_method.value, iters, cache=cache,
                           downscale=down, lidar_depth=lidar_depth, schedule=plan, depth_cloud=mesh,
-                          depth_dense=bool(self.g_splat_mesh_dense.value), **common)
+                          depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(), **common)
             self.g_splat.value = True  # show the finished splat (drawn by _refresh_dense after the run)
         except splat.Paused:
             keep_live = live  # paused: the last live snapshot stays on screen (the Splat toggle drives it)

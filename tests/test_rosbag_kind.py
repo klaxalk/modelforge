@@ -276,6 +276,10 @@ def test_splat_lidar_command():
     cmd = splat.train_command("p", "splatfacto-big", 100, lidar_depth=0.3)
     assert cmd[1] == "splatfacto-big-lidar" and cmd[cmd.index("--method-name") + 1] == "splatfacto-big-lidar"
     assert cmd[cmd.index("--pipeline.model.lidar-depth-lambda") + 1] == "0.3" and cmd[-3] == "lidar-data"
+    reg = splat.train_command("p", "splatfacto", 100, lidar_depth=0.0, regularize={"far_mask": 2.5, "flatten": 0.1})
+    assert reg[reg.index("--pipeline.model.far-mask") + 1] == "2.5"
+    assert reg[reg.index("--pipeline.model.flatten-lambda") + 1] == "0.1"
+    assert splat.regularizing({"far_mask": 0, "flatten": 0.1}) and not splat.regularizing({"far_mask": 0, "flatten": 0})
     plain = splat.train_command("p", "splatfacto")
     assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
     assert splat.parse_lidar("[lidar] step 1500: depth error median 0.64% p90 2.57% within 5% 95.3%") == {
@@ -308,3 +312,4 @@ print("ok")
     r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "--help"], env=splat._env(),
                        capture_output=True, text=True, timeout=300)
     assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]
+    assert "far-mask" in r.stdout and "flatten-lambda" in r.stdout
