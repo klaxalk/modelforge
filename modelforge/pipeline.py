@@ -568,8 +568,8 @@ def stage_export(project, report, rec=None, lidar=True, drop_isolated=True, prog
         iso["points_removed"] = iso["points_before"] - iso["points"]
         iso["seconds"] = round(time.time() - t0, 1)
         log(f"export: {len(iso['drop'])} of {iso['photos']} photos left out: weakly tied to other passes and over "
-            f"{isolated.MAX_OFF:.0%} of their ground > {isolated.MAX_DZ} m off the others' ({iso['isolated']} weakly "
-            f"tied); points {iso['points_before']:,} → {iso['points']:,}; stretches (t0, t1, photos, share of cells off) "
+            f"{isolated.MAX_OFF:.0%} of their ground > {isolated.MAX_DZ} m off the others', also on open flat ground "
+            f"({iso['isolated']} weakly tied, {iso.get('candidates', 0)} with their ground off); points {iso['points_before']:,} → {iso['points']:,}; stretches (t0, t1, photos, share of cells off) "
             f"{iso['stretches'][:10]}{' …' if len(iso['stretches']) > 10 else ''}")
     step("writing transforms.json + sparse_pc.ply")
     path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar,

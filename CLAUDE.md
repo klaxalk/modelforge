@@ -1343,9 +1343,17 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     - kladno_dira (global refine, round 1 skipped at 75 iterations): 689 weakly tied, 309 dropped (10.7 %),
       268k of 2.4M points; tile 3's 2 m cells with a pass > 1 m off the others 175 → 52 (the crossing's +1.8 m
       copy, 77 cells, gone; 30 %: 243 photos, 102 cells). 45 s on 2883 photos. Test: `tests/test_isolated.py`.
-    - **Open (berlin, 2026-10-22):** its export left out **801 of 2535** photos (a third). The rule was tuned on the
-      kladno quarry; in a city, roofs, walls and trees likely put many passes > 1 m off in over 20 % of their cells.
-      Not checked yet; worth a look before judging berlin's splats.
+    - **Flat ground decides** (berlin, 2026-10-22; the user saw a big chunk of cameras missing near a tile seam):
+      the cell rule left out **1095 of 3142** berlin photos, mostly low passes under trees and a flight inside the
+      halls: their cells differ because they see other surfaces (ground under canopy, a floor under a roof). Renders
+      of the splat trained without them lined up with the photos. On open flat cells (the other passes' ground level
+      within 0.3 m over the 3 x 3 cells around) berlin_3_3 / 3_4 agreed to 0.09 m, kladno_dira's drops were 0.9 m off
+      (all flat cells), berlin_3_2's "offsets" ~10 m (floor vs roof). Now a candidate (the cell rule) is a copy when
+      >= 5 of its flat cells lie within 4 m of the others and >= half of those > 0.5 m off (`isolated.MIN_FLAT`,
+      `FLAT_*`); candidates < 5 s apart are decided together by those with flat cells, a stretch without any stays.
+      berlin 1095 -> 117 (88 of berlin_3_2 beside / inside the halls, e.g. 3_2_00425: 34 flat cells at -1.2 m; 29 of
+      the end of berlin_3_1, t >= 504 s); kladno_dira 309 -> 192, all 48 of the known crossing. report
+      `export.isolated.candidates`. Test: `test_different_surfaces_are_not_a_copy`.
     - **Progress** (the user asked): `stage_export(progress=)` shows reading / finding isolated photos (point k / n,
       photo k / n) / "triangulating: image k / n" (COLMAP reports it only in its log: `jobs.stderr_lines` taps file
       descriptor 2 during `pycolmap.triangulate_points`, `refine.triangulate(progress=)`) / "refining points: batch
@@ -1647,8 +1655,7 @@ export).
     them ("No block is touched in TSDF volume").
   - kladno_dira medium (11.6 cm voxel): 23.4M faces, 9 min. `jobs.Token.run`'s error line skips lines that are
     only colour codes (Open3D ends its red errors with one).
-- **Patch holes** (Splat mesh tab "Max hole size (m)" + **Patch holes**, stage `splatmesh-fill`, also in Run full
-  pipeline after the splat mesh; `python -m modelforge.splat_mesh PROJECT --fill [MAX]`; the user asked for the SfM
+- **Patch holes** (Splat mesh tab "Max hole size (m)" + **Patch holes**, stage `splatmesh-fill`; `python -m modelforge.splat_mesh PROJECT --fill [MAX]`; the user asked for the SfM
   mesh's option here, 2026-10-22). Marching cubes leaves real gaps (no Poisson surface underneath as in the SfM mesh),
   so `splat_mesh.fill` closes border loops: every loop that is not its piece's widest (the outer border; for the
   ground the scene's edge, for a floater its rim) and is at most the size across (bounding box; 0 = 40 voxels; the GUI
@@ -1677,8 +1684,8 @@ export).
 
   The COLMAP row is the 320 px preset, so it is not a like-for-like comparison. The test LiDAR is
   the MVS fused cloud (~8.5 cm spacing), which bounds the medians.
-- GUI: quality, render width, max depth (0 = auto), **Build mesh from splat**. The full
-  pipeline always builds it after the splat (it is the pipeline's dense result). The View tab's
+- GUI: quality, render width, max depth (0 = auto), **Build mesh from splat**. Not part of
+  Run full pipeline since 2026-10-22 (the user asked). The View tab's
   Mesh dropdown gets `splat` (vertex colours) and switches to it; the Export tab exports it
   (glb / obj / ply).
 - Mesh export now rotates with `trimesh.apply_transform`, which keeps the stored vertex normals.
@@ -1755,7 +1762,7 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   range); "a machine" at 0.66 → 1 object instead of 3 (944 floating matches ignored), "a car" loses 16 %
   of its matches (glossy parts), "gravel pile" 20 → 18 objects. It cannot fix matches bleeding onto real
   surfaces (the ground around the machine): that is the threshold's job.
-- **In the full pipeline** (the user asked): after splat + splat mesh, unless the Search tab's "Include in Run
+- **In the full pipeline** (the user asked): after the splat, unless the Search tab's "Include in Run
   full pipeline" is off; the History line: "900,283 of 1,018,377 Gaussians from 56 photos (c-radio_v3-l,
   2048 px), 38 s".
 - **Unloading for jobs** (the user asked): `App.run_stage` calls `SemanticPanel.unload(stage)` for every
@@ -2053,10 +2060,10 @@ Code layout:
       480 px). The user wanted them split side by side; a floating panel
       cannot be split into columns (only docked ones can), so they are two
       windows. Both start minimized.
-  - **Run full pipeline** (stage `all`) runs SfM → splat → splat mesh → semantic features (Search tab
-    "Include in Run full pipeline", default on; skipped without the RADIO packages) with the
-    tabs' settings: the dense result is the mesh from the splat, as the user asked
-    (2026-10-18). COLMAP's MVS follows only with the Dense tab's "Include in Run full
+  - **Run full pipeline** (stage `all`) runs SfM → SfM mesh → splat → semantic features (Search tab
+    "Include in Run full pipeline", default on; skipped without the RADIO packages) → colouring the SfM mesh, with
+    the tabs' settings. **No splat mesh** (2026-10-22, the user asked; from 2026-10-18 until then it was the
+    pipeline's dense result): Splat mesh tab by hand. COLMAP's MVS follows only with the Dense tab's "Include in Run full
     pipeline" (off by default). A project without images is extracted first from
     its Ingest plan (`IngestPanel.extract_now`). Splat / dense are skipped, with a
     History note, without nerfstudio / CUDA.

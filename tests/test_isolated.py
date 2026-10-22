@@ -92,6 +92,31 @@ def test_a_tilted_copy_is_dropped():
     assert "d0" in isolated.find(rec, times)["drop"]
 
 
+def test_different_surfaces_are_not_a_copy():
+    """Pass C sees the ground under a canopy (or a hall's floor under its roof) that A and B saw from above, plus
+    open ground beside it: its cells are off, but on the open ground it agrees, so it stays. With its open ground
+    1.5 m off as well it goes; with only cells 10 m off (no open ground) it stays: floor under roof."""
+    def build(open_dz, roof_z=8.0, with_open=True):
+        rec, times = scene()
+        times = {n: t for n, t in times.items() if n[0] in "abc"}  # D and E out: A and B are the reference
+        for p in rec.points.values():
+            el = {e.image_id // 10 for e in p.track.elements}
+            if el <= {0, 1} and p.xyz[1] < 12:  # A and B: a canopy / roof over y < 12
+                p.xyz = p.xyz + [0, 0, roof_z]
+            if el == {2}:  # C: its copy at the ground (C's own +1.5 m of the scene removed)
+                p.xyz = p.xyz - [0, 0, 1.5] + [0, 0, open_dz if p.xyz[1] >= 12 else 0.0]
+                if not with_open and p.xyz[1] >= 12:
+                    p.xyz = p.xyz + [0, 0, roof_z]  # all of C under the roof: nothing open to compare
+        return rec, times
+    rec, times = build(open_dz=0.03)
+    r = isolated.find(rec, times)
+    assert r["candidates"] >= 10 and not any(n.startswith("c") for n in r["drop"])
+    rec, times = build(open_dz=1.5)
+    assert sorted(n for n in isolated.find(rec, times)["drop"] if n.startswith("c")) == [f"c{j}" for j in range(10)]
+    rec, times = build(open_dz=0.0, roof_z=10.0, with_open=False)
+    assert not any(n.startswith("c") for n in isolated.find(rec, times)["drop"])
+
+
 def test_flight_without_revisits_drops_nothing():
     rec, times = scene()
     one_pass = {n: t for n, t in times.items() if n[0] in "a"}  # images without a time are ignored

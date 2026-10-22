@@ -85,7 +85,7 @@ STAGE_HINTS = {
                       "environment. A few minutes for thousands of photos.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
-    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh (holes patched) → "
+    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → "
            "semantic features → SfM mesh coloured from the photos (→ COLMAP dense if ticked in the Dense tab).",
 }
 NEXT_STEP = {
@@ -213,8 +213,8 @@ class App:
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
         self.g_buttons = {}
         b = gui.add_button("Run full pipeline", icon=viser.Icon.PLAYER_TRACK_NEXT_FILLED, color="green",
-                           hint="Sparse → splat → mesh from the splat in one go (COLMAP's dense too if ticked in the Dense "
-                                "tab), with the settings of the tabs below (and the "
+                           hint="Sparse → SfM mesh → splat in one go (COLMAP's dense too if ticked in the Dense "
+                                "tab; the mesh from the splat is the Splat mesh tab's), with the settings of the tabs below (and the "
                                 "Ingest plan: images are extracted first if the project has none yet). Stages that "
                                 "need a GPU are skipped without one.")
         b.on_click(lambda _: self.run_stage("all"))
@@ -422,8 +422,9 @@ class App:
                 "Export: leave out isolated photos", initial_value=True,
                 hint="Export (transforms.json, sparse_pc.ply, so the splat): leave out photos that share almost no "
                      "points with other passes (< 2 % of their points seen > 60 s apart) and whose ground lies off the "
-                     "other passes' ground (over 20 % of their 1 m cells more than 1 m off), and the points only they "
-                     "see. Nothing in the images places such a stretch against the rest (e.g. flown 5x higher: SIFT "
+                     "other passes' ground (over 20 % of their 1 m cells more than 1 m off) also on open flat ground "
+                     "(most flat cells 0.5-4 m off: canopy vs the ground under it, or a roof vs the floor below, is "
+                     "not a copy), and the points only they see. Nothing in the images places such a stretch against the rest (e.g. flown 5x higher: SIFT "
                      "does not match across that), so its copy of the ground lands beside the others' and would be a "
                      "ghost surface in the splat. Photos over ground no other pass saw stay.")
             self.g_skip = gui.add_button(
@@ -695,8 +696,8 @@ class App:
                 "**needs CUDA** - run the GUI in the CUDA container (`MODELFORGE_GPU=1 scripts/dev`)"))
             self.g_dense_in_all = gui.add_checkbox(
                 "Include in Run full pipeline", initial_value=False,
-                hint="Off: the full pipeline's dense result is the mesh from the splat (Splat mesh tab). On: COLMAP's "
-                     "MVS (undistort → stereo → fusion → mesh → texture) runs after it as well.")
+                hint="On: COLMAP's MVS (undistort → stereo → fusion → mesh → texture) runs at the end of the full "
+                     "pipeline. Off: the full pipeline builds no dense mesh.")
             self.g_dense_quality = gui.add_dropdown(
                 "Quality", options=tuple(DENSE_QUALITY), initial_value=DENSE_QUALITY_DEFAULT,
                 hint="Speed vs detail (image size for undistort, PatchMatch effort for stereo; set when those "
@@ -1450,7 +1451,7 @@ class App:
                 elif self.subset._images:  # every N-th: applied too when it differs from the images in use
                     seq = ["images"] + seq
                 if splat.available() is None:
-                    seq += ["splat", "splatmesh", "splatmesh-fill"]  # the dense result is the mesh from the splat
+                    seq.append("splat")  # the mesh from the splat (Splat mesh tab) is its own thing, run by hand
                     if self.semantic.g_in_all.value:  # Search tab: a searchable splat at the end
                         if semantic.available() is None:
                             seq.append("semantic")
@@ -1458,7 +1459,7 @@ class App:
                             skipped.append(f"semantic features ({semantic.available()})")
                     seq.append("sfmmesh-colour")  # for looking at; last, so the splat is not kept waiting
                 else:
-                    skipped.append(f"splat, splat mesh and colouring the SfM mesh ({splat.available()})")
+                    skipped.append(f"splat and colouring the SfM mesh ({splat.available()})")
                 if self.g_dense_in_all.value:  # COLMAP's MVS only when asked (Dense tab)
                     if dense.has_cuda():
                         seq += list(pipeline.DENSE_STAGES)
