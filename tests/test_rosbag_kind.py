@@ -35,23 +35,34 @@ def test_tf_buffer():
     assert b.frames == ["base", "cam", "world"]
 
 
-def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, images_only=False):
+def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, images_only=False, ros1=False):
     """A camera moving 0.1 m per image along x over a frozen test pattern, + TF, odometry, camera_info
-    and one LiDAR (sqlite3, or MCAP storage); returns the true T_world_cam per image."""
-    from rosbags.rosbag2 import StoragePlugin, Writer
+    and one LiDAR (sqlite3, or MCAP storage); returns the true T_world_cam per image. ros1: a ROS 1 (Noetic) .bag
+    as recorded there: Header seq, CameraInfo K / D / R / P, frame names with a leading "/"."""
+    from pathlib import Path
+
     from rosbags.typesys import Stores, get_typestore
-    ts = get_typestore(Stores.ROS2_HUMBLE)
+    ts = get_typestore(Stores.ROS1_NOETIC if ros1 else Stores.ROS2_HUMBLE)
+    if ros1 and "tf2_msgs/msg/TFMessage" not in ts.types:  # not in rosbags' Noetic store (bags carry their own)
+        from rosbags.typesys import get_types_from_msg
+        ts.register(get_types_from_msg("geometry_msgs/TransformStamped[] transforms", "tf2_msgs/msg/TFMessage"))
     T_ = ts.types
     Time, Header = T_["builtin_interfaces/msg/Time"], T_["std_msgs/msg/Header"]
     Vec3, Quat, Point = T_["geometry_msgs/msg/Vector3"], T_["geometry_msgs/msg/Quaternion"], T_["geometry_msgs/msg/Point"]
+    slash = "/" if ros1 else ""
 
     def header(t, frame):
-        return Header(stamp=Time(sec=int(t), nanosec=int(round((t - int(t)) * 1e9))), frame_id=frame)
+        stamp = Time(sec=int(t), nanosec=int(round((t - int(t)) * 1e9)))
+        return Header(seq=0, stamp=stamp, frame_id=slash + frame) if ros1 else Header(stamp=stamp, frame_id=frame)
+
+    def info(**kw):  # ROS 1 spells the matrices in capitals
+        return T_["sensor_msgs/msg/CameraInfo"](**({k.upper() if k in "kdrp" else k: v for k, v in kw.items()}
+                                                   if ros1 else kw))
 
     def tfs(t, parent, child, T):
         q = rot_to_quat(T[:3, :3])
         return T_["geometry_msgs/msg/TransformStamped"](
-            header=header(t, parent), child_frame_id=child,
+            header=header(t, parent), child_frame_id=slash + child,
             transform=T_["geometry_msgs/msg/Transform"](translation=Vec3(x=T[0, 3], y=T[1, 3], z=T[2, 3]),
                                                         rotation=Quat(x=q[0], y=q[1], z=q[2], w=q[3])))
     R_base_cam = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], float)
@@ -59,15 +70,20 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, im
     T_world_odom = make(np.eye(3), (5.0, 0, 0))
     tex = np.random.default_rng(0).integers(0, 255, (h, w * 4, 3), np.uint8)  # a texture to pan across
     truth = []
-    storage = StoragePlugin.MCAP if mcap else StoragePlugin.SQLITE3
-    with Writer(path, version=9, storage_plugin=storage) as wr:
+    if ros1:
+        from rosbags.rosbag1 import Writer
+        writer = Writer(Path(path))
+    else:
+        from rosbags.rosbag2 import StoragePlugin, Writer
+        writer = Writer(path, version=9, storage_plugin=StoragePlugin.MCAP if mcap else StoragePlugin.SQLITE3)
+    with writer as wr:
         conns = {t: wr.add_connection(t, ty, typestore=ts) for t, ty in (
             ("/cam/image/compressed", "sensor_msgs/msg/CompressedImage"), ("/cam/info", "sensor_msgs/msg/CameraInfo"),
             ("/tf", "tf2_msgs/msg/TFMessage"), ("/tf_static", "tf2_msgs/msg/TFMessage"),
             ("/odom", "nav_msgs/msg/Odometry"), ("/scan", "sensor_msgs/msg/PointCloud2"))}
 
         def write(topic, t, msg):
-            wr.write(conns[topic], int(t * 1e9), ts.serialize_cdr(msg, conns[topic].msgtype))
+            wr.write(conns[topic], int(t * 1e9), (ts.serialize_ros1 if ros1 else ts.serialize_cdr)(msg, conns[topic].msgtype))
         if images_only:  # no TF, no odometry, no LiDAR: images (+ camera_info) only
             write = (lambda w_: lambda topic, t, msg: w_(topic, t, msg) if topic.startswith("/cam/") else None)(write)
         write("/tf_static", 100.0, T_["tf2_msgs/msg/TFMessage"](transforms=[
@@ -80,7 +96,7 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, im
             To = inv(T_world_odom) @ T_wb
             q = rot_to_quat(To[:3, :3])
             write("/odom", t, T_["nav_msgs/msg/Odometry"](
-                header=header(t, "odom"), child_frame_id="base",
+                header=header(t, "odom"), child_frame_id=slash + "base",
                 pose=T_["geometry_msgs/msg/PoseWithCovariance"](
                     pose=T_["geometry_msgs/msg/Pose"](position=Point(x=To[0, 3], y=To[1, 3], z=To[2, 3]),
                                                       orientation=Quat(x=q[0], y=q[1], z=q[2], w=q[3])),
@@ -92,7 +108,7 @@ def write_small_bag(path, n=30, w=160, h=120, mcap=False, uncalibrated=False, im
             ok, jpg = cv2.imencode(".jpg", img)
             write("/cam/image/compressed", t, T_["sensor_msgs/msg/CompressedImage"](
                 header=header(t, "cam_optical"), format="jpeg", data=jpg.reshape(-1)))
-            write("/cam/info", t, T_["sensor_msgs/msg/CameraInfo"](  # uncalibrated drivers publish all zeros
+            write("/cam/info", t, info(  # uncalibrated drivers publish all zeros
                 header=header(t, "cam_optical"), height=0 if uncalibrated else h, width=0 if uncalibrated else w,
                 distortion_model="" if uncalibrated else "plumb_bob",
                 d=np.zeros(0) if uncalibrated else np.array([0.01, 0.0, 0.0, 0.0, 0.0]),
@@ -195,9 +211,12 @@ def test_uncalibrated_camera_info(tmp_path):
     assert any("no calibration" in m for m in lines)
 
 
-def test_small_bag(tmp_path):
-    path = str(tmp_path / "small_bag")
-    truth = write_small_bag(path)
+@pytest.mark.parametrize("ros1", [False, True], ids=["ros2", "ros1"])
+def test_small_bag(tmp_path, ros1):
+    """The same bag as ROS 2 (sqlite3 folder) and ROS 1 (Noetic .bag): topics, TF / odometry poses, camera_info,
+    extraction and the LiDAR cloud."""
+    path = str(tmp_path / ("small_bag.bag" if ros1 else "small_bag"))
+    truth = write_small_bag(path, ros1=ros1)
     assert bag.is_bag(path) and bag.find_bags(str(tmp_path)) == [path]
     d = ri.ros_defaults(path)
     assert d["image_topic"] == "/cam/image/compressed" and d["info_topic"] == "/cam/info"
@@ -225,13 +244,16 @@ def test_small_bag(tmp_path):
 
 @pytest.mark.skipif(not (os.path.exists(sample_video()) and os.path.exists(os.path.join(FULLRUN, "dense", "fused.ply"))),
                     reason="needs the sample clip and data/fullrun_test (refined, with dense/fused.ply)")
-def test_rosbag_project_through_the_gui(tmp_path):
-    """The berlin-derived bag: TF poses (telemetry), camera_info, two LiDARs; extract 20 images, SfM."""
+@pytest.mark.parametrize("ros1", [False, True], ids=["ros2", "ros1"])
+def test_rosbag_project_through_the_gui(tmp_path, ros1):
+    """The berlin-derived bag, as ROS 2 and as ROS 1 (Noetic): TF poses (telemetry), camera_info, two LiDARs;
+    extract 20 images, SfM."""
     from modelforge.gui.app import App
     from tests.rosbag_fixture import make_bag
     root = str(tmp_path / "data")
     os.makedirs(root)
-    bag_path = make_bag(str(tmp_path / "data" / "bag"), FULLRUN, sample_video(), 306.0, 316.0)
+    bag_path = make_bag(str(tmp_path / "data" / ("bag.bag" if ros1 else "bag")), FULLRUN, sample_video(), 306.0,
+                        316.0, ros1=ros1)
     path = projects.create(root, "robot", kind="rosbag")
     with socket.socket() as s:
         s.bind(("", 0))
@@ -239,7 +261,17 @@ def test_rosbag_project_through_the_gui(tmp_path):
     app = App(path, port=port, root=root)
     try:
         ing = app.ingest
-        assert ing.kind == "rosbag" and ing.g_ros.visible and not ing.g_upload.visible
+        assert ing.kind == "rosbag" and ing.g_ros.visible and ing.g_upload.visible  # .bag / .mcap are single files
+        if ros1:  # the Ingest tab's upload button takes a ROS 1 bag into the library, ready as a source
+
+            class Upload:
+                name, content = "uploaded.bag", open(bag_path, "rb").read()
+            ing._on_upload(Upload())
+            t_up = time.time()
+            while "uploaded" not in ing.g_upload_md.content and time.time() - t_up < 60:
+                time.sleep(0.2)
+            assert ing.g_upload_md.content.startswith("✅"), ing.g_upload_md.content
+            assert os.path.relpath(os.path.join(root, "videos", "uploaded.bag")) in ing.g_video.options
         assert app.g_buttons["refine"].visible and app.g_dense_lidar.visible and not app.g_upright.value
         ing.sources = [dji.Source(os.path.relpath(bag_path))]
         ing.settings = dji.Settings(sampling="distance", num_images=20)
@@ -276,10 +308,10 @@ def test_splat_lidar_command():
     cmd = splat.train_command("p", "splatfacto-big", 100, lidar_depth=0.3)
     assert cmd[1] == "splatfacto-big-lidar" and cmd[cmd.index("--method-name") + 1] == "splatfacto-big-lidar"
     assert cmd[cmd.index("--pipeline.model.lidar-depth-lambda") + 1] == "0.3" and cmd[-3] == "lidar-data"
-    reg = splat.train_command("p", "splatfacto", 100, lidar_depth=0.0, regularize={"far_mask": 2.5, "flatten": 0.1})
-    assert reg[reg.index("--pipeline.model.far-mask") + 1] == "2.5"
+    reg = splat.train_command("p", "splatfacto", 100, lidar_depth=0.0, regularize={"flatten": 0.1})
+    assert "--pipeline.model.far-mask" not in reg
     assert reg[reg.index("--pipeline.model.flatten-lambda") + 1] == "0.1"
-    assert splat.regularizing({"far_mask": 0, "flatten": 0.1}) and not splat.regularizing({"far_mask": 0, "flatten": 0})
+    assert splat.regularizing({"flatten": 0.1}) and not splat.regularizing({"flatten": 0})
     plain = splat.train_command("p", "splatfacto")
     assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
     assert splat.parse_lidar("[lidar] step 1500: depth error median 0.64% p90 2.57% within 5% 95.3%") == {
@@ -312,4 +344,4 @@ print("ok")
     r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "--help"], env=splat._env(),
                        capture_output=True, text=True, timeout=300)
     assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]
-    assert "far-mask" in r.stdout and "flatten-lambda" in r.stdout
+    assert "flatten-lambda" in r.stdout

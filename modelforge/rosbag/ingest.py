@@ -1,7 +1,7 @@
-"""Frame extraction from ROS 2 bags: project kind "rosbag".
+"""Frame extraction from ROS bags (ROS 1 .bag, ROS 2 folder / .mcap): project kind "rosbag".
 
 Same plan / extract interface as modelforge.dji.ingest (load_clip, make_plan, preview, run). A source
-is a bag (folder with metadata.yaml, or an .mcap file) plus a time range; Settings.ros holds:
+is a bag (a ROS 1 .bag; ROS 2: a folder with metadata.yaml, or an .mcap file) plus a time range; Settings.ros holds:
     image_topic   sensor_msgs/CompressedImage or Image
     info_topic    sensor_msgs/CameraInfo ("" = none: intrinsics are estimated in BA)
     pose_source   "tf": T_world_camera from the TF tree at each image stamp, or

@@ -1,5 +1,10 @@
-"""Reading ROS 2 bags (sqlite3 or MCAP) with the rosbags library: topic inventory, TF, images,
-camera_info, odometry and point clouds. Times are in seconds (header stamps)."""
+"""Reading ROS bags with the rosbags library: ROS 2 (a folder with metadata.yaml: sqlite3 / MCAP, or a single
+.mcap) and ROS 1 (a .bag file, e.g. Noetic; the user asked, 2026-10-22). Topic inventory, TF, images, camera_info,
+odometry and point clouds. Times are in seconds (header stamps).
+
+rosbags' AnyReader reads both: ROS 1 bags carry their message definitions, and their types get the ROS 2 names
+(sensor_msgs/msg/Image), times sec / nanosec. Differences handled here: ROS 1 CameraInfo spells K / D (ROS 2 k / d),
+and frame ids often start with "/" (stripped, also by the TF buffer)."""
 
 import os
 from functools import lru_cache
@@ -14,12 +19,13 @@ INFO_TYPE = "sensor_msgs/msg/CameraInfo"
 ODOM_TYPE = "nav_msgs/msg/Odometry"
 CLOUD_TYPE = "sensor_msgs/msg/PointCloud2"
 TF_TYPE = "tf2_msgs/msg/TFMessage"
+BAG_FILE_EXTS = (".mcap", ".bag")  # single-file bags: ROS 2 MCAP, ROS 1
 
 
 def is_bag(path):
-    """A ROS 2 bag: a folder with metadata.yaml, or a single .mcap file."""
+    """A ROS bag: a ROS 2 folder with metadata.yaml, a single .mcap file, or a ROS 1 .bag file."""
     return (os.path.isdir(path) and os.path.exists(os.path.join(path, "metadata.yaml"))) or \
-        (os.path.isfile(path) and path.lower().endswith(".mcap"))
+        (os.path.isfile(path) and path.lower().endswith(BAG_FILE_EXTS))
 
 
 def find_bags(root):
@@ -33,7 +39,7 @@ def find_bags(root):
             dirs[:] = []
             continue
         dirs[:] = sorted(x for x in dirs if not x.startswith("."))
-        out += [os.path.join(d, f) for f in sorted(files) if f.lower().endswith(".mcap")]
+        out += [os.path.join(d, f) for f in sorted(files) if f.lower().endswith(BAG_FILE_EXTS)]
     return out
 
 
@@ -171,7 +177,8 @@ def camera_info(path, topic):
         conns = [c for c in r.connections if c.topic == topic]
         for conn, _, raw in r.messages(connections=conns):
             m = r.deserialize(raw, conn.msgtype)
-            K, d, dm = np.asarray(m.k, float).reshape(3, 3), list(np.asarray(m.d, float)), m.distortion_model
+            k, d = (m.k, m.d) if hasattr(m, "k") else (m.K, m.D)  # ROS 1 spells them K / D
+            K, d, dm = np.asarray(k, float).reshape(3, 3), list(np.asarray(d, float)), m.distortion_model
             fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
             if m.width <= 0 or m.height <= 0 or fx <= 0 or fy <= 0:  # not calibrated: try the next message
                 continue

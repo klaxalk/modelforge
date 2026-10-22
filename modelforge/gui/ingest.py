@@ -75,7 +75,6 @@ class IngestPanel:
             h.visible = poses
         self.g_yaw.visible = self.kind == "dji"
         self.g_ros.visible = self.kind == "rosbag"
-        self.g_upload.visible = self.g_upload_md.visible = self.kind != "rosbag"  # bags are folders
         self.g_extract.label = "Extract images + priors" if poses else "Extract images"
 
     def set_project(self, path):
@@ -143,15 +142,16 @@ class IngestPanel:
                                             "range). Rescan: look for new videos.")
             row.on_click(lambda e: self.add_source() if e.target.value == "Add as source" else self.rescan())
             self.g_upload = gui.add_upload_button(
-                "Upload video / SRT", icon=viser.Icon.UPLOAD,
-                mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT",
-                hint="Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, from this computer into "
-                     "the shared video library (data/videos/, managed in the Videos tab). The video carries all the "
-                     "metadata; the .SRT only gives a quicker, firmer telemetry alignment. Large clips take a while: "
-                     "progress shows below. An existing file is not overwritten.")
+                "Upload video / SRT / ROS bag", icon=viser.Icon.UPLOAD,
+                mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.bag,.mcap",
+                hint="Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, or a ROS bag file (ROS 1 "
+                     ".bag, ROS 2 .mcap) from this computer into the shared video library (data/videos/, managed in "
+                     "the Videos tab). The video carries all the metadata; the .SRT only gives a quicker, firmer "
+                     "telemetry alignment. A ROS 2 bag folder (metadata.yaml + .db3) goes through the Videos tab as a "
+                     ".zip. Large files take a while: progress shows below. An existing file is not overwritten.")
             self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
             self.g_upload_md = gui.add_markdown("")
-        self.g_ros = gui.add_folder("ROS 2 bag")
+        self.g_ros = gui.add_folder("ROS bag")
         with self.g_ros:
             self.g_ros_md = gui.add_markdown("_add a bag as a source above_")
             self.g_ros_image = gui.add_dropdown("Image topic", options=("-",),
@@ -281,7 +281,7 @@ class IngestPanel:
                 self.rescan()
                 if rel in self.g_video.options:
                     self.g_video.value = rel
-                hint = "" if rel.lower().endswith(".srt") else (
+                hint = "" if rel.lower().endswith(".srt") else "; then **Add as source**" if videos.is_bag(path) else (
                     "; then **Add as source**" + ("" if ingest.find_srt(path) else
                                                   " (no .SRT: fine, the alignment is estimated from the video, "
                                                   "about a minute once per clip)"))
@@ -297,10 +297,10 @@ class IngestPanel:
             self.g_status.content = f"❌ video not found: `{v}`"
             return
         if self.kind == "rosbag" and not rbag.is_bag(v):
-            self.g_status.content = f"❌ not a ROS 2 bag (a folder with metadata.yaml, or an .mcap file): `{v}`"
+            self.g_status.content = f"❌ not a ROS bag (a ROS 1 .bag, a ROS 2 .mcap, or a folder with metadata.yaml): `{v}`"
             return
         if self.kind != "rosbag" and rbag.is_bag(v):
-            self.g_status.content = f"❌ `{v}` is a ROS 2 bag: it needs a project of kind ROS 2 bag"
+            self.g_status.content = f"❌ `{v}` is a ROS bag: it needs a project of kind ROS bag"
             return
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
@@ -408,7 +408,7 @@ class IngestPanel:
             ros=self.settings.ros)
         self.request_plan()
 
-    # ------------------------------------------------------------------ ROS 2 bags
+    # ------------------------------------------------------------------ ROS bags
     def _load_clip(self, s):
         if self.kind == "rosbag":
             return self.be.load_clip(s.video, ros=self._ros_full(s.video))

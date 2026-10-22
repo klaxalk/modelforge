@@ -582,7 +582,7 @@ class App:
                 g.on_update(lambda _: self._refresh_splat_plan())
             self.g_splat_lidar = gui.add_checkbox(
                 "Start from LiDAR points", initial_value=True,
-                hint="ROS 2 bag projects: the splat's initial cloud (sparse_pc.ply) gets the LiDAR points, coloured "
+                hint="ROS bag projects: the splat's initial cloud (sparse_pc.ply) gets the LiDAR points, coloured "
                      "from the images, besides the SfM points, so Gaussians start on the true surfaces even where "
                      "the images lack texture. Re-exports the dataset before training (seconds).")
             self.g_splat_depth = gui.add_number(
@@ -608,19 +608,12 @@ class App:
                      "every pixel the mesh covers, instead of only its vertices (~1 pixel in 10 on a drone survey). "
                      "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
                      "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
-            self.g_splat_far = gui.add_number(
-                "Far-field mask (× median depth)", initial_value=splat.FAR_MASK, min=0.0, step=0.25,
-                hint="With the dense mesh prior: each photo's pixels deeper than this × its median depth are left "
-                     "out of the colour and depth losses. The far, grazing part of an oblique photo is low "
-                     "resolution and smeared along the flight; on ground seen from one side only (a single pass at "
-                     "~45°) it pulls the Gaussians that the sharp near views refine towards a blur. Default 1.5 (at ~45° about "
-                     "the top third of each photo; 2.5 masked only 5 % on fullrun_test). 0 = off.")
             self.g_splat_flatten = gui.add_number(
                 "Flatten Gaussians (weight)", initial_value=splat.FLATTEN, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's smallest scale relative to its middle one: flat discs on the surface "
                      "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. Default 0.02 (0.1 "
-                     "flattened every Gaussian completely, -0.17 dB on fullrun_test). 0 = off. Either setting trains splatfacto's -lidar variant (depth loss off without a depth "
-                     "weight).")
+                     "flattened every Gaussian completely). 0 = off. On, it trains splatfacto's -lidar variant (depth loss "
+                     "off without a depth weight).")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -702,7 +695,7 @@ class App:
                      "resolution (hours for 300 images).")
             self.g_dense_lidar = gui.add_checkbox(
                 "Use LiDAR points", initial_value=True,
-                hint="ROS 2 bag projects: merge the LiDAR cloud into the fused points before meshing (each point "
+                hint="ROS bag projects: merge the LiDAR cloud into the fused points before meshing (each point "
                      "with the cameras that see it, occlusion-checked against the depth maps), so surfaces without "
                      "texture still get geometry. The image-only cloud stays as dense/fused_mvs.ply.")
             self.g_mesh_method = gui.add_dropdown(
@@ -855,7 +848,7 @@ class App:
         return ingest.load_kind(self.path)
 
     def _sparse_kind(self):
-        """pipeline.sparse_kind: a ROS 2 bag of images only reconstructs like a video."""
+        """pipeline.sparse_kind: a ROS bag of images only reconstructs like a video."""
         return pipeline.sparse_kind(self.path)
 
     def _apply_kind(self):
@@ -871,7 +864,7 @@ class App:
         self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH if self._kind() == "rosbag" else 0.0
         self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
         self.g_sparse_md.content = (
-            ("Incremental SfM from the images alone (" + ("ROS 2 bag without camera poses" if self._kind() == "rosbag"
+            ("Incremental SfM from the images alone (" + ("ROS bag without camera poses" if self._kind() == "rosbag"
                                                           else "video without metadata")
              + "): features → pairs → match → reconstruct → export. Arbitrary frame and scale, oriented up.")
             if video else
@@ -1928,8 +1921,8 @@ class App:
         return stats
 
     def _regularize(self):
-        """Splat tab → Far-field mask / Flatten Gaussians for splat.run (None when both are off)."""
-        reg = {"far_mask": float(self.g_splat_far.value), "flatten": float(self.g_splat_flatten.value)}
+        """Splat tab → Flatten Gaussians for splat.run (None when off)."""
+        reg = {"flatten": float(self.g_splat_flatten.value)}
         return reg if splat.regularizing(reg) else None
 
     def _splat_survey(self, project):
@@ -2205,7 +2198,7 @@ class App:
                 if f["points3D"] < 100:  # nothing for dense / splat to start from
                     inliers = rep.get("match", {}).get("inlier_matches", 0)
                     if inliers >= 200 * max(f["reg_images"], 1):  # the images match well: the priors are wrong
-                        hint = ("for a ROS 2 bag check Camera frame / **Extrinsic RPY** (e.g. yaw 180: the image's "
+                        hint = ("for a ROS bag check Camera frame / **Extrinsic RPY** (e.g. yaw 180: the image's "
                                 "top the other way)" if self._kind() == "rosbag" else
                                 "check the yaw source and the telemetry lead (Ingest tab)")
                         return (f"⚠️ {f['reg_images']} cameras, **{f['points3D']} 3D points** although the images "

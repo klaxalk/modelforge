@@ -199,7 +199,7 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     latest checkpoint there (a paused / stopped run; `run` trains through nsplugin/mf_train.py, which
     makes that work for splatfacto). depth_cloud: the depth loss's points from this ply instead (absolute path;
     the SfM mesh, sfm_mesh.depth_cloud). depth_maps: dense depth targets instead, a folder of per-image maps
-    (mesh_depth_maps). regularize: {"far_mask": k, "flatten": w} for the plugin (see regularizing); needs the -lidar
+    (mesh_depth_maps). regularize: {"flatten": w} for the plugin (see regularizing); needs the -lidar
     method (lidar_depth 0 = depth loss off)."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
@@ -227,8 +227,6 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     if lidar_depth is not None:
         cmd += ["--pipeline.model.lidar-depth-lambda", str(float(lidar_depth))]
         reg = regularize or {}
-        if reg.get("far_mask"):
-            cmd += ["--pipeline.model.far-mask", f"{float(reg['far_mask']):g}"]
         if reg.get("flatten"):
             cmd += ["--pipeline.model.flatten-lambda", f"{float(reg['flatten']):g}"]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
@@ -241,13 +239,12 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
-FAR_MASK = 1.5  # default far-field mask (x median depth): at ~45 deg pitch about the top third of a photo
 FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
 
 
 def regularizing(regularize):
-    """True when the far-field mask or flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
-    return bool(regularize) and any(float(v or 0) > 0 for v in regularize.values())
+    """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
+    return bool(regularize) and float(regularize.get("flatten") or 0) > 0  # older records may name far_mask: gone
 
 
 def mesh_depth_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
@@ -387,8 +384,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     SfM points (sparse_pc.ply), or `depth_cloud` (a ply path: the SfM mesh's vertices) when given; with
     depth_dense the mesh rendered into every training camera instead (mesh_depth_maps, before training).
     on_prepare(done, total): progress of writing the downscaled images (downscale > 1).
-    regularize: {"far_mask": k (x median depth; needs depth_dense), "flatten": w}; either on without a depth weight
-    trains the -lidar method with the depth loss off (lidar_depth 0)."""
+    regularize: {"flatten": w}; on without a depth weight trains the -lidar method with the depth loss off (lidar_depth 0)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     reason = available()
@@ -440,11 +436,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
             f"(viewer on http://localhost:{VIEWER_PORT})")
     if regularizing(regularize):
         reg = regularize
-        on_line("splat: " + ", ".join(
-            ([f"far-field mask beyond {float(reg['far_mask']):g} x the median depth"
-              + ("" if depth_cloud and depth_dense else " (needs the dense SfM mesh prior: off)")]
-             if float(reg.get("far_mask") or 0) > 0 else [])
-            + ([f"flattening weight {float(reg['flatten']):g}"] if float(reg.get("flatten") or 0) > 0 else [])))
+        on_line(f"splat: flattening weight {float(reg['flatten']):g}")
     stop = threading.Event()
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
@@ -612,15 +604,12 @@ def main():
                     help="only divide the scene into tiles (tiles/tiles.json + datasets), without training")
     ap.add_argument("--lidar-depth", type=float, metavar="W",
                     help=f"depth loss weight (e.g. {DEFAULT_LIDAR_DEPTH}; 0 = report only): against the LiDAR points "
-                         "(ROS 2 bags), else the SfM points (sparse_pc.ply)")
-    ap.add_argument("--far-mask", type=float, default=FAR_MASK, metavar="K",
-                    help="with the dense mesh prior: leave pixels deeper than K x the photo's median depth out of the "
-                         f"losses (single oblique passes; default {FAR_MASK}; 0 = off)")
+                         "(ROS bags), else the SfM points (sparse_pc.ply)")
     ap.add_argument("--flatten", type=float, default=FLATTEN, metavar="W",
                     help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; "
                          f"default {FLATTEN}; 0 = off)")
     args, extra = ap.parse_known_args()
-    reg = {"far_mask": args.far_mask, "flatten": args.flatten}
+    reg = {"flatten": args.flatten}
     reg = reg if regularizing(reg) else None
     project = os.path.abspath(args.project)
     try:

@@ -496,7 +496,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     The tiles of `setup` are used when they fit (same photos per tile, same cameras), else it runs first.
     only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged.
     skip: tile indices to leave out (written after a new set-up; None keeps tiles/skip.json as it is).
-    regularize: the far-field mask / flattening for every tile (splat.run)."""
+    regularize: the flattening for every tile (splat.run)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     job = job or jobs.Token()

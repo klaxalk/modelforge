@@ -1,6 +1,6 @@
-"""The video library: DJI clips (+ .SRT sidecars) and ROS 2 bags under the data root, shared by all
-projects. A bag is an .mcap file or a folder with metadata.yaml (rosbag.bag.is_bag); bag folders are
-listed as one entry, not opened. Bags arrive as an .mcap, as an archive of a bag folder (.zip / .tar /
+"""The video library: DJI clips (+ .SRT sidecars) and ROS bags under the data root, shared by all
+projects. A bag is a ROS 1 .bag file, a ROS 2 .mcap file or a ROS 2 folder with metadata.yaml (rosbag.bag.is_bag);
+bag folders are listed as one entry, not opened. Bags arrive as a .bag / .mcap, as an archive of a bag folder (.zip / .tar /
 .tar.gz, unpacked here) or as the loose files of one (metadata.yaml + .db3 / .mcap into a folder).
 
 The library is ROOT/videos/ (projects live next to it in ROOT, so names never clash); the Ingest tab
@@ -28,7 +28,7 @@ from modelforge.dji import ingest
 
 LIBRARY_DIR = projects.LIBRARY_DIR  # ROOT/videos: the library; projects live next to it in ROOT
 ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz")
-BAG_EXTS = (".mcap",)  # a single-file bag
+BAG_EXTS = (".mcap", ".bag")  # a single-file bag: ROS 2 MCAP, ROS 1
 BAG_PART_EXTS = (".db3", ".mcap")  # files inside a bag folder, with metadata.yaml
 UPLOAD_EXTS = tuple(ingest.VIDEO_EXTS) + (".srt",) + BAG_EXTS + ARCHIVE_EXTS + (".db3", ".yaml")
 _probe_cache = {}
@@ -76,12 +76,12 @@ def _inside(root, path):
 
 
 def check_video(root, path):
-    """Absolute path of a library video or ROS 2 bag; ValueError unless it is one under root, outside
+    """Absolute path of a library video or ROS bag; ValueError unless it is one under root, outside
     projects."""
     p = os.path.abspath(path)
     video = p.lower().endswith(ingest.VIDEO_EXTS) and os.path.isfile(p)
     if not (video or is_bag(p)) or not _inside(root, p):
-        raise ValueError(f"not a video or ROS 2 bag in the library: {path}")
+        raise ValueError(f"not a video or ROS bag in the library: {path}")
     d = os.path.dirname(p)
     while _inside(root, d):
         if projects.is_project(d):
@@ -157,14 +157,14 @@ def safe_name(filename):
 
 
 def save_upload(root, filename, data, overwrite=False, rel_dir=""):
-    """A browser-uploaded video, .SRT or ROS 2 bag -> ROOT/videos/rel_dir/<name> (via a temp file).
+    """A browser-uploaded video, .SRT or ROS bag -> ROOT/videos/rel_dir/<name> (via a temp file).
     Archives (.zip / .tar / .tar.gz) of a bag folder are unpacked (extract_bags); metadata.yaml and .db3
     are parts of a bag folder (upload them into one). Returns the saved path (an unpacked archive: its
     first bag)."""
     name = safe_name(filename)
     low = name.lower()
     if not low.endswith(UPLOAD_EXTS) or (low.endswith(".yaml") and low != "metadata.yaml"):
-        raise ValueError(f"not a video, .SRT or ROS 2 bag file: {name} (allowed: {', '.join(UPLOAD_EXTS)}; "
+        raise ValueError(f"not a video, .SRT or ROS bag file: {name} (allowed: {', '.join(UPLOAD_EXTS)}; "
                          ".yaml only as a bag's metadata.yaml)")
     d = resolve_dir(root, rel_dir, create=True)
     if low.endswith(ARCHIVE_EXTS):
@@ -186,7 +186,7 @@ def _archive_stem(name):
 
 
 def extract_bags(root, name, data, dest):
-    """Unpack an uploaded archive holding ROS 2 bag(s) into the library folder dest. Loose bag files
+    """Unpack an uploaded archive holding ROS bag(s) into the library folder dest. Loose bag files
     (metadata.yaml at the archive's top) go into a folder named after the archive; otherwise its
     top-level entries are kept. Members leaving the folder, links and devices are refused. Returns the
     first bag's path; ValueError (nothing kept) without a bag inside."""
@@ -213,7 +213,7 @@ def extract_bags(root, name, data, dest):
         bags = [b for src, _ in moves for b in ([src] if is_bag(src) else bag.find_bags(src)
                                                   if os.path.isdir(src) else [])]
         if not bags:
-            raise ValueError(f"no ROS 2 bag in {name} (a folder with metadata.yaml, or an .mcap file)")
+            raise ValueError(f"no ROS bag in {name} (a ROS 1 .bag, an .mcap, or a folder with metadata.yaml)")
         for _, dst in moves:
             if os.path.lexists(dst):
                 raise FileExistsError(f"{os.path.relpath(dst, root)} already exists in the library")

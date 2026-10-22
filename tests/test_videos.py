@@ -255,7 +255,7 @@ def test_videos_is_not_a_project_name(root):
     videos.make_folder(root, "", "karlak")  # a library folder of the same name: no clash any more
 
 
-# --- ROS 2 bags in the library --------------------------------------------------------------------
+# --- ROS bags in the library --------------------------------------------------------------------
 def _bag_dir(tmp, name="run1", mcap=False):
     from tests.test_rosbag_kind import write_small_bag
     path = os.path.join(str(tmp), "src", name)
@@ -294,6 +294,11 @@ def test_bag_uploads(root, tmp_path):
     m = _bag_dir(tmp_path, "m", mcap=True)
     with open(os.path.join(m, "m.mcap"), "rb") as f:
         assert videos.is_bag(videos.save_upload(root, "m.mcap", f.read()))  # a single-file bag
+    r1 = os.path.join(str(tmp_path), "src", "noetic.bag")  # a ROS 1 bag: one file
+    from tests.test_rosbag_kind import write_small_bag
+    write_small_bag(r1, n=6, ros1=True)
+    with open(r1, "rb") as f:
+        assert videos.is_bag(videos.save_upload(root, "noetic.bag", f.read()))
     for parts in ("metadata.yaml", "run1.db3"):  # the loose files of a bag folder, one by one
         with open(os.path.join(src, parts), "rb") as f:
             videos.save_upload(root, parts, f.read(), rel_dir="byhand")
@@ -306,7 +311,7 @@ def test_bag_uploads(root, tmp_path):
     nobag = io.BytesIO()
     with zipfile.ZipFile(nobag, "w") as z:
         z.writestr("notes/readme.txt", "x")
-    with pytest.raises(ValueError, match="no ROS 2 bag"):
+    with pytest.raises(ValueError, match="no ROS bag"):
         videos.save_upload(root, "nobag.zip", nobag.getvalue())
     with pytest.raises(ValueError):
         videos.save_upload(root, "other.yaml", b"x")
@@ -314,7 +319,10 @@ def test_bag_uploads(root, tmp_path):
     assert not [n for n in os.listdir(lib) if n.startswith(".upload")]
     listing = videos.listdir(root)
     bags = {b["name"]: b for b in listing["bags"]}
-    assert set(bags) == {"run1", "loose", "m.mcap", "byhand"} and bags["run1"]["folder"] and not bags["m.mcap"]["folder"]
+    assert set(bags) == {"run1", "loose", "m.mcap", "noetic.bag", "byhand"} and bags["run1"]["folder"] and \
+        not bags["m.mcap"]["folder"] and not bags["noetic.bag"]["folder"]
+    n1 = bags["noetic.bag"]  # the ROS 1 bag reads like the ROS 2 ones
+    assert n1["images"] == ["/cam/image/compressed"] and n1["tf"] and n1["odometry"] == ["/odom"] and not n1["error"]
     b = bags["run1"]
     assert b["images"] == ["/cam/image/compressed"] and b["clouds"] == ["/scan"] and b["tf"] and not b["error"]
     assert abs(b["duration_s"] - 1.0) < 1e-6 and b["odometry"] == ["/odom"]

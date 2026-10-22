@@ -25,11 +25,7 @@ Every lidar_report_every steps it prints "[lidar] step N: depth error median x% 
 (over the steps since the last report), which splat.py puts into report.json.
 
 Regularization for flights that see the ground from one side only (a single straight pass at ~45 deg: the user
-asked, 2026-10-22):
-  far_mask        with the dense depth maps: pixels deeper than far_mask x the image's median depth leave the colour
-                  and depth losses (the rendered colour is replaced by the photo's there: no loss, no gradient, no
-                  densification). The far, grazing part of an oblique photo is low resolution and smeared along the
-                  flight; it pulls the Gaussians the sharp near views refine towards a blur. 0 = off.
+asked, 2026-10-22; a far-field mask tried alongside did not work well and was removed):
   flatten_lambda  flatten_lambda x mean(smallest / middle scale) over the Gaussians, the middle scale held fixed
                   (only the smallest axis shrinks): flat discs on the surface (2DGS / PGSR style), and no needles
                   (two small axes) along the few viewing directions. 0 = off.
@@ -78,8 +74,6 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     lidar_max_points: int = 3_000_000
     """random subset of the cloud kept on the GPU"""
     lidar_report_every: int = 500
-    far_mask: float = 0.0
-    """with dense depth maps: leave pixels deeper than this x the image's median depth out of the losses (0 = off)"""
     flatten_lambda: float = 0.0
     """weight of mean(smallest / middle scale): flat Gaussians, no needles (0 = off)"""
 
@@ -101,7 +95,7 @@ class SplatfactoLidarModel(SplatfactoModel):
                              persistent=False)
         if self.has_lidar:
             self.config.output_depth_during_training = True
-        self._lidar_errors, self._far_shares = [], []
+        self._lidar_errors = []
         print(f"[lidar] dense depth maps for {sum(f is not None for f in self.depth_files)} of "
               f"{len(self.depth_files)} training images (nerfstudio holds out every 10th photo for evaluation), "
               f"depth loss weight {self.config.lidar_depth_lambda}"
@@ -121,11 +115,6 @@ class SplatfactoLidarModel(SplatfactoModel):
                     H, W = out["depth"].shape[:2]
                     if d.shape != (H, W):
                         d = F.interpolate(d[None, None], size=(H, W), mode="nearest")[0, 0]
-                    if self.config.far_mask > 0 and bool((d > 0).any()):
-                        far = d > self.config.far_mask * d[d > 0].median()
-                        out["mf_far"] = far[:, :, None]
-                        d = torch.where(far, torch.zeros_like(d), d)  # the mesh is least reliable out there too
-                        self._far_shares.append(float(far.float().mean()))
                     out["lidar_depth"] = d[:, :, None]
         elif self.training and self.has_lidar and out.get("depth") is not None:
             with torch.no_grad():
@@ -141,10 +130,6 @@ class SplatfactoLidarModel(SplatfactoModel):
         return out
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
-        far = outputs.get("mf_far")
-        if far is not None and bool(far.any()):  # the photo's own colour there: no loss, no gradient
-            gt = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
-            outputs = dict(outputs, rgb=torch.where(far, gt, outputs["rgb"]))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
         if self.training and self.config.flatten_lambda > 0:
             # only the smallest axis may give: with the middle one free, the optimizer shrank the ratio by
@@ -169,10 +154,6 @@ class SplatfactoLidarModel(SplatfactoModel):
             rel = rel[torch.randint(len(rel), (4000,), device=rel.device)]
         self._lidar_errors.append(rel.float().cpu())
         every = self.config.lidar_report_every
-        if every and (self.step + 1) % every == 0 and self._far_shares:
-            print(f"[lidar] step {self.step + 1}: far-field mask {100 * np.mean(self._far_shares):.1f}% of the "
-                  "pixels", flush=True)
-            self._far_shares = []
         if every and (self.step + 1) % every == 0:
             e = torch.cat(self._lidar_errors).numpy()
             self._lidar_errors = []

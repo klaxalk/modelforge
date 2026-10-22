@@ -45,7 +45,7 @@ GROUPS = {"sfm": SFM_STAGES, "dense": DENSE_STAGES, "all": SFM_STAGES + DENSE_ST
 
 
 def sparse_kind(project):
-    """The kind whose sparse method a project uses: ingest.json's kind, except that a ROS 2 bag without
+    """The kind whose sparse method a project uses: ingest.json's kind, except that a ROS bag without
     camera poses (pose source none: images only) reconstructs like a video without metadata."""
     kind = ingest.load_kind(project)
     if kind == "rosbag":
@@ -540,7 +540,7 @@ def stage_export(project, report, rec=None, lidar=True, drop_isolated=True, prog
     if rec is None:
         step("reading sparse/refined")
         rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    kind = sparse_kind(project)  # a ROS 2 bag of images only: an up-oriented local frame, like a video
+    kind = sparse_kind(project)  # a ROS bag of images only: an up-oriented local frame, like a video
     world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
     iso = None
     shutil.rmtree(os.path.join(project, "sparse", "export"), ignore_errors=True)  # only this export's model counts

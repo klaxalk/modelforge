@@ -11,7 +11,7 @@ from modelforge import projects
 from modelforge.dji import ingest
 
 KIND_LABELS = {"DJI drone video": "dji", "Video without metadata (phone, ...)": "video",
-               "ROS 2 bag (images + TF / odometry + LiDAR)": "rosbag"}  # label -> kind
+               "ROS bag, ROS 1 or 2 (images + TF / odometry + LiDAR)": "rosbag"}  # label -> kind
 KIND_LABELS_DEFAULT = "DJI drone video"
 
 
@@ -37,7 +37,7 @@ class ProjectsPanel:
                 "Kind", options=tuple(KIND_LABELS), initial_value=KIND_LABELS_DEFAULT,
                 hint="DJI drone video: the clip's embedded position and attitude are used as pose priors and "
                      "refined. Video without metadata (phone, action camera, ...): the poses come from the "
-                     "images alone (incremental SfM), in an arbitrary frame and scale. ROS 2 bag: an image topic "
+                     "images alone (incremental SfM), in an arbitrary frame and scale. ROS bag: an image topic "
                      "with poses from TF or odometry (refined like DJI), camera_info intrinsics, optional LiDAR.")
             self.g_copy = gui.add_checkbox("Copy sources from the open project", initial_value=False,
                                            hint="Start from the open project's videos, ranges and sampling settings "

@@ -1,7 +1,7 @@
 """GUI Videos tab: a file manager over the shared video library (back end: modelforge.videos).
 
 A toolbar (Up, New folder, Refresh) and an upload button on top; below, one row per folder / clip /
-ROS 2 bag / stray .SRT with its context buttons (✏ rename, 🗑 delete) next to it. Clicking a folder opens it,
+ROS bag / stray .SRT with its context buttons (✏ rename, 🗑 delete) next to it. Clicking a folder opens it,
 clicking a clip shows its details with Add to open project / Download. Rename, delete and new folder
 ask in a dialog (viser modal); ➜ moves a clip or folder to another folder. Project folders and hidden
 files are left out. Renames and moves keep projects pointed at their clips (videos.update_references);
@@ -51,11 +51,11 @@ class VideosPanel:
         bar.on_click(lambda e: {"⬆ Up": self.up, "📁＋ New folder": lambda: self.ask_new_folder(e.client),
                                 "⟳ Refresh": lambda: self.refresh()}[e.target.value]())
         self.g_upload = gui.add_upload_button(
-            "＋ Upload video / SRT / ROS 2 bag", icon=viser.Icon.PLUS,
-            mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.mcap,.zip,.tar,.tgz,.gz,.db3,.yaml",
+            "＋ Upload video / SRT / ROS bag", icon=viser.Icon.PLUS,
+            mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.mcap,.bag,.zip,.tar,.tgz,.gz,.db3,.yaml",
             hint="Into the current folder: a clip (.MP4 / .MOV), optionally with its .SRT sidecar (same name; the "
                  "video carries all the metadata, the .SRT only gives a quicker, firmer telemetry alignment), or a "
-                 "ROS 2 bag: an .mcap file, or a bag folder packed as .zip / .tar / .tar.gz (unpacked here). The "
+                 "ROS bag: a ROS 1 .bag or ROS 2 .mcap file, or a ROS 2 bag folder packed as .zip / .tar / .tar.gz (unpacked here). The "
                  "files of a bag folder (metadata.yaml + .db3 / .mcap) can also be uploaded one by one into a new "
                  "folder. The browser sends one file at a time and the server holds it in memory until it is "
                  "complete (about twice its size); progress shows below. Existing files are not overwritten.")
@@ -66,7 +66,7 @@ class VideosPanel:
             self.g_info = gui.add_markdown("_click a clip or bag above_")
             row = gui.add_button_group("", options=("Add to open project", "Download"),
                                        hint="Add to open project: the whole clip or bag becomes a new source "
-                                            "(Ingest tab: narrow its range, then extract; bags go to ROS 2 bag "
+                                            "(Ingest tab: narrow its range, then extract; bags go to ROS bag "
                                             "projects, clips to the others). Download: send it to this browser "
                                             "(read into memory first; a bag folder as a .zip).")
             row.on_click(lambda e: self.add_to_project() if e.target.value == "Add to open project"
@@ -101,7 +101,7 @@ class VideosPanel:
                                  os.path.realpath(e["path"]) == os.path.realpath(self.current["path"])), None)
         n_vid = len(listing["videos"]) + len(listing["bags"]) + sum(f["videos"] for f in listing["folders"])
         self.g_head.content = (f"Video library `{videos.library_dir(root)}` (projects are in the Projects tab). "
-                               "Click a folder to open it, a clip or 🤖 ROS 2 bag for its details; ✏ rename, 🗑 delete.")
+                               "Click a folder to open it, a clip or 🤖 ROS bag for its details; ✏ rename, 🗑 delete.")
         self.g_path.content = (f"📂 `{videos.LIBRARY_DIR}/{self.cwd + '/' if self.cwd else ''}`"
                                f" · {n_vid} clips / bags here and below")
         with self._lock:
@@ -110,7 +110,7 @@ class VideosPanel:
             self._rows = []
             with self.g_files:
                 if listing.get("inside_bag"):
-                    self._rows.append(self.gui.add_markdown("_this folder is a ROS 2 bag (metadata.yaml found): "
+                    self._rows.append(self.gui.add_markdown("_this folder is a ROS bag (metadata.yaml found): "
                                                             "upload any remaining .db3 / .mcap files here, then "
                                                             "⬆ Up to see the bag_"))
                 elif not entries:
@@ -143,7 +143,7 @@ class VideosPanel:
                           "everything in it). Projects using clips inside follow a rename or move.",
                 "video": "Click the name for details (add to project, download). ✏ rename, ➜ move to another folder "
                          "(the .SRT follows, and so do the projects using it), 🗑 delete (the .SRT too).",
-                "bag": "A ROS 2 bag. Click the name for details (topics, add to project, download). ✏ rename, ➜ move "
+                "bag": "A ROS bag. Click the name for details (topics, add to project, download). ✏ rename, ➜ move "
                        "to another folder (projects using it follow), 🗑 delete.",
                 "srt": "An .SRT without a video of the same name. 🗑 delete."}[e["kind"]]
         g = self.gui.add_button_group("", options=opts, hint=hint, order=float(k))
@@ -185,7 +185,7 @@ class VideosPanel:
         self.g_info.content = "  \n".join(lines)
 
     def _bag_lines(self, e):
-        lines = [f"**🤖 {e['name']}** · `{os.path.relpath(e['path'])}` · ROS 2 bag "
+        lines = [f"**🤖 {e['name']}** · `{os.path.relpath(e['path'])}` · ROS bag "
                  f"({'folder' if e['folder'] else 'MCAP file'})"]
         if e.get("error"):
             return lines + [f"{projects.human(e['bytes'])} · ❌ cannot read it: `{e['error']}`"]
@@ -199,7 +199,7 @@ class VideosPanel:
                                                                if e["odometry"] else ""),
                   "used by: " + (", ".join(f"**{p}**" for p in e["used_by"]) if e["used_by"] else "no project")]
         if not e["images"]:
-            lines.append("⚠️ no image topic: a ROS 2 bag project needs one")
+            lines.append("⚠️ no image topic: a ROS bag project needs one")
         return lines
 
     def up(self):
@@ -277,7 +277,7 @@ class VideosPanel:
         if e["kind"] == "folder":  # built per kind: only folders carry a clip count
             what = f"the folder **{e['name']}/** with everything in it ({e['videos']} clips / bags)"
         elif e["kind"] == "bag":
-            what = f"the ROS 2 bag **{e['name']}** ({projects.human(e['bytes'])})"
+            what = f"the ROS bag **{e['name']}** ({projects.human(e['bytes'])})"
         else:
             what = f"**{e['name']}**" + (" and its .SRT" if e.get("srt") else "")
         with client.gui.add_modal("Delete?") as m:
@@ -420,8 +420,8 @@ class VideosPanel:
             return
         bag, kind = e["kind"] == "bag", self.app.ingest.kind
         if bag != (kind == "rosbag"):
-            self.g_msg.content = ("❌ the open project is a ROS 2 bag project: add a bag" if kind == "rosbag" else
-                                  "❌ a ROS 2 bag needs a ROS 2 bag project (Projects tab → Create, kind ROS 2 bag)")
+            self.g_msg.content = ("❌ the open project is a ROS bag project: add a bag" if kind == "rosbag" else
+                                  "❌ a ROS bag needs a ROS bag project (Projects tab → Create, kind ROS bag)")
             return
         self.app.ingest.add_source(os.path.relpath(e["path"]))
         self.g_msg.content = f"✅ added `{e['name']}` as a source: Ingest tab to set its range and extract"
@@ -457,10 +457,10 @@ class VideosPanel:
                 path = videos.save_upload(self.app.root, up.name, up.content, rel_dir=cwd)
                 note = ""
                 if up.name.lower().endswith(videos.ARCHIVE_EXTS):
-                    note = " · unpacked: ROS 2 bag"
+                    note = " · unpacked: ROS bag"
                 elif up.name.lower() == "metadata.yaml" or up.name.lower().endswith(".db3"):
                     folder = os.path.dirname(path)
-                    note = (" · this folder is now a ROS 2 bag: ⬆ Up to see it" if videos.is_bag(folder) else
+                    note = (" · this folder is now a ROS bag: ⬆ Up to see it" if videos.is_bag(folder) else
                             " · part of a bag folder: also upload metadata.yaml and every .db3 / .mcap file here")
                     path = folder
                 self.g_msg.content = (f"✅ uploaded `{os.path.relpath(path)}` "

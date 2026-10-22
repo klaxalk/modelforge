@@ -393,7 +393,17 @@ Video-kind notes:
   - The Sparse tab shows reconstruct instead of refine and the BA controls.
   - The View tab skips prior frustums, lines and deviations.
 - Tests: `tests/test_video_kind.py`.
-### Kind `rosbag` (ROS 2 bags)
+### Kind `rosbag` (ROS 2 bags; ROS 1 bags too)
+
+**ROS 1 (Noetic) `.bag` files** (the user asked, 2026-10-22: the same requirements as ROS 2) go through the same kind
+and code: rosbags' `AnyReader` reads both; ROS 1 bags carry their message definitions and get the ROS 2 type names
+(`sensor_msgs/msg/Image`) and times (sec / nanosec). Differences handled: `bag.is_bag` / `find_bags` take `.bag` files
+(`BAG_FILE_EXTS`), CameraInfo spells `K` / `D` in ROS 1 (`camera_info` reads either), frame ids with a leading "/"
+are stripped (the TF buffer already did). The library lists / uploads / renames `.bag` like `.mcap`; GUI labels say
+"ROS bag". Tests: `test_small_bag[ros1]` (a Noetic bag written by rosbags' ROS 1 writer: Header seq, K / D / R / P,
+"/"-prefixed frames; poses to 1e-6, camera_info, extraction, LiDAR), `test_rosbag_project_through_the_gui[ros1]`
+(the berlin-derived bag as ROS 1: extract 20, SfM), `test_bag_uploads` (a .bag upload). rosbags' Noetic type store
+lacks `tf2_msgs/TFMessage`: the tests register it for writing (real bags carry it).
 
 Built while the user was away (2026-10-18), from their spec: image topic
 (usually compressed), a world frame (TF world → camera), or an odometry topic
@@ -1531,18 +1541,15 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Ticking the prior (by itself
   or by hand) sets Depth weight to 0.2 when it is 0 (`App._mesh_prior_weight`; the user asked for 0.2 as the prior's
   default); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags.
-- **Far-field mask and flattening** (the user asked, 2026-10-22: flat ground seen from a single straight pass at
-  ~45° stays soft; Splat tab "Far-field mask (× median depth)" / "Flatten Gaussians (weight)", CLI `--far-mask K
-  --flatten W`, **defaults 1.5 / 0.02** (the user's choice; `splat.FAR_MASK / FLATTEN`; 0 = off); `splat.run(regularize=)`, also tiles / resume): in the plugin, with the dense mesh
-  depth maps, pixels deeper than K x the photo's median depth leave the colour (render replaced by the photo there:
-  no gradient, no densification) and depth losses; flattening adds W x mean(smallest / middle scale). Either on
-  without a depth weight trains the -lidar method at weight 0. fullrun_test (`build/reg_check.py`, 3000 steps, 8 eval
-  frames, PSNR / LPIPS): base 21.15 / 0.467; far 2.5 21.13 / 0.478 (5 % of pixels masked); flatten 0.1 20.98 / 0.467
-  (min / mid scale median 0.51 -> 0.00, needles 16.6 -> 0 %, +18 % Gaussians; that run had the bug below, so the
-  flatten numbers are void). **Bug fixed:** the ratio's middle scale was free, so the optimizer shrank the ratio by
-  widening Gaussians into huge sheets: berlin tile 1 ran out of GPU memory at step ~1500 (21.7 GB vs 1.8 GB without;
-  `build/oom_check.py`); now the middle scale is detached (only the smallest axis shrinks): 1.8 GB. The real target, novel views of
-  single-pass ground, is not measured by same-pass held-out photos.
+- **Flattening** (the user asked, 2026-10-22: flat ground seen from a single straight pass at ~45° stays soft;
+  Splat tab "Flatten Gaussians (weight)", CLI `--flatten W`, default 0.02 (`splat.FLATTEN`), 0 = off;
+  `splat.run(regularize={"flatten": W})`, also tiles / resume): the plugin adds W x mean(smallest / middle scale),
+  the middle scale detached (only the smallest axis shrinks: flat discs, no needles). On without a depth weight it
+  trains the -lidar method at weight 0. **Bug fixed:** with the middle scale free the optimizer widened Gaussians
+  into huge sheets: berlin tile 1 ran out of GPU memory at step ~1500 (21.7 GB vs 1.8 GB; `build/oom_check.py`).
+  - A **far-field mask** (pixels deeper than K x the photo's median depth out of the losses, default 1.5) was tried
+    alongside and **removed**: it did not work well for the user. Old run records may still name `far_mask`;
+    it is ignored.
 - **Dense mesh prior** (Splat tab "Mesh prior: dense (rendered depth)", default on; the user asked: the vertices
   supervise only ~1 pixel in 10 at ×2 on kladno_dira): `export/mesh_depth.py` (nerfstudio's venv, Open3D CPU
   raycasting) renders the mesh's z-depth at every training camera **as nerfstudio trains it**: intrinsics × 1/N,

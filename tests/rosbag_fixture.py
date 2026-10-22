@@ -1,4 +1,4 @@
-"""A realistic synthetic ROS 2 bag from a DJI project (images + TF + odometry + two LiDARs), for the
+"""A realistic synthetic ROS bag (ROS 2, or ROS 1 Noetic with ros1=True) from a DJI project (images + TF + odometry + two LiDARs), for the
 rosbag project kind's tests. The DJI project gives the truth: its video, its aligned telemetry poses
 (world = the project's ENU frame) and its fused dense cloud (as LiDAR returns).
 
@@ -48,12 +48,19 @@ def camera_poses(project, video, frames):
     return c, out
 
 
-def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0):
+def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0, ros1=False):
+    """ros1: out is a .bag file (Noetic, frame names with a leading "/", CameraInfo K / D / R / P); its truth goes to
+    <out>.truth.json (a ROS 2 bag folder holds truth.json)."""
+    from pathlib import Path
+
     from plyfile import PlyData
-    from rosbags.rosbag2 import Writer
     from rosbags.typesys import Stores, get_typestore
-    ts = get_typestore(Stores.ROS2_HUMBLE)
+    ts = get_typestore(Stores.ROS1_NOETIC if ros1 else Stores.ROS2_HUMBLE)
+    if ros1 and "tf2_msgs/msg/TFMessage" not in ts.types:  # not in rosbags' Noetic store (bags carry their own)
+        from rosbags.typesys import get_types_from_msg
+        ts.register(get_types_from_msg("geometry_msgs/TransformStamped[] transforms", "tf2_msgs/msg/TFMessage"))
     T_ = ts.types
+    slash = "/" if ros1 else ""
     Time, Header = T_["builtin_interfaces/msg/Time"], T_["std_msgs/msg/Header"]
     Vec3, Quat = T_["geometry_msgs/msg/Vector3"], T_["geometry_msgs/msg/Quaternion"]
     Tf, TfS = T_["geometry_msgs/msg/Transform"], T_["geometry_msgs/msg/TransformStamped"]
@@ -62,15 +69,19 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
 
     def header(t, frame):
         sec = int(t)
-        return Header(stamp=Time(sec=sec, nanosec=int(round((t - sec) * 1e9))), frame_id=frame)
+        stamp_ = Time(sec=sec, nanosec=int(round((t - sec) * 1e9)))
+        return Header(seq=0, stamp=stamp_, frame_id=slash + frame) if ros1 else Header(stamp=stamp_, frame_id=frame)
 
     def tfs(t, parent, child, T):
         q = rot_to_quat(T[:3, :3])
-        return TfS(header=header(t, parent), child_frame_id=child,
+        return TfS(header=header(t, parent), child_frame_id=slash + child,
                    transform=Tf(translation=Vec3(x=T[0, 3], y=T[1, 3], z=T[2, 3]),
                                 rotation=Quat(x=q[0], y=q[1], z=q[2], w=q[3])))
 
-    shutil.rmtree(out, ignore_errors=True)
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    elif os.path.exists(out):
+        os.remove(out)
     c0 = ingest.load_clip(video)
     k0, k1 = int(np.searchsorted(c0.pts, t0)), int(np.searchsorted(c0.pts, t1))
     tf_frames = list(range(k0, k1))  # 30 Hz poses
@@ -85,7 +96,13 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
     fused = PlyData.read(os.path.join(project, "dense", "fused.ply"))["vertex"]
     world_pts = np.c_[fused["x"], fused["y"], fused["z"]].astype(np.float64)
     truth = []
-    with Writer(out, version=9) as wr:
+    if ros1:
+        from rosbags.rosbag1 import Writer
+        writer = Writer(Path(out))
+    else:
+        from rosbags.rosbag2 import Writer
+        writer = Writer(out, version=9)
+    with writer as wr:
         c_img = wr.add_connection("/camera/image_raw/compressed", "sensor_msgs/msg/CompressedImage", typestore=ts)
         c_info = wr.add_connection("/camera/camera_info", "sensor_msgs/msg/CameraInfo", typestore=ts)
         c_tf = wr.add_connection("/tf", "tf2_msgs/msg/TFMessage", typestore=ts)
@@ -95,7 +112,7 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
         c_l2 = wr.add_connection("/lidar2/points", "sensor_msgs/msg/PointCloud2", typestore=ts)
 
         def write(conn, t, msg):
-            wr.write(conn, int(t * 1e9), ts.serialize_cdr(msg, conn.msgtype))
+            wr.write(conn, int(t * 1e9), (ts.serialize_ros1 if ros1 else ts.serialize_cdr)(msg, conn.msgtype))
 
         t_first = stamp[tf_frames[0]]
         write(c_tfs, t_first, TfM(transforms=[tfs(t_first, "base_link", "camera_optical", T_BASE_CAM),
@@ -111,7 +128,7 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
             write(c_tf, t, TfM(transforms=[tfs(t, "world", "base_link", Tb)]))
             To = T_ow @ Tb
             q = rot_to_quat(To[:3, :3])
-            write(c_odom, t, Odom(header=header(t, "odom"), child_frame_id="base_link",
+            write(c_odom, t, Odom(header=header(t, "odom"), child_frame_id=slash + "base_link",
                                   pose=PoseWC(pose=Pose(position=Point(x=To[0, 3], y=To[1, 3], z=To[2, 3]),
                                                         orientation=Quat(x=q[0], y=q[1], z=q[2], w=q[3])),
                                               covariance=np.zeros(36)),
@@ -127,10 +144,12 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
             ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, quality])
             t = stamp[k]
             write(c_img, t, CImg(header=header(t, "camera_optical"), format="jpeg", data=jpg.reshape(-1)))
+            mats = dict(d=np.array([k1_, k2_, p1, p2, 0.0]),
+                        k=np.array([fx * scale, 0, cx * scale, 0, fy * scale, cy * scale, 0, 0, 1.0]),
+                        r=np.eye(3).reshape(-1), p=np.zeros(12))
             write(c_info, t, Info(header=header(t, "camera_optical"), height=h, width=w, distortion_model="plumb_bob",
-                                  d=np.array([k1_, k2_, p1, p2, 0.0]),
-                                  k=np.array([fx * scale, 0, cx * scale, 0, fy * scale, cy * scale, 0, 0, 1.0]),
-                                  r=np.eye(3).reshape(-1), p=np.zeros(12), binning_x=0, binning_y=0,
+                                  **{(k.upper() if ros1 else k): v for k, v in mats.items()},
+                                  binning_x=0, binning_y=0,
                                   roi=Roi(x_offset=0, y_offset=0, height=0, width=0, do_rectify=False)))
             truth.append({"stamp": t, "T_world_cam": pose_of[k].tolist()})
         # LiDARs: returns from the fused cloud around the current position, in the sensor frame
@@ -153,5 +172,5 @@ def make_bag(out, project, video, t0, t1, fps=5.0, scale=0.5, quality=85, seed=0
     json.dump({"images": truth, "world": "world", "camera_frame": "camera_optical",
                "camera": {"model": "OPENCV", "width": w, "height": h,
                           "params": [fx * scale, fy * scale, cx * scale, cy * scale, k1_, k2_, p1, p2]}},
-              open(os.path.join(out, "truth.json"), "w"), indent=1)
+              open(out + ".truth.json" if ros1 else os.path.join(out, "truth.json"), "w"), indent=1)
     return out

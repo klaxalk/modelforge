@@ -84,7 +84,7 @@ def load_plan(project):
 
 KINDS = {"dji": "DJI drone video (embedded position + attitude)",
          "video": "video without metadata (phone, action camera, ...)",
-         "rosbag": "ROS 2 bag (images + TF / odometry + optional LiDAR)"}
+         "rosbag": "ROS bag, ROS 1 or 2 (images + TF / odometry + optional LiDAR)"}
 
 
 def load_kind(project):
