@@ -24,15 +24,16 @@ from modelforge import jobs
 
 DIR = "analysis"
 WINDOW = 16  # pairs per image: the next WINDOW images of the same source
-LEVELS = {"extra dense": 0.30, "dense": 0.20, "normal": 0.12, "sparse": 0.06}  # min_overlap per level
-# Calibrated on kladno_dopravnik (72 images, 6000 steps, 8 held-out photos): dense kept 57 images at the
-# quality of all 72 (25.50 vs 25.45 dB, LPIPS 0.252 vs 0.250); normal 43 images -1.0 dB; sparse 32 images
-# -2.6 dB (about every 2nd image's quality, which the user rated "OK"); every 4th image (18) -7.7 dB fails.
-# extra dense (the user asked, 2026-10-22): more images than dense where the extraction has them (all images'
-# weakest 5 % neighbour overlap was 0.33 there, dense's 0.28), for scenes where dense still looks thin.
-QUALITY = {"extra dense": "more images than dense: for scenes where dense still looks thin",
-           "dense": "same as all images", "normal": "about 1 dB below all images",
-           "sparse": "about 2.5 dB below: usable, softer"}
+LEVELS = {"extra dense": 0.50, "dense": 0.30, "normal": 0.20, "sparse": 0.12}  # min_overlap per level
+# Shifted one step denser on 2026-10-22 (the user asked): the old sparse (0.06) is gone, sparse is the old normal,
+# normal the old dense, dense (still the default) the old extra dense, and extra dense a new 0.50.
+# Calibrated on kladno_dopravnik (72 images, 6000 steps, 8 held-out photos) under the old names: 0.20 (now normal)
+# kept 57 images at the quality of all 72 (25.50 vs 25.45 dB, LPIPS 0.252 vs 0.250); 0.12 (now sparse) 43 images
+# -1.0 dB; 0.06 (dropped) 32 images -2.6 dB; every 4th image (18) -7.7 dB fails. 0.30: the weakest 5 % neighbour
+# overlap of all images was 0.33 there.
+QUALITY = {"extra dense": "nearly every image where the extraction is dense: the most overlap, the slowest SfM",
+           "dense": "more images than normal: for scenes where normal looks thin",
+           "normal": "same as all images on kladno_dopravnik", "sparse": "about 1 dB below all images"}
 DEFAULT_LEVEL = "dense"
 TRIPLE = 0.5  # triple_overlap = TRIPLE x min_overlap
 PAIR_ID = 2147483647  # COLMAP: pair_id = id1 * PAIR_ID + id2 (id1 < id2)

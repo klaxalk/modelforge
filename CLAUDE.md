@@ -682,8 +682,10 @@ extract once, then run the pipeline on subsets of it, in the same project):
     keypoints per image. Overlap(a, b) = inliers / min(keypoints): no scene geometry needed.
   - `select_keyframes`: per source, jump to the farthest of the next 16 images with overlap ≥
     min_overlap to the current keyframe and ≥ ½ of that to the keyframe before (≈ 3 views per point);
-    none → the next image. Levels extra dense / dense / normal / sparse = 0.30 / 0.20 / 0.12 / 0.06, default **dense**
-    (extra dense added 2026-10-22, the user asked: more images than dense where the extraction has them).
+    none → the next image. Levels extra dense / dense / normal / sparse = **0.50 / 0.30 / 0.20 / 0.12**, default
+    **dense** (2026-10-22, the user asked: shifted one step denser; before dense / normal / sparse = 0.20 / 0.12 /
+    0.06, so the calibration table below uses the old names: its "dense" is today's normal, its "normal" today's
+    sparse, and its "sparse" (0.06) is gone).
   - **Default: keyframes, density dense** (the user asked, 2026-10-22; `gui/subset.py DEFAULT_MODE`): a project that
     never chose a subset (none recorded in poses.json) starts on keyframes, so Run full pipeline runs the overlap
     analysis and the keyframe selection first. A chosen every N-th is kept, also every 1 over the whole range ("all
