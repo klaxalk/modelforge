@@ -46,7 +46,8 @@ STAGE_HINTS = {
              "on CPU (~12 min for 2400 pairs).",
     "refine": "Start every camera at its prior, then 3 rounds of triangulate + bundle adjustment with "
               "self-calibrating 6-DoF priors. Cameras move live in the View tab. ~1.5-3 min for 300 images. "
-              "From 2500 images (BA mode auto): calibration on a subset, chunks, a pose graph, a polish sweep.",
+              "BA mode chunked (or auto from 2500 images): calibration on a subset, chunks, a pose graph, a "
+              "polish sweep.",
     "reconstruct": "Videos without metadata: incremental SfM (COLMAP mapper) from the images alone, then the model "
                    "is oriented up and scaled (no metric scale). Live count of registered images; Stop works.",
     "export": "Write transforms.json + sparse_pc.ply (nerfstudio dataset, ENU world) from sparse/refined. Seconds.",
@@ -372,14 +373,15 @@ class App:
                      "the priors and the focal length at its start value (2x off), which leaves ~15 px reprojection "
                      "error instead of ~0.4 px and hurts dense and splat.")
             self.g_ba_mode = gui.add_dropdown(
-                "BA mode", options=pipeline.BA_MODES, initial_value="auto",
+                "BA mode", options=pipeline.BA_MODES, initial_value=pipeline.DEFAULT_BA_MODE,
                 hint="global: one bundle adjustment over all images per round. chunked (for thousands of images): "
                      "the intrinsics and the prior model are calibrated on 300 images spread over the flight; then "
                      "each chunk of consecutive images is refined on its own (its matches only, so memory does not "
                      "grow with the project), a pose graph (cameras only, no points) joins the chunks under the "
-                     "priors, and one sweep of windows polishes all images. auto: chunked from 2500 images on "
-                     "(global BA pulls revisits of a long flight together better: on 2000 images 0.05 m between "
-                     "passes vs 0.24 m chunked, but 67 vs 24 min).")
+                     "priors, and one sweep of windows polishes all images. auto: chunked from 2500 images on. Default "
+                     "global: it pulls revisits of a long flight together, chunks do not (2000 images: 0.05 m "
+                     "between passes vs 0.24 m chunked), but takes longer and more memory (67 vs 24 min, 7.2 vs "
+                     "3.9 GB there).")
             self.g_chunk_size = gui.add_number(
                 "Chunk size (images)", initial_value=chunked.Chunked.size, min=100, step=100,
                 hint="Images per chunk in a chunked refine; consecutive chunks share the overlap.")

@@ -902,6 +902,8 @@ Known limitations:
   Sparse tab "BA mode" (auto / global / chunked), "Chunk size", "Chunk overlap", "Polish sweeps";
   CLI `--ba-mode --chunk-size --chunk-overlap --polish-sweeps`. `modelforge/sfm/chunked.py`,
   `pipeline._refine_chunks`.
+  - **Default BA mode: global** (the user's choice, 2026-10-22; `pipeline.DEFAULT_BA_MODE`, GUI and CLI): chunked
+    refines left revisits apart on dira2k and kladno_dira. Chunked runs only when chosen (or auto from 2500 images).
   - **auto = chunked from 2500 images on** (was 1000 until 2026-10-20: on dira2k, 2000 images, the chunked refine
     left revisits 0.24 m apart (p90 0.88), global BA 0.05 m (p90 0.15) at 67 vs 24 min, 7.2 vs 3.9 GB; see "Large
     flights: SfM splits revisits"). `stage_refine` then:

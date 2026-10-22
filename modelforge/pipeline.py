@@ -222,6 +222,7 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
 
 
 BA_MODES = ("auto", "global", "chunked")
+DEFAULT_BA_MODE = "global"  # the user's choice (2026-10-22): chunks leave revisits apart (kladno_dira, dira2k)
 
 
 def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iterations, skip, refine_intrinsics,
@@ -425,7 +426,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
 
 
 def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
-                 max_iterations=500, skip=None, ba_mode="auto", chunks=None, skip_round=None):
+                 max_iterations=500, skip=None, ba_mode=DEFAULT_BA_MODE, chunks=None, skip_round=None):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done", and in a
     chunked refine also "chunk_done" | "posegraph"; "ba" events carry the live Reconstruction (poses
     are updated every iteration). Events carry "stage" ("calib" | "round" | "chunk" | "polish"),
@@ -632,9 +633,9 @@ def main():
     ap.add_argument("--ba-iterations", type=int, default=500,
                     help="bundle-adjustment iteration cap per refine round (default 500; it stops earlier once the "
                          "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
-    ap.add_argument("--ba-mode", default="auto", choices=BA_MODES,
-                    help="refine BA: global (all images at once), chunked (chunks on their own + a pose graph + a polish "
-                         "sweep, after calibrating the intrinsics on a subset), auto (chunked from 2500 images on; default)")
+    ap.add_argument("--ba-mode", default=DEFAULT_BA_MODE, choices=BA_MODES,
+                    help="refine BA: global (all images at once; default), chunked (chunks on their own + a pose graph + "
+                         "a polish sweep, after calibrating the intrinsics on a subset), auto (chunked from 2500 images on)")
     ap.add_argument("--chunk-size", type=int, default=chunked.Chunked.size, help="images per chunk (default 500)")
     ap.add_argument("--chunk-overlap", type=int, default=chunked.Chunked.overlap,
                     help="images shared by consecutive chunks (default 100)")
