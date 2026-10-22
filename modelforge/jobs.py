@@ -9,6 +9,7 @@ adjustment checks it every iteration (its Ceres callback aborts the solve).
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -73,7 +74,8 @@ class Token:
             for line in p.stdout:
                 line = line.rstrip()
                 if line:
-                    tail = (tail + [line])[-20:]
+                    if re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip():  # not just a colour reset
+                        tail = (tail + [line])[-20:]
                     if on_line:
                         on_line(line)
             rc = p.wait()

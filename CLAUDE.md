@@ -1539,6 +1539,18 @@ export).
   136k of 389k there), after which it fit (2.25M faces). Retrying after a CUDA out-of-memory does not work
   (Open3D's CUDA state is broken: "illegal memory access"), and moving a large grid to the CPU crashed
   Open3D 0.20 (segfault), so an out-of-memory now ends with a clear message (coarser quality).
+- **Large grids** (kladno_dira, 2026-10-22: 4.0M Gaussians, 2574 views, 433k voxel blocks after pruning):
+  - Open3D 0.20's marching cubes crashes from 2^18 = 262,144 blocks on (CUDA: illegal memory access, CPU:
+    segfault; 262,000 ran in 3 s with 18 GB free), so the karlak "out of memory" was probably this too. It now runs
+    in pieces of ≤ 200k blocks (`marching_cubes`, `MC_MAX_BLOCKS`, param `mc_max_blocks`): each piece a grid of its
+    blocks + their 26 neighbours, keeping the triangles whose centroid lies in its own blocks; shared vertices
+    merged. Same triangles as one pass (checked on 250k blocks of kladno_dira and the test scene).
+  - A hash map filled to exactly its capacity drops random keys on the GPU (stdgpu "bucket and excess list full"):
+    the piece grids get 2× the room, and a missing block is an error.
+  - Views with nothing to fuse (1–2 stray pixels in range; 14 of 2574) are skipped: Open3D aborted the run on
+    them ("No block is touched in TSDF volume").
+  - kladno_dira medium (11.6 cm voxel): 23.4M faces, 9 min. `jobs.Token.run`'s error line skips lines that are
+    only colour codes (Open3D ends its red errors with one).
 - **Open3D gotcha:** the legacy `ScalableTSDFVolume` (Open3D 0.20 in the nerfstudio venv)
   returns no surface at all, even for a synthetic wall integrated 5 times. The tensor
   `VoxelBlockGrid` works; its `extract_triangle_mesh` defaults to weight ≥ 3 (views).

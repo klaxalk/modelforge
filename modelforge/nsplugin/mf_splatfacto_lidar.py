@@ -89,7 +89,8 @@ class SplatfactoLidarModel(SplatfactoModel):
             self.config.output_depth_during_training = True
         self._lidar_errors = []
         print(f"[lidar] dense depth maps for {sum(f is not None for f in self.depth_files)} of "
-              f"{len(self.depth_files)} training images, depth loss weight {self.config.lidar_depth_lambda}"
+              f"{len(self.depth_files)} training images (nerfstudio holds out every 10th photo for evaluation), "
+              f"depth loss weight {self.config.lidar_depth_lambda}"
               if self.depth_files else
               f"[lidar] {len(self.lidar_xyz)} LiDAR points, depth loss weight {self.config.lidar_depth_lambda}"
               if self.has_lidar else "[lidar] no LiDAR points (transforms.json lidar_ply_file_path): "

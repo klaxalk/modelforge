@@ -80,6 +80,72 @@ def prune_blocks(vbg, min_weight):
     return int(weak.sum())
 
 
+def active_blocks(vbg):
+    """The active blocks as CPU arrays: keys (n, 3) int32 and every attribute (n, 8, 8, 8, c)."""
+    import open3d.core as o3c
+    hm = vbg.hashmap()
+    idx = torch.utils.dlpack.from_dlpack(hm.active_buf_indices().to(o3c.int64).to_dlpack())
+    keys = torch.utils.dlpack.from_dlpack(hm.key_tensor().to_dlpack())[idx].cpu().numpy()
+    attrs = {a: torch.utils.dlpack.from_dlpack(vbg.attribute(a).to_dlpack())[idx].cpu().numpy()
+             for a in ("tsdf", "weight", "color")}
+    return keys, attrs
+
+
+MC_MAX_BLOCKS = 200_000  # Open3D 0.20's marching cubes crashes from 2^18 = 262,144 blocks on (CUDA and CPU alike)
+
+
+def marching_cubes(keys, attrs, voxel, min_weight, device, max_blocks=MC_MAX_BLOCKS):
+    """Marching cubes over the blocks (keys (n, 3), attrs from active_blocks) in pieces of <= max_blocks: each piece
+    is a grid of its blocks + their 26 neighbours, and keeps the triangles of the cubes in its own blocks (a cube's
+    triangles lie inside it, so the centroid names its block); the pieces' shared vertices are merged.
+    Returns (vertices (V, 3), triangles (F, 3), colours (V, 3)) as numpy arrays."""
+    import open3d.core as o3c
+    span = int(np.abs(keys).max()) * 2 + 3
+    code = lambda k: ((k[:, 0].astype(np.int64) + span // 2) * span + k[:, 1] + span // 2) * span + k[:, 2] + span // 2
+    order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))  # slabs along x
+    all_codes = np.sort(code(keys))
+    offsets = np.array([(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)], np.int64)
+    n_pieces = max(1, int(np.ceil(len(keys) / max_blocks)))
+    verts, tris, cols, n_v = [], [], [], 0
+    for i, core in enumerate(np.array_split(order, n_pieces)):
+        if n_pieces > 1:
+            print(f"[tsdf] marching cubes: piece {i + 1} / {n_pieces}", flush=True)
+        core_codes = code(keys[core])
+        near = (keys[core][:, None, :].astype(np.int64) + offsets[None]).reshape(-1, 3)
+        near = np.unique(code(near))
+        pos = np.minimum(np.searchsorted(all_codes, near), len(all_codes) - 1)
+        piece = np.flatnonzero(np.isin(code(keys), near[all_codes[pos] == near])) if n_pieces > 1 else core
+        vbg = o3d.t.geometry.VoxelBlockGrid(
+            attr_names=("tsdf", "weight", "color"), attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+            attr_channels=((1), (1), (3)), voxel_size=voxel, block_resolution=8, block_count=2 * len(piece),
+            device=device)  # room to spare: a hash map filled to capacity drops keys on the GPU (stdgpu)
+        buf, ok = vbg.hashmap().activate(o3c.Tensor(keys[piece]).to(device))
+        if int(ok.cpu().numpy().sum()) != len(piece):
+            raise RuntimeError(f"marching cubes: only {int(ok.cpu().numpy().sum())} of {len(piece)} blocks inserted")
+        bi = torch.utils.dlpack.from_dlpack(buf.to(o3c.int64).to_dlpack())
+        for a in ("tsdf", "weight", "color"):
+            t = torch.utils.dlpack.from_dlpack(vbg.attribute(a).to_dlpack())
+            t[bi] = torch.from_numpy(attrs[a][piece]).to(t.device)
+        del bi, buf
+        m = vbg.extract_triangle_mesh(weight_threshold=min_weight).cpu()
+        del vbg
+        if device.get_type() == o3c.Device.DeviceType.CUDA:
+            o3c.cuda.release_cache()
+        v, f = m.vertex.positions.numpy(), m.triangle.indices.numpy().astype(np.int64)
+        c = m.vertex.colors.numpy() if "colors" in m.vertex else np.zeros_like(v)
+        if n_pieces > 1 and len(f):
+            owner = np.floor(v[f].mean(1) / voxel / 8).astype(np.int64)
+            f = f[np.isin(code(owner), core_codes)]
+        verts.append(v), tris.append(f + n_v), cols.append(c)
+        n_v += len(v)
+    v, f, c = np.concatenate(verts), np.concatenate(tris), np.concatenate(cols)
+    if n_pieces > 1:  # a vertex on an edge between pieces exists in both, computed from the same voxels
+        v, first, inv = np.unique(v, axis=0, return_index=True, return_inverse=True)
+        c, f = c[first], inv.reshape(-1)[f]
+        f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]  # Open3D's own doubled vertices
+    return v, f, c
+
+
 def main():
     inp, out_dir, params = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3]))
     t0 = time.time()
@@ -118,7 +184,7 @@ def main():
     vbg = o3d.t.geometry.VoxelBlockGrid(
         attr_names=("tsdf", "weight", "color"), attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
         attr_channels=((1), (1), (3)), voxel_size=voxel, block_resolution=8, block_count=100_000, device=o3dev)
-    used = 0
+    used, skipped = 0, 0
     with torch.no_grad():
         for i in range(n):
             K = Ks[i]
@@ -126,34 +192,56 @@ def main():
                                        torch.tensor(K, device=dev, dtype=torch.float32), W, H)
             m = keep_mask(depth, alpha, params["min_alpha"], params["edge_tol"]) & (depth < max_depth)
             used += int(m.sum())
+            if not bool(m.any()):  # nothing opaque in range (sky, the scene's edge): Open3D aborts on it
+                skipped += 1
+                print(f"[tsdf] view {i + 1} / {n}", flush=True)
+                continue
             dep = torch.where(m, depth, torch.zeros_like(depth)).contiguous().cpu().numpy()
             dimg = o3d.t.geometry.Image(o3c.Tensor(dep)).to(o3dev)
             cimg = o3d.t.geometry.Image(o3c.Tensor(rgb.contiguous().cpu().numpy())).to(o3dev)
             Kt, E = o3c.Tensor(K.astype(np.float64)), o3c.Tensor(viewmats[i].astype(np.float64))
-            blocks = vbg.compute_unique_block_coordinates(dimg, Kt, E, depth_scale=1.0, depth_max=max_depth,
-                                                          trunc_voxel_multiplier=4.0)
+            try:
+                blocks = vbg.compute_unique_block_coordinates(dimg, Kt, E, depth_scale=1.0, depth_max=max_depth,
+                                                              trunc_voxel_multiplier=4.0)
+            except RuntimeError as e:  # a few stray pixels can touch no block: Open3D aborts instead of skipping
+                if "No block is touched" not in str(e):
+                    raise
+                skipped += 1
+                print(f"[tsdf] view {i + 1}: {int(m.sum())} pixels kept but no voxel block touched "
+                      f"({vbg.hashmap().size():,} blocks so far): skipped", flush=True)
+                print(f"[tsdf] view {i + 1} / {n}", flush=True)
+                continue
             vbg.integrate(blocks, dimg, cimg, Kt, Kt, E, depth_scale=1.0, depth_max=max_depth,
                           trunc_voxel_multiplier=4.0)
             print(f"[tsdf] view {i + 1} / {n}", flush=True)
-    print("[tsdf] marching cubes", flush=True)
-    # torch's cached render memory goes back first: on karlak (471 views, 2.1M Gaussians) Open3D's CUDA
-    # marching cubes ran out of GPU memory without this (a failed CUDA allocation leaves Open3D's CUDA state
-    # broken, so it cannot be retried, and moving a large grid to the CPU crashed Open3D 0.20)
+    print(f"[tsdf] marching cubes ({skipped} of {n} views had no surface in range)" if skipped
+          else "[tsdf] marching cubes", flush=True)
+    # torch's cached render memory goes back first (a failed CUDA allocation leaves Open3D's CUDA state broken,
+    # so it cannot be retried); marching cubes then runs in pieces below Open3D's block limit (MC_MAX_BLOCKS)
     del g
     torch.cuda.empty_cache()
     n_blocks = vbg.hashmap().size()
     pruned = prune_blocks(vbg, params["min_weight"])
+    torch.cuda.empty_cache()
+    o3c.cuda.release_cache()  # Open3D's allocator keeps the integration's freed buffers otherwise
     free, total = torch.cuda.mem_get_info()
-    print(f"[tsdf] {n_blocks:,} voxel blocks, {pruned:,} pruned (no voxel seen by {params['min_weight']} views); GPU "
-          f"memory free {free / 1e9:.1f} of {total / 1e9:.1f} GB", flush=True)
+    print(f"[tsdf] {n_blocks:,} voxel blocks, {pruned:,} pruned (no voxel seen by {params['min_weight']} views, capacity "
+          f"{vbg.hashmap().capacity():,}); GPU memory free {free / 1e9:.1f} of {total / 1e9:.1f} GB", flush=True)
+    keys, attrs = active_blocks(vbg)
+    del vbg  # the integration grid (capacity grown in doublings) makes room for the pieces
+    o3c.cuda.release_cache()
     try:
-        mesh = vbg.extract_triangle_mesh(weight_threshold=params["min_weight"]).to_legacy()
+        v, f, c = marching_cubes(keys, attrs, voxel, params["min_weight"], o3dev,
+                                 params.get("mc_max_blocks") or MC_MAX_BLOCKS)
     except RuntimeError as e:  # Open3D's CUDA state is broken now: say why and leave without its teardown
         if "CUDA" not in str(e):
             raise
-        print(f"[tsdf] not enough GPU memory for marching cubes over {n_blocks - pruned:,} voxel blocks at "
-              f"{voxel * 100:.1f} cm: use a coarser quality (or a larger voxel)", flush=True)
+        print(f"[tsdf] marching cubes failed on the GPU over {len(keys):,} voxel blocks at {voxel * 100:.1f} cm "
+              f"({e}): try a coarser quality (or a larger voxel)", flush=True)
         os._exit(2)
+    mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(v.astype(np.float64)),
+                                     o3d.utility.Vector3iVector(f.astype(np.int32)))
+    mesh.vertex_colors = o3d.utility.Vector3dVector(np.clip(c, 0, 1).astype(np.float64))
     raw_faces = len(mesh.triangles)
     if raw_faces:
         clusters, counts, _ = mesh.cluster_connected_triangles()

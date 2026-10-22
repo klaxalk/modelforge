@@ -60,7 +60,8 @@ def main():
     json.dump(key, open(man, "w"), indent=1)
     todo = [f for f in t["frames"]
             if not os.path.exists(os.path.join(a.out, os.path.basename(f["file_path"]) + ".npy"))]
-    print(f"mesh depth: {len(t['frames']) - len(todo)} of {len(t['frames'])} maps exist, {w} x {h} px", flush=True)
+    print(f"mesh depth: {len(t['frames'])} photos: {len(t['frames']) - len(todo)} maps exist already (from other "
+          f"tiles or runs), {len(todo)} to render, {w} x {h} px", flush=True)
     if not todo:
         return
     t0 = time.time()
@@ -82,7 +83,8 @@ def main():
         np.save(name + ".part.npy", hit.astype(np.float16))
         os.replace(name + ".part.npy", name)
         if (k + 1) % 20 == 0 or k + 1 == len(todo):
-            print(f"mesh depth: {k + 1} / {len(todo)} ({(time.time() - t0) / (k + 1):.2f} s per map)", flush=True)
+            print(f"mesh depth: {k + 1} / {len(todo)} missing maps of {len(t['frames'])} photos "
+                  f"({(time.time() - t0) / (k + 1):.2f} s per map)", flush=True)
 
 
 if __name__ == "__main__":

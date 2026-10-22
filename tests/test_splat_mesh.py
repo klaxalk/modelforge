@@ -116,3 +116,15 @@ def test_mesh_from_splat(tmp_path):
     assert gdata.dense_artifacts(p)["meshes"]["splat"].endswith("preview.ply")
     glb = products.export_mesh(p, "splat", "glb")[0]
     assert os.path.getsize(glb) > 0
+
+
+def test_marching_cubes_in_pieces(tmp_path):
+    """Open3D's marching cubes crashes from 2^18 blocks on, so large grids go in pieces: the same mesh."""
+    p = str(tmp_path)
+    scene(p)
+    whole = splat_mesh.run(p, "fine", width=640, on_line=lambda m: None)
+    lines = []
+    pieces = splat_mesh.run(p, "fine", width=640, on_line=lines.append, mc_max_blocks=40)
+    assert any("piece 2 /" in s for s in lines)
+    assert abs(pieces["faces_raw"] - whole["faces_raw"]) <= 0.001 * whole["faces_raw"]
+    assert abs(pieces["vertices"] - whole["vertices"]) <= 0.001 * whole["vertices"]
