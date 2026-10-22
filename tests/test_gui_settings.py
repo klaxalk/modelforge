@@ -61,11 +61,11 @@ def test_last_opened_project_is_reopened(tmp_path):
     assert last_project(str(root)) == str(root / "new")
 
 
-def test_orbit_keeps_center_distance_and_height(tmp_path):
+def test_orbit_runs_in_the_browser(tmp_path):
+    """Orbit is the browsers' own per-frame rotation (patched viser bundle): the server only publishes the speed
+    (data-orbit on the hidden #mf-move-speed element) and never sets the camera, so wheel zoom keeps working.
+    The speed slider applies while orbiting; Fly turns the orbit off."""
     import contextlib
-    import time
-
-    import numpy as np
 
     from modelforge.gui.app import App
     root = tmp_path / "data"
@@ -85,75 +85,18 @@ def test_orbit_keeps_center_distance_and_height(tmp_path):
     a = App(str(proj), port=free_port(), root=str(root))
     try:
         c = Client()
-        a.g_orbit_speed.value = 90
-        a.toggle_orbit(c)
-        assert a.g_orbit.label == "Stop orbit"
-        time.sleep(0.5)
-        a.toggle_orbit(c)
-        assert a.g_orbit.label == "Start orbit"
-        p = np.array(c.camera.position)
-        assert np.allclose(c.camera.look_at, 0) and abs(p[2] - 5) < 1e-9 and abs(np.hypot(p[0], p[1]) - 10) < 1e-6
-        moved = np.degrees(np.arctan2(p[1], p[0]))
-        assert 20 < moved < 70  # ~45 deg after 0.5 s at 90 deg/s
-        time.sleep(0.2)
-        assert np.allclose(c.camera.position, p)  # stopped
-
-        # mouse adjustments during an orbit stick: it pauses, then continues from the new view
-        a.toggle_orbit(c)
-        time.sleep(0.2)
-        c.camera.position, c.camera.look_at = (3.0, 4.0, 20.0), (3.0, -16.0, 1.0)  # zoom out, tilt, pan
-        time.sleep(0.3)  # within the hold: not rotating
-        assert np.allclose(c.camera.position, (3.0, 4.0, 20.0))
-        time.sleep(0.8)  # hold over: orbiting again around the new look-at, new distance and height
-        a.toggle_orbit(c)
-        q, ctr = np.array(c.camera.position), np.array(c.camera.look_at)
-        assert np.allclose(ctr, (3.0, -16.0, 1.0)) and abs(q[2] - 20.0) < 1e-9
-        assert abs(np.hypot(*(q - ctr)[:2]) - 20.0) < 1e-6 and not np.allclose(q, (3.0, 4.0, 20.0))
-    finally:
-        a.server.stop()
-
-
-def test_orbit_never_steps_back_with_lagging_echoes(tmp_path):
-    """A browser reports the camera a few updates late; the orbit must not restart from those."""
-    import contextlib
-    import time
-
-    import numpy as np
-
-    from modelforge.gui.app import App
-    root = tmp_path / "data"
-    proj = root / "p"
-    proj.mkdir(parents=True)
-    ingest.save_plan(str(proj), [], ingest.Settings())
-
-    class LaggingCamera:
-        def __init__(self):
-            self.history = [(10.0, 0.0, 5.0)]  # poses set by the server, oldest first
-            self.look_at = (0.0, 0.0, 0.0)
-
-        @property
-        def position(self):  # the browser's report: 3 updates behind
-            return self.history[max(0, len(self.history) - 4)]
-
-        @position.setter
-        def position(self, p):
-            self.history.append(tuple(p))
-
-    class Client:
-        client_id, camera = 9, LaggingCamera()
-
-        def atomic(self):
-            return contextlib.nullcontext()
-
-    a = App(str(proj), port=free_port(), root=str(root))
-    try:
-        c = Client()
+        assert 'data-orbit="0"' in a.g_speed_html.content
         a.g_orbit_speed.value = 30
         a.toggle_orbit(c)
-        time.sleep(0.6)
+        assert a.g_orbit.label == "Stop orbit" and 'data-orbit="30"' in a.g_speed_html.content
+        a.g_orbit_speed.value = 45
+        assert 'data-orbit="45"' in a.g_speed_html.content
+        assert c.camera.position == (10.0, 0.0, 5.0)  # the server does not drive the camera
         a.toggle_orbit(c)
-        ang = np.unwrap([np.arctan2(p[1], p[0]) for p in c.camera.history])
-        assert len(ang) > 10 and np.all(np.diff(ang) > 0)  # every step forward
+        assert a.g_orbit.label == "Start orbit" and 'data-orbit="0"' in a.g_speed_html.content
+        a.toggle_orbit(c)
+        a._set_orbit(False)  # what Fly / Center / a glide do
+        assert not a.orbit_on and 'data-orbit="0"' in a.g_speed_html.content
     finally:
         a.server.stop()
 

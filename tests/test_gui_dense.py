@@ -342,8 +342,9 @@ def test_fly_the_camera_path(app):
     app._on_disconnect(gone)
     app._on_disconnect(c)
     time.sleep(0.3)
-    assert not app._flights and not app._orbits
-    assert app.g_fly.label == "Fly the camera path" and app.g_orbit.label == "Start orbit"
+    assert not app._flights
+    assert app.g_fly.label == "Fly the camera path"
+    app._set_orbit(False)
     app.g_fly_loop.value = False
 
 
@@ -414,3 +415,11 @@ def test_pivot_navigation(app):
     app.g_pivot_carry.value = False
     app._carry_pivot(c)
     assert np.allclose(c.camera.look_at, (0.0, 0.0, 9.9))
+
+
+def test_move_speed(app, monkeypatch):
+    """View → Move speed reaches the page as the hidden element the patched viser bundle reads, and is saved."""
+    saved = {}
+    monkeypatch.setattr(app, "_save_setting", lambda k, v: saved.update({k: v}))
+    app._set_move_speed(12.5)
+    assert 'id="mf-move-speed" data-speed="12.5"' in app.g_speed_html.content and saved == {"move_speed": 12.5}

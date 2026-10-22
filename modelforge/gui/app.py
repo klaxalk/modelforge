@@ -115,6 +115,7 @@ COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "t
 SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
 UNITS = {"position deviation": "m", "rotation deviation": "deg", "reprojection error": "px", "time": "s"}
 PRIOR_COLOR = (150, 150, 150)
+MOVE_SPEED = 5.0  # m/s, keyboard movement in the 3D view (viser's own is 2)
 PHOTO_PANEL_WIDTH = 420  # px, the Photo window right of the quick bar
 SELECTED_COLOR = (255, 255, 255)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
@@ -167,6 +168,7 @@ class App:
         self.server = viser.ViserServer(host="0.0.0.0", port=port, label="ModelForge")
         self.server.scene.set_up_direction("+z")
         self.dark = self._load_settings().get("dark_mode", False)
+        self.move_speed = float(self._load_settings().get("move_speed", MOVE_SPEED))
         self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
         self.lock = threading.RLock()
         self.cam_handles, self.prior_handles = {}, {}
@@ -178,7 +180,7 @@ class App:
         self._run_id = 0
         self._job = {"name": "", "t0": 0.0, "label": "", "stage_t0": 0.0, "detail": ""}
         self._token = None  # jobs.Token of the running job (the Stop button cancels it)
-        self._orbits = {}  # client id -> threading.Event that stops its orbit
+        self.orbit_on = False  # View → Orbit: the browsers turn the view themselves (patched viser bundle)
         self._flights = {}  # client id -> {"stop": Event, "jump": None or path time to jump to}
         self._fly_guard = False  # set while the flight moves the position slider (not a user scrub)
         self._build_gui()
@@ -199,6 +201,9 @@ class App:
     def _build_gui(self):
         gui = self.server.gui
         self.g_header = gui.add_markdown(self._header())
+        # where the browser's keyboard movement reads its speed (docker/patch_viser_keys.sh): in the right panel,
+        # which is always on screen
+        self.g_speed_html = gui.add_html(self._speed_html())
         # run state above the tabs, so it stays visible on every tab
         self.g_state = gui.add_markdown("⚪ **idle**")
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
@@ -299,7 +304,12 @@ class App:
                                                 "time or source (video piece).")
             self.g_legend = gui.add_markdown("")
             gui.add_markdown("_Navigation: **Ctrl + click** a spot to orbit and zoom about it; **W A S D** move, "
-                             "**R F** up / down, **arrow keys** turn (2 m/s, set by viser)._")
+                             "**R F** up / down, **arrow keys** turn._")
+            self.g_move_speed = gui.add_number(
+                "Move speed (m/s)", initial_value=self.move_speed, min=0.1, max=500.0, step=0.5,
+                hint="Speed of the keyboard movement (W A S D, R F), in m/s (scene units for videos without "
+                     "metadata). Remembered across restarts. Reload the page after a GUI update for it to apply.")
+            self.g_move_speed.on_update(lambda _: self._set_move_speed(float(self.g_move_speed.value)))
             self.g_pivot_carry = gui.add_checkbox(
                 "Carry the pivot forward", initial_value=True,
                 hint="The mouse wheel zooms towards the point the view orbits about, slower and slower as it gets "
@@ -320,6 +330,7 @@ class App:
                 self.g_orbit.on_click(lambda e: self.toggle_orbit(e.client))
                 self.g_orbit_speed = gui.add_slider("Speed (°/s)", min=1, max=90, step=1, initial_value=12,
                                                     hint="Orbit speed; can be changed while orbiting.")
+                self.g_orbit_speed.on_update(lambda _: self._set_orbit(self.orbit_on))
             with gui.add_folder("Fly"):
                 self.g_fly = gui.add_button(
                     "Fly the camera path", icon=viser.Icon.PLANE,
@@ -994,6 +1005,15 @@ class App:
         self.recenter(client)
         client.camera.on_update(lambda _: self._carry_pivot(client))
 
+    def _speed_html(self):
+        orbit = float(self.g_orbit_speed.value) if getattr(self, "orbit_on", False) else 0.0
+        return f'<span id="mf-move-speed" data-speed="{self.move_speed:g}" data-orbit="{orbit:g}"></span>'
+
+    def _set_move_speed(self, v):
+        self.move_speed = max(0.01, v)
+        self.g_speed_html.content = self._speed_html()
+        self._save_setting("move_speed", self.move_speed)
+
     def _scene_scale(self):
         """The scene's size (m) for navigation, cached per snapshot."""
         key = id(self.snap)
@@ -1005,7 +1025,7 @@ class App:
     def _carry_pivot(self, client):
         """Camera moved: if it came close to the point it orbits about (zooming in), move that point ahead along
         the view so the wheel keeps moving the camera (View → Carry the pivot forward)."""
-        if not self.g_pivot_carry.value or client.client_id in self._flights or client.client_id in self._orbits:
+        if not self.g_pivot_carry.value or client.client_id in self._flights or self.orbit_on:
             return
         cam = client.camera
         pos, la = np.array(cam.position, float), np.array(cam.look_at, float)
@@ -1090,10 +1110,7 @@ class App:
         if client is None:
             return
         self._stop_fly(client)
-        stop = self._orbits.pop(client.client_id, None)
-        if stop is not None:
-            stop.set()
-            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        self._set_orbit(False)
         p1, l1 = np.asarray(position, float), np.asarray(look_at, float)
 
         def run():
@@ -1122,9 +1139,6 @@ class App:
         clients = [client] if client is not None else list(self.server.get_clients().values())
         for c in clients:
             self._stop_fly(c)
-            stop = self._orbits.pop(c.client_id, None)
-            if stop is not None:
-                stop.set()
             try:
                 with c.atomic():
                     c.camera.up_direction = (0.0, 0.0, 1.0)
@@ -1132,7 +1146,8 @@ class App:
                     c.camera.look_at = tuple(mid)
             except Exception:  # the browser went away
                 pass
-        self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        if client is not None:  # a browser connecting does not stop the others' orbit
+            self._set_orbit(False)
 
     # ------------------------------------------------------------- loading
     def load_snapshot(self, name):
@@ -1635,7 +1650,7 @@ class App:
                 ("Plan", bool(self.ingest.prev), self.ingest.g_show.value),
                 ("Tiles", bool(self.path) and os.path.exists(os.path.join(self.path, "transforms.json")),
                  self.g_tiles_view.value),  # View: Tile boundaries
-                ("Orbit", True, bool(self._orbits)),
+                ("Orbit", True, self.orbit_on),
                 ("Center", True, False),
                 ("Fly", self.project is not None, bool(self._flights)))
 
@@ -1711,68 +1726,24 @@ class App:
         self._sync_quickbar()
 
     def _on_disconnect(self, client):
-        """A browser left (closed, reloaded): end its flight / orbit. viser does not fail on a closed
-        connection, so they ran on, and the shared Fly / Orbit buttons kept saying stop."""
+        """A browser left (closed, reloaded): end its flight. viser does not fail on a closed connection, so it
+        ran on, and the shared Fly button kept saying stop. (Orbit runs in the browsers and is shared.)"""
         self._stop_fly(client)
-        stop = self._orbits.pop(client.client_id, None)
-        if stop is not None:
-            stop.set()
-            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
-            self._sync_quickbar()
 
     def toggle_orbit(self, client):
-        """Start / stop orbiting this client's camera around its current look-at point (about +z)."""
-        if client is None:
-            return
-        stop = self._orbits.pop(client.client_id, None)
-        if stop is not None:
-            stop.set()
-        else:
-            self._stop_fly(client)  # one camera driver per browser
-            stop = threading.Event()
-            self._orbits[client.client_id] = stop
-            threading.Thread(target=self._orbit, args=(client, stop), daemon=True).start()
-        self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
-        self._sync_quickbar()
+        """Start / stop turning the view about its look-at point (+z). The browsers turn it themselves, every frame
+        (docker/patch_viser_keys.sh: like the arrow keys), so the mouse wheel, drags and keys work while orbiting.
+        Before, the server sent the rotated pose 30 times a second, and each pose overwrote a wheel step (a ~50 ms
+        animation in the browser) before the browser could report it: zooming did nothing (the user asked)."""
+        if not self.orbit_on and client is not None:
+            self._stop_fly(client)  # one camera driver at a time
+        self._set_orbit(not self.orbit_on)
 
-    def _orbit(self, client, stop, rate_hz=30.0, hold_s=0.6):
-        """Each tick rotates the browser's *current* camera about its look-at point (+z axis), so mouse
-        zoom / tilt / pan stick and the orbit continues from there. While the user drags (the camera
-        differs from every pose sent recently) rotation pauses, resuming hold_s after the last change."""
-        cam = client.camera
-        sent = []  # recent (position, look_at) we set: the browser may still echo them back
-        hold_until, t_prev = 0.0, time.time()
-        try:
-            while not stop.wait(1.0 / rate_hz):  # no step after Stop
-                now = time.time()
-                dt, t_prev = now - t_prev, now
-                pos, center = np.array(cam.position, float), np.array(cam.look_at, float)
-                eps = 1e-3 * max(np.linalg.norm(pos - center), 1e-3)
-                ours = any(np.linalg.norm(pos - p) < eps and np.linalg.norm(center - c) < eps for p, c in sent)
-                if sent and not ours:  # moved by the mouse
-                    hold_until = now + hold_s
-                    sent.clear()
-                if now < hold_until:
-                    continue
-                if ours:  # an echo, often of an older step: continue from the latest pose sent, never go back
-                    pos, center = sent[-1]
-                else:  # adopting the browser's camera (start, or after a drag): its late echoes are ours too
-                    sent.append((pos, center))
-                a = np.radians(float(self.g_orbit_speed.value)) * dt
-                c, s = np.cos(a), np.sin(a)
-                off = pos - center
-                new = center + np.array([c * off[0] - s * off[1], s * off[0] + c * off[1], off[2]])
-                with client.atomic():
-                    cam.position = new
-                    cam.look_at = center
-                sent = (sent + [(new, center)])[-15:]
-        except Exception:  # the browser went away
-            pass
-        finally:
-            if self._orbits.get(client.client_id) is stop:
-                self._orbits.pop(client.client_id, None)
-                self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
-                self._sync_quickbar()
+    def _set_orbit(self, on):
+        self.orbit_on = bool(on)
+        self.g_speed_html.content = self._speed_html()
+        self.g_orbit.label = "Stop orbit" if self.orbit_on else "Start orbit"
+        self._sync_quickbar()
 
     # ------------------------------------------------------------ fly the camera path
     def _flight_path(self):
@@ -1811,10 +1782,7 @@ class App:
             return
         if self._stop_fly(client):
             return
-        stop = self._orbits.pop(client.client_id, None)  # one camera driver per browser
-        if stop is not None:
-            stop.set()
-            self.g_orbit.label = "Stop orbit" if self._orbits else "Start orbit"
+        self._set_orbit(False)  # one camera driver at a time
         try:
             path = self._flight_path()
         except (ValueError, AttributeError) as e:
@@ -2518,10 +2486,12 @@ class App:
                 return
             segs, cols = [], []
             self.server.scene.remove_by_name("/tiles")
+            ball = 0.012 * self._scene_scale()
             for c in cells:
                 x0, y0, x1, y1 = c["rect"]
                 z0, z1 = c["z"]
-                col = (255, 160, 0) if c["status"] == "training" else (255, 40, 40)
+                col = (140, 140, 140) if c.get("skipped") else (255, 160, 0) if c["status"] == "training" \
+                    else (255, 40, 40)
                 n0 = len(segs)
                 if c.get("outlines"):  # covisibility layout: the region's outline at the bottom and the top
                     for ring in c["outlines"]:
@@ -2539,13 +2509,47 @@ class App:
                     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
                 cols += [[col, col]] * (len(segs) - n0)
                 self.server.scene.add_label(f"/tiles/label_{c['tile']}",
-                                            f"tile {c['tile'] + 1} · {c['photos']} photos · {c['status']}",
-                                            position=(cx, cy, z1))
+                                            f"tile {c['tile'] + 1} · {c['photos']} photos · "
+                                            + ("left out (click the ball)" if c.get("skipped") else c["status"]),
+                                            position=(cx, cy, z1 + 2.5 * ball))
+                # the ball under the label: click to leave the tile out of training and the merge, or take it back
+                h = self.server.scene.add_icosphere(
+                    f"/tiles/toggle_{c['tile']}", radius=ball, position=(cx, cy, z1 + ball),
+                    color=(140, 140, 140) if c.get("skipped") else (40, 200, 70))
+                h.on_click(lambda _, k=c["tile"], pl=planned: self._toggle_tile(k, pl))
             self.server.scene.add_line_segments("/tiles/boxes", np.array(segs, dtype=np.float32),
                                                 colors=np.array(cols, dtype=np.uint8), thickness=3.0,
                                                 thickness_units="screen")
+            out = [c["tile"] + 1 for c in cells if c.get("skipped")]
             self._dense_status("tiles", f"tiles: {len(cells)} " + (f"planned (Photos per tile {photos}; no tiled run "
-                                                                     "yet)" if planned else "of the tiled run"))
+                                                                     "yet)" if planned else "of the tiled run")
+                               + (f", left out: {', '.join(map(str, out))}" if out else "")
+                               + ("" if planned else " · click a tile's ball to leave it out or take it back"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_tile(self, k, planned):
+        """A tile's ball clicked (View → Tile boundaries): leave it out of training and the merge, or take it back.
+        Without a job the merged splat is rebuilt at once; a running tiled run sees it before its next tile."""
+        if planned or not self.path:
+            self._dense_status("tiles", "tiles: only planned: set them up first (Splat tab → Set up tiles), then "
+                                        "click a tile's ball to leave it out")
+            return
+        skip = k not in splat_tiles.skipped(self.path)
+        splat_tiles.set_skipped(self.path, k, skip)
+        what = f"tile {k + 1} " + ("left out of training and the merged splat" if skip else "taken back")
+        if self.running:
+            self._on_log(f"tiles: {what}; the running job sees it before its next tile")
+            self._draw_tiles()
+            return
+        path = self.path
+
+        def work():
+            state = splat_tiles.load(path)
+            n = splat_tiles.merge(path, state) if state else 0
+            self._on_log(f"tiles: {what}" + (f"; merged splat now {n:,} gaussians" if n else ""))
+            if n and path == self.path:
+                self._refresh_dense()
+            self._draw_tiles()
         threading.Thread(target=work, daemon=True).start()
 
     def _dense_status(self, layer, text):

@@ -293,3 +293,30 @@ def test_covisibility_layout(tmp_path):
     assert not np.array([splat_tiles.clean_tile(p, v, tl, box) for tl in state["tiles"]]).any()
     cells, planned = splat_tiles.overlay(p)
     assert not planned and all(c["outlines"] for c in cells)
+
+
+def test_skip_tiles(fake_ns, tmp_path):  # noqa: F811
+    """Tiles left out (tiles/skip.json): one before the run, one clicked away while it runs; neither trains and
+    neither is merged. Taking one back and merging again brings its splat back."""
+    project, _ = fake_ns
+    write_scene(project)
+    v = _spread_source(tmp_path)
+    started = []
+
+    def on_tile(k, n, target, label):
+        started.append(k)
+        if k == 1:
+            splat_tiles.set_skipped(project, 3)  # the View tab click during the run
+    lines = []
+    stats = splat_tiles.run(project, "splatfacto", dict(iterations=20, downscale=1, camera_opt="off"),
+                            on_line=lines.append, cache="disk", photos=16, round_steps=0, on_tile=on_tile, skip=[0])
+    assert started == [1, 2] and any("tiles 1 left out" in m for m in lines)
+    state = json.load(open(os.path.join(project, splat_tiles.STATE)))
+    assert [t["status"] for t in state["tiles"]] == ["pending", "done", "done", "pending"]
+    assert state["merged"]["tiles"] == [1, 2] and splat_tiles.skipped(project) == {0, 3}
+    merged = plyfile.PlyData.read(os.path.join(project, "splat", "splat_enu.ply"))["vertex"].data
+    assert 0 < len(merged) == stats["num_gaussians"] < len(v)
+    cells, planned = splat_tiles.overlay(project)
+    assert [c["skipped"] for c in cells] == [True, False, False, True]
+    splat_tiles.set_skipped(project, 3, False)
+    assert splat_tiles.skipped(project) == {0}

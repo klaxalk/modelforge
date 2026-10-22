@@ -1460,6 +1460,12 @@ helped little):
   iterated local updates could not move seams. Training comparison (two tiles each, 30k steps, held-out photos near
   the seams; `build/tiles_cmp.py`) running. Not yet for 10k photos (dense n x n graph, dense eigh).
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
+- **Leaving tiles out** (the user asked: edge tiles may not be worth training): View → Tile boundaries draws a ball
+  under each tile's label, green = included, grey = left out; a click toggles it (`App._toggle_tile`; a set-up is
+  needed). `tiles/skip.json` (`splat_tiles.skipped / set_skipped`; not tiles.json, which a running job rewrites):
+  `run` trains only the others (re-read before every tile, so a click during a run counts from the next tile; an
+  explicit `only` tile always trains) and `merge` leaves them out (without a job the GUI merges again at once). The
+  area stays empty; neighbours are still cut at the shared seam. CLI `--skip-tiles 1,4`. Test: `test_skip_tiles`.
 - Not done: seam fine-tune, visibility pruning of floaters, per-tile splat mesh (it runs on the merged splat), level
   of detail for very large merged splats.
 - Tests: `tests/test_splat_tiles.py` (partition on a synthetic grid, clean, plan switch, a tiled run with the fake
@@ -2017,7 +2023,12 @@ Code layout:
       splat is tens of MB).
     - Each layer has its own status line (`_dense_status`).
   - **Orbit** (View tab, the user asked): **Start / Stop orbit** + speed
-    (°/s).
+    (°/s). **Since 2026-10-22 the browsers turn the view themselves** (the user could not zoom while orbiting: the
+    server's 30 Hz poses overwrote each wheel step, a ~50 ms animation in the browser, before it was reported):
+    `docker/patch_viser_keys.sh` adds a per-frame `rotate` (as the arrow keys) at `data-orbit` °/s of the hidden
+    `#mf-move-speed` element; the server only sets that (`App._set_orbit`), shared by all browsers; Fly, Center and
+    glides turn it off. viser renders on demand with a 1 s tick, so it starts within a second; steps capped at 0.1 s.
+    The notes below describe the earlier server-driven orbit (`_orbit`, removed).
     - `App._orbit` rotates the pressing client's camera about +z through its
       look-at point at 30 Hz (`client.atomic()` sets position + look_at
       together). One stop event per client.
@@ -2057,7 +2068,7 @@ Code layout:
       to the clicked spot (`App.ray_hit`: the nearest group of >= 3 sparse points within 0.6° of the ray, else the
       ground; a yellow ball for 2 s); **View → Carry the pivot forward** (default on, `_carry_pivot` on every camera
       update, not while Orbit / Fly drive it): within 1 % of the scene's size (>= 0.3 m) the pivot moves 8x that far
-      ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E, remapped by `docker/patch_viser_keys.sh` in its bundle's loader), at a fixed 2 m/s (its prebuilt client), arrows turn.
+      ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E), arrows turn; speed View → **Move speed** (default 5 m/s, remembered; viser's fixed 2 m/s). Both by `docker/patch_viser_keys.sh`, which makes viser's bundle loader edit the unpacked code (the speed is read from a hidden `#mf-move-speed` element at the top of the right panel while a key is held); a browser keeps the old code across GUI restarts: hard reload.
     - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,

@@ -65,6 +65,8 @@ MAX_POINTS = 50_000  # sparse points sampled for the partition
 DIR = "tiles"
 STATE = os.path.join(DIR, "tiles.json")
 REGIONS = os.path.join(DIR, "regions.npz")  # layout "covisibility": the tiles' label map
+SKIP = os.path.join(DIR, "skip.json")  # tiles left out of training and the merge (apart from tiles.json, which a
+#                                        running job rewrites: a click in the View tab must survive that)
 LAYOUTS = ("rectangles", "covisibility")
 LIVE = os.path.join("splat", "live_tiles.npz")
 IDENTITY = os.path.join(DIR, "identity_transforms.json")  # the live preview's arrays are already ENU
@@ -210,6 +212,25 @@ def regions(project):
     return _REGIONS[key]
 
 
+def skipped(project):
+    """The tiles (indices) left out of training and the merge."""
+    try:
+        return set(int(k) for k in json.load(open(os.path.join(project, SKIP))))
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def set_skipped(project, k, skip=True):
+    """Leave tile k out (skip) or take it back; a running tiled run sees it before its next tile."""
+    s = skipped(project)
+    s = s | {int(k)} if skip else s - {int(k)}
+    path = os.path.join(project, SKIP)
+    tmp = path + ".tmp"
+    json.dump(sorted(s), open(tmp, "w"))
+    os.replace(tmp, path)
+    return s
+
+
 def in_tile(project, tile, xy, pad=0.0):
     """Positions (n, 2) inside the tile's region (layout covisibility) or cell, grown by pad."""
     if "region" in tile:
@@ -241,6 +262,7 @@ def overlay(project, photos=PHOTOS_PER_TILE, layout="rectangles"):
         tiles = [dict(t, cell=_cell(t["cell"])) for t in tiles]
         planned = True
     xyz = splat_plan._points(project, MAX_POINTS)
+    skip = skipped(project)
     out = []
     for k, t in enumerate(tiles):
         c = t["cell"]
@@ -250,7 +272,7 @@ def overlay(project, photos=PHOTOS_PER_TILE, layout="rectangles"):
         z = xyz[inside, 2] if xyz is not None else np.zeros(0)
         zr = np.percentile(z, [2, 98]).tolist() if len(z) else [0.0, 1.0]
         item = {"tile": k, "rect": rect, "z": zr, "status": t.get("status") or ("planned" if planned else "pending"),
-                "photos": len(t["frames"])}
+                "photos": len(t["frames"]), "skipped": not planned and k in skip}
         if "region" in t:  # the region's outline, clipped to the scene box
             item["outlines"] = [np.clip(o, box[:2], box[2:]).tolist() for o in reg.outlines(t["region"])]
             if xyz is not None and inside.any():
@@ -340,8 +362,9 @@ def _write(v, path):
 def merge(project, state):
     """Concatenate the tiles' cleaned splats -> PROJECT/splat/splat_enu.ply (a tile training again keeps its last
     one until replaced). Records them in state["merged"] (and tiles.json). Returns the count."""
-    have = [k for k in range(len(state["tiles"])) if os.path.exists(os.path.join(tile_dir(project, k), "splat",
-                                                                                   "clean_enu.ply"))]
+    skip = skipped(project)
+    have = [k for k in range(len(state["tiles"])) if k not in skip and
+            os.path.exists(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply"))]
     parts = [_read(os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")) for k in have]
     if not parts:
         return 0
@@ -371,7 +394,8 @@ def merged_tiles(project):
     if m:
         return m["tiles"] if (m["size"], m["mtime_ns"]) == (st.st_size, st.st_mtime_ns) else None
     cleans = [(k, os.path.join(tile_dir(project, k), "splat", "clean_enu.ply")) for k in range(len(state["tiles"]))]
-    cleans = [(k, c) for k, c in cleans if os.path.exists(c)]
+    skip = skipped(project)
+    cleans = [(k, c) for k, c in cleans if os.path.exists(c) and k not in skip]
     if cleans and all(os.path.getmtime(c) <= st.st_mtime for _, c in cleans) and \
             sum(splat_plan.ply_count(c) for _, c in cleans) == splat_plan.ply_count(path):
         return [k for k, _ in cleans]
@@ -463,14 +487,15 @@ def _reset(project, k, tile):
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
         lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None, depth_cloud=None,
-        depth_dense=False, layout="rectangles"):
+        depth_dense=False, layout="rectangles", skip=None):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
     round_steps: every tile advances this many steps per round, from its checkpoint (step, optimizer and schedules
     carry on as in one run), and the tiles are merged after each round; 0 = one tile after the other.
     The tiles of `setup` are used when they fit (same photos per tile, same cameras), else it runs first.
-    only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged."""
+    only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged.
+    skip: tile indices to leave out (written after a new set-up; None keeps tiles/skip.json as it is)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     job = job or jobs.Token()
@@ -494,6 +519,9 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                 raise RuntimeError(f"there is no tile {only + 1} (tiles 1–{len(state['tiles'])})")
         elif not fits or state.get("photos") != int(photos) or state.get("layout", "rectangles") != layout:
             state = setup(project, photos, on_line, layout)
+        if skip is not None:
+            for k in range(len(state["tiles"])):
+                set_skipped(project, k, k in set(skip))
         targets = range(len(state["tiles"])) if only is None else [only]
         for k in targets:
             _reset(project, k, state["tiles"][k])
@@ -511,7 +539,11 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     down = int(plan_args["downscale"])
     splat.prepare_downscaled(project, down, on_line, job=job, on_count=on_prepare)
     n = len(state["tiles"])
-    targets = list(range(n)) if state.get("only") is None else [state["only"]]
+    targets = [k for k in range(n) if k not in skipped(project)] if state.get("only") is None else [state["only"]]
+    if not targets:
+        raise RuntimeError("every tile is left out (View → Tile boundaries: click a tile's ball to take it back)")
+    if len(targets) < n and state.get("only") is None:
+        on_line(f"splat: tiles {', '.join(str(k + 1) for k in sorted(set(range(n)) - set(targets)))} left out")
     done_parts = {}  # tile -> band-0 arrays of its cleaned splat, for the live preview
 
     def save_state():
@@ -544,7 +576,9 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             v = splat_to_enu.transform_vertices(v, R, t, s)
             xy = np.stack([v["x"], v["y"]], 1).astype(float)
             v = v[in_tile(project, tile, xy)]  # its part from the last round is replaced by the training one
-            path, ident = _write_live(project, [done_parts[j] for j in sorted(done_parts) if j != k] + [v], step)
+            skip = skipped(project)
+            path, ident = _write_live(project, [done_parts[j] for j in sorted(done_parts) if j != k and j not in skip]
+                                      + [v], step)
             on_snapshot(step, path, ident)
         return snap
 
@@ -617,10 +651,15 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                                        "merged into splat/splat_enu.ply, and Resume continues") from None
 
     rnd = int(state.get("round") or 1)
-    while any(state["tiles"][k].get("status") != "done" for k in targets):
+    def left_out(k):  # clicked away in the View tab meanwhile (an explicit `only` tile always trains)
+        return state.get("only") is None and k in skipped(project)
+
+    while any(state["tiles"][k].get("status") != "done" for k in targets if not left_out(k)):
         state["round"] = rnd
         save_state()
         for k in targets:
+            if left_out(k):
+                continue
             tile = state["tiles"][k]
             if tile.get("status") != "done" and tile["step"] < min(tile["iterations"], rnd * round_steps or
                                                                    tile["iterations"]):

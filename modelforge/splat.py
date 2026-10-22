@@ -572,6 +572,8 @@ def main():
     ap.add_argument("--tile-layout", choices=("rectangles", "covisibility"), default="rectangles",
                     help="tiles cut by straight lines, or regions from what the photos see together (seams on flat "
                          "ground; modelforge/tile_regions.py)")
+    ap.add_argument("--skip-tiles", metavar="K,K", default=None,
+                    help="tiles (1-based, as in the GUI) to leave out of training and the merge, e.g. 1,4")
     ap.add_argument("--round-steps", type=int, default=None,
                     help="tiled runs: every tile advances this many steps per round, merged after each "
                          "(default 4000; 0 = one tile after the other)")
@@ -601,6 +603,8 @@ def main():
                                                        camera_opt=args.camera_opt), extra,
                             on_line=lambda m: print(m, flush=True), cache=args.cache, lidar_depth=args.lidar_depth,
                             photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE, layout=args.tile_layout,
+                            skip=None if args.skip_tiles is None else
+                            [int(k) - 1 for k in args.skip_tiles.split(",") if k.strip()],
                             round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps,
                             only=None if args.tile is None else args.tile - 1)
             return
