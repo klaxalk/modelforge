@@ -7,6 +7,7 @@ may be new or empty: the Ingest tab builds it from one or more videos.
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -196,6 +197,7 @@ class App:
         self.server.on_client_disconnect(self._on_disconnect)
         self.server.scene.on_click(modifier="cmd/ctrl")(self._pivot_click)  # Ctrl + click: orbit / zoom about there
         threading.Thread(target=self._watch_uploads, daemon=True).start()
+        threading.Thread(target=self._watch_status, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
     def _build_gui(self):
@@ -204,6 +206,8 @@ class App:
         # where the browser's keyboard movement reads its speed (docker/patch_viser_keys.sh): in the right panel,
         # which is always on screen
         self.g_speed_html = gui.add_html(self._speed_html())
+        # the browser tab's title and icon follow it (docker/patch_viser_page.py), kept by _watch_status
+        self.g_status_html = gui.add_html('<span id="mf-status" data-state="idle" data-title="ModelForge"></span>')
         # run state above the tabs, so it stays visible on every tab
         self.g_state = gui.add_markdown("⚪ **idle**")
         self.g_progress = gui.add_progress_bar(value=0.0, visible=False)
@@ -383,8 +387,8 @@ class App:
             self.subset = SubsetPanel(self, gui)
             self.g_buttons["analyze"] = self.subset.g_analyze
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
-                               hint="Runs features → pairs → match → refine → export → SfM mesh → patch holes in "
-                                    "sequence. About 15-20 min on CPU for 300 images; matching dominates.")
+                               hint="Runs features → pairs → match → refine → export in sequence (the SfM mesh is "
+                                    "its own tab: Sparse Mesh). About 15-20 min on CPU for 300 images; matching dominates.")
             b.on_click(lambda _: self.run_stage("sfm"))
             self.g_buttons["sfm"] = b
             self.g_ba_iters = gui.add_number(
@@ -1021,6 +1025,35 @@ class App:
         orbit = float(self.g_orbit_speed.value) if getattr(self, "orbit_on", False) else 0.0
         return f'<span id="mf-move-speed" data-speed="{self.move_speed:g}" data-orbit="{orbit:g}"></span>'
 
+    def _status_html(self):
+        """Hidden element for the browser tab: "ModelForge · <job> 42 % · <project>", or idle / failed."""
+        name = os.path.basename(os.path.abspath(self.path)) if self.path else ""
+        if self.running or self.ingest.running:
+            state = "running"
+            label = self._job["label"] if self.running else "extraction"
+            pct = self.g_progress.value if self.running and self.g_progress.visible else None
+            what = f"{label} {pct:.0f} %" if pct else label
+            if self._token is not None and self._token.cancelled:
+                what = f"stopping {label}"
+        elif self.g_state.content.startswith("❌"):
+            state, what = "failed", "failed"
+        else:
+            state, what = "idle", "idle"
+        title = " · ".join(t for t in ("ModelForge", what, name) if t)
+        return (f'<span id="mf-status" data-state="{state}" data-title="{html.escape(title, quote=True)}">'
+                '</span>')
+
+    def _watch_status(self):
+        """Keeps the tab title / icon element in step with the run state (only sends changes)."""
+        while True:
+            try:
+                content = self._status_html()
+                if content != self.g_status_html.content:
+                    self.g_status_html.content = content
+            except Exception:  # never let the title stop the GUI
+                pass
+            time.sleep(1.0)
+
     def _set_move_speed(self, v):
         self.move_speed = max(0.01, v)
         self.g_speed_html.content = self._speed_html()
@@ -1410,9 +1443,8 @@ class App:
             report = pipeline.Report(project)
             pri = self.project.priors
             sfm = pipeline.sfm_stages(self._sparse_kind())
-            sfm = tuple(sfm) + ("sfmmesh", "sfmmesh-fill")  # the splat's depth prior, holes patched
-            if stage == "all":
-                seq, skipped = list(sfm), []
+            if stage == "all":  # Run SfM (all) stops at export; the full pipeline builds the SfM mesh too
+                seq, skipped = list(sfm) + ["sfmmesh", "sfmmesh-fill"], []  # the splat's depth prior, holes patched
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
                     seq = ["analyze", "images"] + seq
                 elif self.subset._images:  # every N-th: applied too when it differs from the images in use

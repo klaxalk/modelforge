@@ -1540,8 +1540,8 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
     large SfM meshes (kladno_dira) showed grey in the View tab, coloured or not.
 - **Which model the mesh uses**: `sparse/export` only while it is not older than `sparse/refined` (else refined), and
   every export first deletes the previous `sparse/export` (it writes one only when it leaves photos out), so a mesh
-  never comes from an earlier refine's or export's points. Run SfM (all) and Run full pipeline run export → SfM mesh
-  → patch holes; the splat then trains on that export (transforms.json, sparse_pc.ply; tiles set up again when
+  never comes from an earlier refine's or export's points. Run full pipeline runs export → SfM mesh → patch holes
+  (Run SfM (all) stops at export); the splat then trains on that export (transforms.json, sparse_pc.ply; tiles set up again when
   transforms.json changed) with the mesh prior ticked when a mesh first appears (a user's untick holds).
 - **View opens on the export model** (the user asked): snapshot **export** whenever `sfm_mesh.model_dir` picks it
   (not older than refined), else **refined** (`App._main_snapshot`), on start, on opening a project and after
@@ -1550,9 +1550,10 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   colour)** (stage `sfmmesh-all`; colouring skipped without nerfstudio), **Build mesh**, **Max hole size (m)**,
   **Patch holes**, **Colour from the photos**. With pose priors the hole size starts at the mean distance between
   consecutive prior cameras (per source; kladno_dira 4.4 m, fullrun_test / karlak 2.0 m; `App._camera_spacing`), else 0.
-- **In the pipelines** (the user asked): Run SfM (all) and Run full pipeline end the sparse part with `sfmmesh` and
-  `sfmmesh-fill` (GUI sequence; the CLI pipeline does not); the full pipeline also colours it (`sfmmesh-colour`) as
-  its last step (before COLMAP dense), so the splat does not wait for it (~14 min on kladno_dira).
+- **In the pipelines** (the user asked): Run full pipeline ends the sparse part with `sfmmesh` and `sfmmesh-fill`
+  (GUI sequence; the CLI pipeline does not) and colours it (`sfmmesh-colour`) as its last step (before COLMAP dense),
+  so the splat does not wait for it (~14 min on kladno_dira). **Run SfM (all) does not** (2026-10-22, the user asked:
+  the Sparse Mesh is its own thing); it ends at export.
 - **SfM mesh prior for the splat** (Splat tab "Depth prior: SfM mesh"; ticked by itself when a project has a mesh or
   one appears, `App._refresh_dense`; the user's untick holds while the mesh stays): the depth loss uses the mesh's
   vertices (`sfmmesh/mesh.ply`, patched if done; ~0.11 m spacing on kladno_dira) instead of the SfM points: the
@@ -1980,9 +1981,13 @@ Code layout:
     methods: header, run state + progress, **Run full pipeline**, tabs
     Sparse / Splat / Splat mesh / Dense (COLMAP's MVS last: the full pipeline's
     dense result is the splat mesh), then History.
-  - Browser tab title "ModelForge": viser hardcodes `<title>Viser</title>` in
-    its built `index.html`, so the Dockerfile patches it (a late layer, so the
-    rebuild takes seconds). The panel label is `ViserServer(label=...)`.
+  - Browser tab: viser hardcodes `<title>Viser</title>` and its icon in its built `index.html`, so the Dockerfile
+    runs `docker/patch_viser_page.py` (a late layer): title "ModelForge", our icon (`docker/favicon.svg`, an orange
+    cube), and a script that follows the hidden `#mf-status` element (`App._status_html`, kept by `_watch_status`
+    each second): the title reads "ModelForge · refine 42 % · berlin" / "ModelForge · idle · berlin" / "… failed …",
+    the icon gets a green dot while a job runs, a red one after a failure (the user asked, 2026-10-22). Applied to the
+    running container by hand too (`docker exec -u root … python docker/patch_viser_page.py INDEX docker/favicon.svg`;
+    the original is kept as `index.html.orig_mf`). The panel label is `ViserServer(label=...)`.
   - **Hardware** window (bottom, right of the log, `modelforge/gui/hardware.py`, the user asked): live CPU, RAM, GPU
     utilization and GPU memory (bars + numbers + GPU temperature / power), and a 2-minute history plot.
     Sampled at 1 Hz from `/proc/stat`, `/proc/meminfo` (host-wide, also in the container) and

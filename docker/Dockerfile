@@ -103,11 +103,10 @@ RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
         huggingface_hub==0.36.2 hf-xet==1.7.0 regex==2026.9.29 sentencepiece==0.2.2 plyfile==1.1.5; \
     fi
 
-# Browser tab title of the GUI: viser's page hardcodes <title>Viser</title> and never changes it.
-RUN sed -i 's|<title>Viser</title>|<title>ModelForge</title>|' \
-        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" && \
-    grep -q "<title>ModelForge</title>" \
-        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
+# Browser tab of the GUI: title and icon (viser hardcodes its own), and the title / icon following the run state.
+COPY docker/patch_viser_page.py docker/favicon.svg /tmp/
+RUN python /tmp/patch_viser_page.py \
+        "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" /tmp/favicon.svg
 # Camera keys R / F for up / down instead of viser's E / Q (the user asked).
 COPY docker/patch_viser_keys.sh /tmp/patch_viser_keys.sh
 RUN sh /tmp/patch_viser_keys.sh \
