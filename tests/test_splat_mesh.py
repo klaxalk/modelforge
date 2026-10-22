@@ -128,3 +128,41 @@ def test_marching_cubes_in_pieces(tmp_path):
     assert any("piece 2 /" in s for s in lines)
     assert abs(pieces["faces_raw"] - whole["faces_raw"]) <= 0.001 * whole["faces_raw"]
     assert abs(pieces["vertices"] - whole["vertices"]) <= 0.001 * whole["vertices"]
+
+
+def test_patch_holes(tmp_path):
+    """Holes up to the size are closed (also two touching at a vertex); larger ones, the outer border and a separate
+    piece's border stay open."""
+    from modelforge import sfm_mesh
+    out = tmp_path / splat_mesh.OUT
+    out.mkdir()
+    n = 41  # a 4 x 4 m ground of 0.1 m cells
+    gx, gy = np.meshgrid(np.arange(n) * 0.1, np.arange(n) * 0.1, indexing="ij")
+    xyz = np.c_[gx.ravel(), gy.ravel(), np.zeros(n * n)]
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            small = 5 <= i < 8 and 5 <= j < 8 or (i, j) == (8, 8)  # 0.3 m hole + a 0.1 m one touching its corner
+            large = 20 <= i < 35 and 20 <= j < 35  # 1.5 m hole
+            if not (small or large):
+                a = i * n + j
+                faces += [(a, a + n, a + 1), (a + 1, a + n, a + n + 1)]
+    island = len(xyz) + np.array([[0, 2, 1], [1, 2, 3]])  # a separate 0.2 m square, 10 m away
+    xyz = np.r_[xyz, [[10, 10, 0], [10.2, 10, 0], [10, 10.2, 0], [10.2, 10.2, 0]]]
+    faces = np.r_[np.array(faces), island]
+    v = np.zeros(len(xyz), [(c, "f8") for c in ("x", "y", "z", "nx", "ny", "nz")] + [(c, "u1") for c in ("red", "green", "blue")])
+    v["x"], v["y"], v["z"], v["nz"], v["green"] = *xyz.T, 1.0, 200
+    sfm_mesh.write_mesh(str(out / "mesh.ply"), v, faces)
+    json.dump({"voxel_m": 0.1}, open(out / "stats.json", "w"))
+    rep = splat_mesh.fill(str(tmp_path), max_hole=1.0, on_line=lambda m: None)
+    assert rep["holes"] == 2 and rep["faces_added"] == 16 and rep["largest_patched"] == pytest.approx(0.3)
+    v2, f2 = sfm_mesh.read_mesh(str(out / "mesh.ply"))
+    assert len(f2) == len(faces) + 16 and (out / splat_mesh.UNPATCHED).exists()
+    new = f2[len(faces):]
+    p = np.c_[v2["x"], v2["y"], v2["z"]]
+    nrm = np.cross(p[new[:, 1]] - p[new[:, 0]], p[new[:, 2]] - p[new[:, 0]])
+    old = np.cross(p[f2[0, 1]] - p[f2[0, 0]], p[f2[0, 2]] - p[f2[0, 0]])
+    assert (np.sign(nrm[:, 2]) == np.sign(old[2])).all()  # the same side up as the ground
+    assert v2["green"][-1] == 200 and v2["nz"][-1] == pytest.approx(1.0)
+    rep = splat_mesh.fill(str(tmp_path), max_hole=2.0, on_line=lambda m: None)  # again, from the unpatched mesh
+    assert rep["holes"] == 3 and len(sfm_mesh.read_mesh(str(out / "mesh.ply"))[1]) == len(faces) + 16 + 60

@@ -67,6 +67,10 @@ STAGE_HINTS = {
     "sfmmesh": "Mesh from the SfM points (after export): normals from their neighbours, COLMAP's Poisson, faces "
                "far from every point cut away (sfmmesh/mesh.ply, vertex colours). A surface to hold the splat to "
                "later, and a look at the ground the sparse model implies. Seconds to minutes.",
+    "splatmesh-fill": "Close the splat mesh's holes up to Max hole size: every border loop that is not a piece's "
+                      "outer border (the scene's edge) gets a fan of triangles from its mean point, coloured as its "
+                      "rim. Interpolated, not measured. Patching again starts from the unpatched mesh; Build mesh "
+                      "replaces both. A minute or two on large meshes.",
     "sfmmesh-fill": "Patch the SfM mesh's holes up to Max hole size with Poisson's own smooth surface across them "
                     "(the parts the trim cut that the mesh encloses; anything open to the outside stays cut). "
                     "Interpolated, not measured. Run SfM mesh again to undo. Seconds.",
@@ -79,7 +83,7 @@ STAGE_HINTS = {
                       "environment. A few minutes for thousands of photos.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
-    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh → "
+    "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → splat mesh (holes patched) → "
            "semantic features → SfM mesh coloured from the photos (→ COLMAP dense if ticked in the Dense tab).",
 }
 NEXT_STEP = {
@@ -96,7 +100,8 @@ NEXT_STEP = {
     "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
-    "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab",
+    "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab; optional: **Patch holes**",
+    "splatmesh-fill": "View tab → Dense / splat → Mesh **splat** (patched); Export tab",
     "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes**",
     "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour from the photos**",
     "sfmmesh-colour": "View tab → Dense / splat → Mesh **sfm** (coloured from the photos)",
@@ -629,6 +634,14 @@ class App:
                                     "splatmesh/mesh.ply + a simplified preview for the View tab (Mesh: splat).")
             b.on_click(lambda _: self.run_stage("splatmesh"))
             self.g_buttons["splatmesh"] = b
+            self.g_sm_fill_max = gui.add_number(
+                "Max hole size (m)", initial_value=0.0, min=0.0, step=0.5,
+                hint="Patch holes: the largest hole closed, across (scene units for videos). Projects with pose "
+                     "priors start at the mean distance between consecutive cameras, as in the Sparse Mesh tab. "
+                     "0 = 40 voxels.")
+            b = gui.add_button("Patch holes", hint=STAGE_HINTS["splatmesh-fill"])
+            b.on_click(lambda _: self.run_stage("splatmesh-fill"))
+            self.g_buttons["splatmesh-fill"] = b
 
         with tabs.add_tab("Dense", viser.Icon.GRID_DOTS):
             gui.add_markdown("COLMAP MVS. PatchMatch stereo: " + (
@@ -896,7 +909,7 @@ class App:
     def _show_project(self):
         self.g_header.content = self._header()
         gap = self._camera_spacing()  # Sparse Mesh: holes up to the camera spacing (0 = auto without priors)
-        self.g_fill_max.value = round(gap, 1) if gap else 0.0
+        self.g_fill_max.value = self.g_sm_fill_max.value = round(gap, 1) if gap else 0.0
         self.subset.refresh()
         self._apply_kind()
         self._set_aspect()
@@ -1259,7 +1272,7 @@ class App:
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
                     seq = ["analyze", "keyframes"] + seq
                 if splat.available() is None:
-                    seq += ["splat", "splatmesh"]  # the dense result is the mesh from the splat
+                    seq += ["splat", "splatmesh", "splatmesh-fill"]  # the dense result is the mesh from the splat
                     if self.semantic.g_in_all.value:  # Search tab: a searchable splat at the end
                         if semantic.available() is None:
                             seq.append("semantic")
@@ -1277,7 +1290,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh",
+            elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh",
                            "sfmmesh-fill", "sfmmesh-colour"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
@@ -1377,8 +1390,12 @@ class App:
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
-                elif st == "splatmesh":
-                    self._run_splat_mesh(project)
+                elif st in ("splatmesh", "splatmesh-fill"):
+                    if st == "splatmesh":
+                        self._run_splat_mesh(project)
+                    else:
+                        splat_mesh.fill(project, max_hole=float(self.g_sm_fill_max.value) or None,
+                                        on_line=self._on_log, token=self._token)
                     report = pipeline.Report(project)
                     self._refresh_dense()
                     if "splat" in self.g_mesh.options:
@@ -1390,7 +1407,7 @@ class App:
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
-            if stage in ("dense", "splat", "splatmesh", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
+            if stage in ("dense", "splat", "splatmesh", "splatmesh-fill", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
                          "all") or \
                     stage in pipeline.DENSE_STAGES:
                 self._refresh_dense()
@@ -2128,6 +2145,10 @@ class App:
                 r = rep["sfm_mesh"]
                 return (f"{r['faces']:,} faces from {r['points']:,} SfM points ({r['model']}), Poisson depth "
                         f"{r['depth']} (cells {r['cell']:.2f}), cut {r['trim_dist']:.2f} from the points")
+            if st == "splatmesh-fill":
+                r = rep["splat_mesh"]["fill"]
+                return (f"{r['holes']:,} holes closed (up to {r['max_hole']:.2f} across, largest "
+                        f"{r['largest_patched']:.2f}) with {r['faces_added']:,} faces; mesh {r['faces']:,} faces")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "

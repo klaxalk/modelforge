@@ -1551,6 +1551,20 @@ export).
     them ("No block is touched in TSDF volume").
   - kladno_dira medium (11.6 cm voxel): 23.4M faces, 9 min. `jobs.Token.run`'s error line skips lines that are
     only colour codes (Open3D ends its red errors with one).
+- **Patch holes** (Splat mesh tab "Max hole size (m)" + **Patch holes**, stage `splatmesh-fill`, also in Run full
+  pipeline after the splat mesh; `python -m modelforge.splat_mesh PROJECT --fill [MAX]`; the user asked for the SfM
+  mesh's option here, 2026-10-22). Marching cubes leaves real gaps (no Poisson surface underneath as in the SfM mesh),
+  so `splat_mesh.fill` closes border loops: every loop that is not its piece's widest (the outer border; for the
+  ground the scene's edge, for a floater its rim) and is at most the size across (bounding box; 0 = 40 voxels; the GUI
+  starts at the camera spacing like the Sparse Mesh tab) gets a fan of triangles from its mean point, colour and
+  normal the rim's mean. Where two holes touch at a vertex (2 border edges in, 2 out; frequent in marching cubes),
+  turning around it through its faces finds the other hole's outgoing edge, so each hole gets its own fan; more
+  holes at one vertex stay open. `mesh_unpatched.ply` keeps the marching-cubes mesh (patching again starts from it;
+  Build mesh deletes it), `patched.npy` marks the new faces, stats / report `splat_mesh.fill`. kladno_dira at 4.4 m:
+  94,511 of 94,607 loops closed with 1.03M faces, 4 min (mostly reading, the piece labels and the preview).
+  - `sfm_mesh.read_mesh` reads triangle PLYs as one block (plyfile `known_list_len`: 23M faces 0.1 s instead of a
+    Python object per face) and `write_mesh` writes binary directly (23M faces 12 s); `sfm_mesh.union_labels` is the
+    shared union-find.
 - **Open3D gotcha:** the legacy `ScalableTSDFVolume` (Open3D 0.20 in the nerfstudio venv)
   returns no surface at all, even for a synthetic wall integrated 5 times. The tensor
   `VoxelBlockGrid` works; its `extract_triangle_mesh` defaults to weight ≥ 3 (views).

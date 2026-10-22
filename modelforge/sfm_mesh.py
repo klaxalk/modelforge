@@ -101,22 +101,36 @@ def write_points(path, xyz, rgb, nrm):
 def read_mesh(path):
     """(vertex records, faces (F, 3))."""
     import plyfile
-    ply = plyfile.PlyData.read(path)
+    try:  # triangles: read as one (F, 3) block instead of a Python object per face (23M faces in seconds)
+        ply = plyfile.PlyData.read(path, known_list_len={"face": {"vertex_indices": 3, "vertex_index": 3}})
+    except Exception:  # noqa: BLE001 - other polygons: the general reader
+        ply = plyfile.PlyData.read(path)
     f = ply["face"].data
     key = "vertex_indices" if "vertex_indices" in f.dtype.names else "vertex_index"  # COLMAP writes the latter
-    return ply["vertex"].data, (np.stack(f[key]).astype(np.int64) if len(f) else np.zeros((0, 3), int))
+    if not len(f):
+        return ply["vertex"].data, np.zeros((0, 3), int)
+    idx = f[key]
+    return ply["vertex"].data, (idx if idx.dtype != object else np.stack(idx)).astype(np.int64)
 
 
 def write_mesh(path, v, faces):
-    """The faces with only the vertices they use. Returns the vertex count."""
-    import plyfile
+    """The faces with only the vertices they use (binary PLY, written as one block). Returns the vertex count."""
     used = np.unique(faces)
     remap = np.full(len(v), -1, np.int64)
     remap[used] = np.arange(len(used))
-    fe = np.empty(len(faces), [("vertex_indices", "i4", (3,))])
-    fe["vertex_indices"] = remap[faces]
-    plyfile.PlyData([plyfile.PlyElement.describe(v[used], "vertex"),
-                     plyfile.PlyElement.describe(fe, "face")]).write(path)
+    vert = np.asarray(v[used])
+    names = {"f4": "float", "f8": "double", "u1": "uchar", "i1": "char", "u2": "ushort", "i2": "short",
+             "u4": "uint", "i4": "int"}
+    vdt = np.dtype([(n, vert.dtype[n].newbyteorder("<")) for n in vert.dtype.names])
+    fe = np.empty(len(faces), [("n", "u1"), ("vertex_indices", "<i4", (3,))])
+    fe["n"], fe["vertex_indices"] = 3, remap[faces]
+    header = ["ply", "format binary_little_endian 1.0", f"element vertex {len(vert)}"]
+    header += [f"property {names[vdt[n].str[1:]]} {n}" for n in vdt.names]
+    header += [f"element face {len(fe)}", "property list uchar int vertex_indices", "end_header"]
+    with open(path, "wb") as fh:
+        fh.write(("\n".join(header) + "\n").encode())
+        fh.write(vert.astype(vdt).tobytes())
+        fh.write(fe.tobytes())
     return len(used)
 
 
@@ -226,8 +240,13 @@ def components(faces, mask):
     o = np.argsort(key, kind="stable")
     key, owner = key[o], owner[o]
     same = key[1:] == key[:-1]
-    a, b = owner[:-1][same], owner[1:][same]  # faces sharing an edge
-    parent = np.arange(len(idx))
+    label[idx] = union_labels(len(idx), owner[:-1][same], owner[1:][same])  # faces sharing an edge
+    return label
+
+
+def union_labels(n, a, b):
+    """Connected components of n nodes joined by the pairs (a, b): the smallest node of its component per node."""
+    parent = np.arange(n)
     while True:  # hooking to the smaller root, then pointer jumping: a few dozen rounds
         pa, pb = parent[a], parent[b]
         if np.array_equal(pa, pb):
@@ -240,8 +259,7 @@ def components(faces, mask):
             if np.array_equal(pp, parent):
                 break
             parent = pp
-    label[idx] = parent
-    return label
+    return parent
 
 
 def can_fill(project):
