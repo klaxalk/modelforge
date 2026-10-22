@@ -192,7 +192,7 @@ def _run_tiles(project, tiles, params, on_line, on_progress, job):
             g, keep = None, None
             if os.path.exists(full):  # the whole tile occludes, the cleaned part gets features
                 v = splat_tiles._read(full)
-                m = splat_tiles.clean(v, splat_tiles._cell(tile["cell"]), tile["margin"], state["box"])
+                m = splat_tiles.clean_tile(project, v, tile, state["box"])
                 del v
                 if int(m.sum()) == splat_plan.ply_count(clean):
                     g, keep = splat_mesh.load_splat(full), np.flatnonzero(m)

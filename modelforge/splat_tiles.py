@@ -34,6 +34,11 @@ are in the project's ENU frame (one global SfM), so they join by concatenation (
 Progress, Stop / Pause / Resume: per tile, through splat.run; PROJECT/tiles/tiles.json records the cells and the
 finished tiles, PROJECT/splat/resume.json ({"tiles": true, ...}) continues with the stopped tile, then the rest.
 The live preview shows the finished tiles (cleaned) plus the training one (cropped to its cell).
+
+Layout "covisibility" (modelforge/tile_regions.py; Splat tab "Tile layout", CLI --tile-layout): the photos are
+partitioned by the points they see together and each tile's region is a label map (tiles/regions.npz) whose seams
+avoid what sticks out of the ground; cropping, the clean (distance to the nearest seam instead of the shared sides)
+and the photos joining a tile use the region instead of the rectangle. Default "rectangles".
 """
 
 import json
@@ -59,6 +64,8 @@ MARGIN = 0.25  # of the cell's longer side: initial points and the clean's reach
 MAX_POINTS = 50_000  # sparse points sampled for the partition
 DIR = "tiles"
 STATE = os.path.join(DIR, "tiles.json")
+REGIONS = os.path.join(DIR, "regions.npz")  # layout "covisibility": the tiles' label map
+LAYOUTS = ("rectangles", "covisibility")
 LIVE = os.path.join("splat", "live_tiles.npz")
 IDENTITY = os.path.join(DIR, "identity_transforms.json")  # the live preview's arrays are already ENU
 BAND0 = ("x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
@@ -140,9 +147,10 @@ def _inside(xy, cell, pad=0.0):
     return (xy[:, 0] >= x0 - pad) & (xy[:, 0] < x1 + pad) & (xy[:, 1] >= y0 - pad) & (xy[:, 1] < y1 + pad)
 
 
-def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS):
+def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="rectangles"):
     """Cells and their photos: [{"cell": [x0, y0, x1, y1] (±inf outside), "margin": m, "frames": [frame indices],
-    "core": cameras looking into it}], plus the scene box [x0, y0, x1, y1] (sampled points 1-99 % + margin)."""
+    "core": cameras looking into it}], plus the scene box [x0, y0, x1, y1] (sampled points 1-99 % + margin) and,
+    for layout "covisibility", the Regions (each tile then has "region": its label; "cell" is the region's box)."""
     C, R, fx, w, h, _ = splat_plan._cameras(project)
     xyz = splat_plan._points(project, max_points)
     if xyz is None or len(xyz) < 10:
@@ -150,13 +158,21 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS):
     seen = _seen(C, R, fx, w, h, xyz)
     looks = np.array([np.median(xyz[s, :2], axis=0) if len(s) else c[:2] for s, c in zip(seen, C)])
     views = np.bincount(np.concatenate(seen), minlength=len(xyz)).astype(float) if seen else np.zeros(len(xyz))
-    leaves = []
-    _split(np.arange(len(C)), looks, (-np.inf, -np.inf, np.inf, np.inf), math.ceil(len(C) / max(1, int(photos))),
-           leaves, xyz[:, :2], views)
+    leaves, regions = [], None
+    parts = math.ceil(len(C) / max(1, int(photos)))
+    if layout == "covisibility":
+        from modelforge import tile_regions
+        names = [os.path.basename(f["file_path"]) for f in
+                 json.load(open(os.path.join(project, "transforms.json")))["frames"]]
+        part, k, regions = tile_regions.partition(project, names, C, parts)
+        leaves = [(regions.bbox(t), np.flatnonzero(part == t)) for t in range(k)]
+        point_cell = regions.label(xyz[:, :2])
+    else:
+        _split(np.arange(len(C)), looks, (-np.inf, -np.inf, np.inf, np.inf), parts, leaves, xyz[:, :2], views)
+        point_cell = np.full(len(xyz), -1)
+        for k, (cell, _) in enumerate(leaves):
+            point_cell[_inside(xyz[:, :2], cell)] = k
     lo, hi = np.percentile(xyz[:, :2], 1, axis=0), np.percentile(xyz[:, :2], 99, axis=0)
-    point_cell = np.full(len(xyz), -1)
-    for k, (cell, _) in enumerate(leaves):
-        point_cell[_inside(xyz[:, :2], cell)] = k
     share = np.zeros((len(C), len(leaves)))
     for i, s in enumerate(seen):
         if len(s):
@@ -165,34 +181,81 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS):
     for k, (cell, ids) in enumerate(leaves):
         finite = np.array([max(cell[0], lo[0]), max(cell[1], lo[1]), min(cell[2], hi[0]), min(cell[3], hi[1])])
         margin = MARGIN * float(max(finite[2] - finite[0], finite[3] - finite[1], 1e-6))
+        if regions is not None:  # an irregular region's box overstates it: its size from the area
+            margin = MARGIN * math.sqrt(max(regions.area(k, lo, hi), 1e-6))
         pad = max(pad, margin)
-        near = _inside(looks, cell, margin / 2)  # looking just across the edge: far-side views of edge objects
+        # looking just across the edge: far-side views of edge objects
+        near = regions.inside(looks, k, margin / 2) if regions is not None else _inside(looks, cell, margin / 2)
         joins = (share[:, k] >= MIN_VISIBLE) | ((share[:, k] >= MIN_IN_CELL) & near)
         frames = sorted(set(ids.tolist()) | set(np.flatnonzero(joins).tolist()))
-        tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": frames, "core": len(ids)})
+        tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": frames, "core": len(ids)}
+                     | ({"region": k} if regions is not None else {}))
     box = [float(lo[0] - pad), float(lo[1] - pad), float(hi[0] + pad), float(hi[1] + pad)]
-    return tiles, box
+    return (tiles, box, regions) if layout == "covisibility" else (tiles, box)
 
 
-def overlay(project, photos=PHOTOS_PER_TILE):
+_REGIONS = {}
+
+
+def regions(project):
+    """The set-up's Regions (layout "covisibility"), cached by file time; None without."""
+    path = os.path.join(project, REGIONS)
+    if not os.path.exists(path):
+        return None
+    key = (path, os.path.getmtime(path))
+    if key not in _REGIONS:
+        from modelforge import tile_regions
+        _REGIONS.clear()
+        _REGIONS[key] = tile_regions.Regions.load(path)
+    return _REGIONS[key]
+
+
+def in_tile(project, tile, xy, pad=0.0):
+    """Positions (n, 2) inside the tile's region (layout covisibility) or cell, grown by pad."""
+    if "region" in tile:
+        return regions(project).inside(xy, tile["region"], pad)
+    return _inside(xy, _cell(tile["cell"]), pad)
+
+
+def clean_tile(project, v, tile, box):
+    """clean() for a tile of either layout."""
+    if "region" in tile:
+        return clean(v, None, tile["margin"], box, region=(regions(project), tile["region"]))
+    return clean(v, _cell(tile["cell"]), tile["margin"], box)
+
+
+def overlay(project, photos=PHOTOS_PER_TILE, layout="rectangles"):
     """The tile cells as boxes for the View tab: [{"tile": k, "rect": [x0, y0, x1, y1] (clipped to the scene box),
     "z": [z0, z1] (the cell's sparse points, 2-98 %), "status", "photos"}], and whether they are only planned:
     the run's tiles.json when there is one, else a partition with these photos per tile (not saved)."""
+    reg = None
     try:
         state = json.load(open(os.path.join(project, STATE)))
         tiles, box, planned = [dict(t, cell=_cell(t["cell"])) for t in state["tiles"]], state["box"], False
+        reg = regions(project) if any("region" in t for t in tiles) else None
     except (OSError, ValueError, KeyError):
-        tiles, box = partition(project, photos)
+        if layout == "covisibility":
+            tiles, box, reg = partition(project, photos, layout=layout)
+        else:
+            tiles, box = partition(project, photos)
+        tiles = [dict(t, cell=_cell(t["cell"])) for t in tiles]
         planned = True
     xyz = splat_plan._points(project, MAX_POINTS)
     out = []
     for k, t in enumerate(tiles):
         c = t["cell"]
         rect = [max(c[0], box[0]), max(c[1], box[1]), min(c[2], box[2]), min(c[3], box[3])]
-        z = xyz[_inside(xyz[:, :2], c), 2] if xyz is not None else np.zeros(0)
+        inside = (reg.inside(xyz[:, :2], t["region"]) if "region" in t else _inside(xyz[:, :2], c)) \
+            if xyz is not None else np.zeros(0, bool)
+        z = xyz[inside, 2] if xyz is not None else np.zeros(0)
         zr = np.percentile(z, [2, 98]).tolist() if len(z) else [0.0, 1.0]
-        out.append({"tile": k, "rect": rect, "z": zr, "status": t.get("status") or ("planned" if planned else "pending"),
-                    "photos": len(t["frames"])})
+        item = {"tile": k, "rect": rect, "z": zr, "status": t.get("status") or ("planned" if planned else "pending"),
+                "photos": len(t["frames"])}
+        if "region" in t:  # the region's outline, clipped to the scene box
+            item["outlines"] = [np.clip(o, box[:2], box[2:]).tolist() for o in reg.outlines(t["region"])]
+            if xyz is not None and inside.any():
+                item["center"] = np.median(xyz[inside, :2], axis=0).tolist()
+        out.append(item)
     return out, planned
 
 
@@ -224,7 +287,7 @@ def write_tile(project, k, tile, downscale=1):
     ply = plyfile.PlyData.read(os.path.join(project, t.get("ply_file_path", "sparse_pc.ply")))
     v = ply["vertex"].data
     xy = np.stack([np.asarray(v["x"], float), np.asarray(v["y"], float)], 1)
-    keep = _inside(xy, _cell(tile["cell"]), tile["margin"])
+    keep = in_tile(project, tile, xy, tile["margin"])
     plyfile.PlyData([plyfile.PlyElement.describe(v[keep], "vertex")], text=False).write(
         os.path.join(out, "sparse_pc.ply"))
     t["ply_file_path"] = "sparse_pc.ply"
@@ -238,22 +301,28 @@ def write_tile(project, k, tile, downscale=1):
     return out, int(keep.sum())
 
 
-def clean(v, cell, margin, box):
+def clean(v, cell, margin, box, region=None):
     """Mask of the Gaussians (structured ENU vertices) a tile keeps. Only the sides shared with another tile cut
     (an outer tile keeps its view away from the scene: distant terrain, horizon): the centre lies in the cell (its
     outer sides are at infinity) and the 3 sigma reach crosses no shared side by more than the margin (reach <=
     distance to the nearest shared side + margin), so a large blob far out stays but none spreads over a
-    neighbour. Besides, a far limit drops absurd outliers: FAR x the scene box's size beyond it. No height cut."""
+    neighbour. Besides, a far limit drops absurd outliers: FAR x the scene box's size beyond it. No height cut.
+    region = (Regions, label) instead of the cell: inside that region, the reach against the nearest seam."""
     x, y = np.asarray(v["x"], float), np.asarray(v["y"], float)
     xy = np.stack([x, y], 1)
-    x0, y0, x1, y1 = cell
-    shared = np.full(len(x), np.inf)  # distance to the nearest side shared with another tile
-    for side, d in ((x0, x - x0), (y0, y - y0), (x1, x1 - x), (y1, y1 - y)):
-        if np.isfinite(side):
-            shared = np.minimum(shared, d)
+    if region is not None:
+        reg, k = region
+        inside, shared = reg.inside(xy, k), reg.to_seam(xy, k)
+    else:
+        x0, y0, x1, y1 = cell
+        inside = _inside(xy, cell)
+        shared = np.full(len(x), np.inf)  # distance to the nearest side shared with another tile
+        for side, d in ((x0, x - x0), (y0, y - y0), (x1, x1 - x), (y1, y1 - y)):
+            if np.isfinite(side):
+                shared = np.minimum(shared, d)
     reach = 3 * np.exp(np.max(np.stack([np.asarray(v[f"scale_{i}"], float) for i in range(3)], 1), axis=1))
     far = FAR * max(box[2] - box[0], box[3] - box[1])
-    return _inside(xy, cell) & (reach <= shared + margin) & _inside(xy, box, far)
+    return inside & (reach <= shared + margin) & _inside(xy, box, far)
 
 
 def _read(path):
@@ -333,24 +402,33 @@ def _write_live(project, parts, step):
     return path, ident
 
 
-def setup(project, photos=PHOTOS_PER_TILE, on_line=print):
+def setup(project, photos=PHOTOS_PER_TILE, on_line=print, layout="rectangles"):
     """Divide the scene into tiles and write each tile's dataset (cameras, cropped points; links to the photos):
     tiles.json with every tile pending, nothing trained. Replaces an earlier set-up and its trained tiles (tiles/
     is removed); the merged splat/splat_enu.ply stays until a run merges again."""
     import shutil
-    tiles, box = partition(project, photos)
+    if layout not in LAYOUTS:
+        raise ValueError(f"tile layout must be one of {LAYOUTS}")
+    reg = None
+    if layout == "covisibility":
+        tiles, box, reg = partition(project, photos, layout=layout)
+    else:
+        tiles, box = partition(project, photos)
     shutil.rmtree(os.path.join(project, DIR), ignore_errors=True)
+    if reg is not None:
+        os.makedirs(os.path.join(project, DIR), exist_ok=True)
+        reg.save(os.path.join(project, REGIONS))
     rf = os.path.join(project, splat.RESUME)
     if os.path.exists(rf) and json.load(open(rf)).get("tiles"):  # its tile is gone
         splat._remove(rf)
-    state = {"photos": int(photos), "box": box,
+    state = {"photos": int(photos), "layout": layout, "box": box,
              "transforms_mtime": os.path.getmtime(os.path.join(project, "transforms.json")),
              "tiles": [dict(t, cell=_json_cell(t["cell"]), status="pending", step=0) for t in tiles]}
     for k, t in enumerate(state["tiles"]):
         t["points"] = write_tile(project, k, t)[1]
     os.makedirs(os.path.join(project, DIR), exist_ok=True)
     json.dump(state, open(os.path.join(project, STATE), "w"), indent=1)
-    on_line(f"splat: {len(tiles)} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
+    on_line(f"splat: {len(tiles)} {layout} tiles of {', '.join(str(len(t['frames'])) for t in tiles)} photos "
             f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
             f"+ views from the neighbours)")
     return state
@@ -385,7 +463,7 @@ def _reset(project, k, tile):
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
         lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None, depth_cloud=None,
-        depth_dense=False):
+        depth_dense=False, layout="rectangles"):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
@@ -414,8 +492,8 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                                    + ("none yet" if state is None else "the cameras changed since"))
             if not 0 <= only < len(state["tiles"]):
                 raise RuntimeError(f"there is no tile {only + 1} (tiles 1–{len(state['tiles'])})")
-        elif not fits or state.get("photos") != int(photos):
-            state = setup(project, photos, on_line)
+        elif not fits or state.get("photos") != int(photos) or state.get("layout", "rectangles") != layout:
+            state = setup(project, photos, on_line, layout)
         targets = range(len(state["tiles"])) if only is None else [only]
         for k in targets:
             _reset(project, k, state["tiles"][k])
@@ -465,7 +543,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             R, t, s = splat_to_enu.load_transform(transforms)
             v = splat_to_enu.transform_vertices(v, R, t, s)
             xy = np.stack([v["x"], v["y"]], 1).astype(float)
-            v = v[_inside(xy, _cell(tile["cell"]))]  # its part from the last round is replaced by the training one
+            v = v[in_tile(project, tile, xy)]  # its part from the last round is replaced by the training one
             path, ident = _write_live(project, [done_parts[j] for j in sorted(done_parts) if j != k] + [v], step)
             on_snapshot(step, path, ident)
         return snap
@@ -522,7 +600,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             save_state()
             raise
         v = _read(os.path.join(tdir, "splat", "splat_enu.ply"))
-        keep = clean(v, _cell(tile["cell"]), tile["margin"], box)
+        keep = clean_tile(project, v, tile, box)
         _write(v[keep], os.path.join(tdir, "splat", "clean_enu.ply"))
         tile.update(gaussians=int(len(v)), kept=int(keep.sum()), step=int(stats.get("stopped_at_step") or iters),
                     train_seconds=round((tile.get("train_seconds") or 0) + (stats.get("train_seconds") or 0), 1),

@@ -533,6 +533,13 @@ class App:
                      "object); a tile also gets the oblique photos from its neighbours that see it "
                      f"(≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view, or "
                      f"≥ {int(100 * splat_tiles.MIN_IN_CELL)} % looking just across its edge), so tiles hold more.")
+            self.g_splat_tile_layout = gui.add_dropdown(
+                "Tile layout", options=splat_tiles.LAYOUTS, initial_value="rectangles",
+                hint="rectangles: the scene cut by straight lines, each placed where it splits the least. "
+                     "covisibility: the photos split by what they see together (an orbit or a pass over a building "
+                     "shares its points, so it stays in one tile), regions drawn on the ground with seams moved onto "
+                     "flat open ground (on berlin: a third fewer tall points near seams, fewer duplicated photos).")
+            self.g_splat_tile_layout.on_update(lambda _: self._draw_tiles())
             self.g_splat_rounds = gui.add_number(
                 "Steps per round", initial_value=splat_tiles.ROUND_STEPS, min=0, step=1000,
                 hint="Tiled runs: every tile advances this many steps per round, continuing from its checkpoint "
@@ -1387,7 +1394,8 @@ class App:
                     self._history(f"✅ **keyframes** ({self.subset.g_level.value}) · {n} of {total} images")
                     continue
                 elif st == "splat-tiles":
-                    state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log)
+                    state = splat_tiles.setup(project, int(self.g_splat_tile_photos.value), on_line=self._on_log,
+                                              layout=self.g_splat_tile_layout.value)
                     self._sync_tile_choice()
                     self._draw_tiles()
                     self._history(f"✅ **set up tiles** · {len(state['tiles'])} tiles of "
@@ -1972,7 +1980,7 @@ class App:
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, depth_cloud=mesh,
                                 depth_dense=bool(self.g_splat_mesh_dense.value),
                                 on_tile=on_tile,
-                                photos=int(self.g_splat_tile_photos.value),
+                                photos=int(self.g_splat_tile_photos.value), layout=self.g_splat_tile_layout.value,
                                 round_steps=int(self.g_splat_rounds.value), only=only, **common)
             else:
                 cache = self.g_splat_cache.value
@@ -2386,6 +2394,8 @@ class App:
         state = splat_tiles.load(self.path) if self.path else None
         n = len(state["tiles"]) if state and splat_tiles.current(self.path, state) else 0
         opts = ("all",) + tuple(f"tile {k + 1}" for k in range(n))
+        if n and state.get("layout", "rectangles") != self.g_splat_tile_layout.value:
+            self.g_splat_tile_layout.value = state.get("layout", "rectangles")  # the set-up's (a run reuses it)
         if tuple(self.g_splat_train_tiles.options) != opts:
             value = self.g_splat_train_tiles.value
             self.g_splat_train_tiles.options = opts
@@ -2417,11 +2427,11 @@ class App:
             self.server.scene.remove_by_name("/tiles")
             self._dense_status("tiles", None)
             return
-        path, photos = self.path, int(self.g_splat_tile_photos.value)
+        path, photos, layout = self.path, int(self.g_splat_tile_photos.value), self.g_splat_tile_layout.value
 
         def work():
             try:
-                cells, planned = splat_tiles.overlay(path, photos)
+                cells, planned = splat_tiles.overlay(path, photos, layout)
             except Exception as e:  # noqa: BLE001 - e.g. no sparse points yet
                 self._dense_status("tiles", f"tiles: {e}")
                 return
@@ -2431,18 +2441,27 @@ class App:
             self.server.scene.remove_by_name("/tiles")
             for c in cells:
                 x0, y0, x1, y1 = c["rect"]
-                d = 0.002 * max(x1 - x0, y1 - y0)  # inset: neighbours' shared walls both show
-                x0, y0, x1, y1 = x0 + d, y0 + d, x1 - d, y1 - d
                 z0, z1 = c["z"]
-                ring = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-                for i in range(4):
-                    (a, b), (e, f) = ring[i], ring[(i + 1) % 4]
-                    segs += [[(a, b, z0), (e, f, z0)], [(a, b, z1), (e, f, z1)], [(a, b, z0), (a, b, z1)]]
                 col = (255, 160, 0) if c["status"] == "training" else (255, 40, 40)
-                cols += [[col, col]] * 12
+                n0 = len(segs)
+                if c.get("outlines"):  # covisibility layout: the region's outline at the bottom and the top
+                    for ring in c["outlines"]:
+                        ring = np.asarray(ring)
+                        for (a, b), (e, f) in zip(ring, np.roll(ring, -1, axis=0)):
+                            segs += [[(a, b, z0), (e, f, z0)], [(a, b, z1), (e, f, z1)]]
+                    cx, cy = c.get("center", ((x0 + x1) / 2, (y0 + y1) / 2))
+                else:
+                    d = 0.002 * max(x1 - x0, y1 - y0)  # inset: neighbours' shared walls both show
+                    x0, y0, x1, y1 = x0 + d, y0 + d, x1 - d, y1 - d
+                    ring = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                    for i in range(4):
+                        (a, b), (e, f) = ring[i], ring[(i + 1) % 4]
+                        segs += [[(a, b, z0), (e, f, z0)], [(a, b, z1), (e, f, z1)], [(a, b, z0), (a, b, z1)]]
+                    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                cols += [[col, col]] * (len(segs) - n0)
                 self.server.scene.add_label(f"/tiles/label_{c['tile']}",
                                             f"tile {c['tile'] + 1} · {c['photos']} photos · {c['status']}",
-                                            position=((x0 + x1) / 2, (y0 + y1) / 2, z1))
+                                            position=(cx, cy, z1))
             self.server.scene.add_line_segments("/tiles/boxes", np.array(segs, dtype=np.float32),
                                                 colors=np.array(cols, dtype=np.uint8), thickness=3.0,
                                                 thickness_units="screen")

@@ -49,7 +49,7 @@ def main():
         raise SystemExit(f"mesh depth: camera model {t.get('camera_model')} not supported (OPENCV only)")
     K, w, h = undistorted_camera(t, a.downscale)
     st = os.stat(a.mesh)
-    key = {"mesh": os.path.abspath(a.mesh), "size": st.st_size, "mtime": st.st_mtime, "downscale": a.downscale,
+    key = {"mesh": os.path.realpath(a.mesh), "size": st.st_size,  # one cache whatever path reaches the mesh "mtime": st.st_mtime, "downscale": a.downscale,
            "K": np.round(K, 6).tolist(), "w": w, "h": h}
     os.makedirs(a.out, exist_ok=True)
     man = os.path.join(a.out, "manifest.json")

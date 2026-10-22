@@ -569,6 +569,9 @@ def main():
     ap.add_argument("--tiles", choices=("auto", "on", "off"), default="auto",
                     help="train in tiles (modelforge/splat_tiles.py); auto: above 800 training images")
     ap.add_argument("--tile-photos", type=int, default=None, help="about this many photos look into each tile (default 500)")
+    ap.add_argument("--tile-layout", choices=("rectangles", "covisibility"), default="rectangles",
+                    help="tiles cut by straight lines, or regions from what the photos see together (seams on flat "
+                         "ground; modelforge/tile_regions.py)")
     ap.add_argument("--round-steps", type=int, default=None,
                     help="tiled runs: every tile advances this many steps per round, merged after each "
                          "(default 4000; 0 = one tile after the other)")
@@ -589,7 +592,7 @@ def main():
         from modelforge import splat_plan, splat_tiles
         if args.setup_tiles:
             splat_tiles.setup(project, args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
-                              on_line=lambda m: print(m, flush=True))
+                              on_line=lambda m: print(m, flush=True), layout=args.tile_layout)
             return
         if args.tile is not None or (not args.no_plan and splat_tiles.wanted(splat_plan.survey(project)["train_images"],
                                                                              args.tiles)):
@@ -597,7 +600,7 @@ def main():
                                                        strategy=args.strategy, max_gaussians=args.max_gaussians,
                                                        camera_opt=args.camera_opt), extra,
                             on_line=lambda m: print(m, flush=True), cache=args.cache, lidar_depth=args.lidar_depth,
-                            photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
+                            photos=args.tile_photos or splat_tiles.PHOTOS_PER_TILE, layout=args.tile_layout,
                             round_steps=splat_tiles.ROUND_STEPS if args.round_steps is None else args.round_steps,
                             only=None if args.tile is None else args.tile - 1)
             return

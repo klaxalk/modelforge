@@ -1446,6 +1446,20 @@ helped little):
   apart: split median 0.39 m, p90 1.57 m, 51 % merged; < 60 s: 0.09 m) because 2883 photos refined chunked and the
   drift passes stopped at 0.47 m (`build/split_check2.py MODEL PROJECT`). Fix to try: refine with BA mode global
   (dira2k: 0.05 / 0.15 m). The experiments were stopped (workspace `build/dira_t3_exp`).
+- **Tile layout "covisibility"** (the user asked, 2026-10-22: straight cuts cannot bend around an orbited object or a
+  building; `modelforge/tile_regions.py`, Splat tab "Tile layout", CLI `--tile-layout`; default stays rectangles):
+  photos linked by shared 3D points (+ 0.3 x shared 2 m ground cells, so passes at different heights stay together, +
+  a tiny link along capture order), recursive spectral bisection (normalized cut, size slack 0.25); regions = a 1 m
+  label map: points vote 1 / d^2 for the parts whose photos see them, majority filter, then a geodesic watershed
+  within 25 m of the seams (steps through features above the local ground are cheap: objects go wholly to one side,
+  seams settle on flat ground). `tiles/regions.npz`; tiles carry `region`; crop, clean (reach vs the distance to
+  the nearest seam), live crop, overlay (outlines) and the photo-joining rule use it (`in_tile`, `clean_tile`;
+  margin = 0.25 x sqrt(region area)). berlin (1734 photos, 4 tiles; prototype `build/covis_tiles.py`): points > 3 m
+  above ground within 3 / 10 m of a seam 1.2 / 3.9 % vs rectangles 2.4 / 9.5 %, seams 1.9 vs 1.7 km; the right-hand
+  orbits stay in one tile (the rectangles cut them). Plain vote maps were ragged (seams 3x longer) and an MRF with
+  iterated local updates could not move seams. Training comparison (two tiles each, 30k steps, held-out photos near
+  the seams; `build/tiles_cmp.py`) running. Not yet for 10k photos (dense n x n graph, dense eigh).
+  - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
 - Not done: seam fine-tune, visibility pruning of floaters, per-tile splat mesh (it runs on the merged splat), level
   of detail for very large merged splats.
 - Tests: `tests/test_splat_tiles.py` (partition on a synthetic grid, clean, plan switch, a tiled run with the fake

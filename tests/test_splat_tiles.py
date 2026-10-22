@@ -254,3 +254,42 @@ def test_semantic_per_tile(fake_ns, tmp_path, monkeypatch):  # noqa: F811
     calls[:] = []
     semantic.run(project, on_line=lambda m: None)
     assert calls == [splat_tiles.tile_dir(project, 1) + "/semantic"]  # the PCA and the other tiles reused
+
+
+REAL = os.environ.get("MODELFORGE_TEST_PROJECT", "data/berlin_3_1_frames")  # any refined project
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined")),
+                    reason="needs a refined project (MODELFORGE_TEST_PROJECT)")
+def test_covisibility_layout(tmp_path):
+    """Tile layout covisibility: photos split by the points they share, regions on the ground (a label map), each
+    position in exactly one region, the tiles' datasets cropped to their region, and the clean keeps every small
+    Gaussian of the scene box in exactly one tile."""
+    p = str(tmp_path / "ws")
+    os.makedirs(p)
+    for f in ("images", "sparse", "sparse_pc.ply", "poses.json"):
+        os.symlink(os.path.abspath(os.path.join(REAL, f)), os.path.join(p, f))
+    t = json.load(open(os.path.join(REAL, "transforms.json")))
+    json.dump(t, open(os.path.join(p, "transforms.json"), "w"))
+    n = len(t["frames"])
+    state = splat_tiles.setup(p, max(10, n // 3), layout="covisibility", on_line=lambda m: None)
+    assert state["layout"] == "covisibility" and len(state["tiles"]) >= 2
+    reg = splat_tiles.regions(p)
+    assert sorted(set(np.unique(reg.labels))) == list(range(len(state["tiles"])))
+    cores = [tl["core"] for tl in state["tiles"]]
+    assert sum(cores) == n and min(cores) > 0
+    for k, tl in enumerate(state["tiles"]):
+        assert tl["region"] == k and set(range(n)) >= set(tl["frames"]) and tl["points"] > 0
+        assert len(json.load(open(os.path.join(splat_tiles.tile_dir(p, k), "transforms.json")))["frames"]) == \
+            len(tl["frames"])
+    box = state["box"]
+    rng = np.random.default_rng(0)
+    v = np.zeros(5000, [(c, "f4") for c in ("x", "y", "z", "scale_0", "scale_1", "scale_2")])
+    v["x"], v["y"] = rng.uniform(box[0], box[2], 5000), rng.uniform(box[1], box[3], 5000)
+    v["scale_0"] = v["scale_1"] = v["scale_2"] = np.log(0.01)
+    keeps = np.array([splat_tiles.clean_tile(p, v, tl, box) for tl in state["tiles"]])
+    assert (keeps.sum(0) == 1).all()
+    v["scale_0"] = np.log(1000.0)  # a huge Gaussian reaching over every seam: kept by none
+    assert not np.array([splat_tiles.clean_tile(p, v, tl, box) for tl in state["tiles"]]).any()
+    cells, planned = splat_tiles.overlay(p)
+    assert not planned and all(c["outlines"] for c in cells)
