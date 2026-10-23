@@ -64,3 +64,33 @@ suggested:
 - **Fix candidates:** (a) no target on mesh faces without SfM support (patched faces, faces far from any point,
   Poisson closures), written as 0 in the maps; (b) after warm-up, drop a pixel's target when rendered and mesh
   depth disagree by > ~50 % (outlier gate in the plugin). A/B on tile 0: depth error, held-out PSNR / LPIPS, renders.
+
+### Findings (2026-10-23, CPU + a few GPU renders; scripts in `build/dp_outliers/`)
+
+- **Maps vs each photo's own SfM points** (`compare.py`, berlin tiles 0 + 1, 2014 photos): median |dz|/z 0.6 %; in the
+  median photo 0.04–0.1 % of its points have the mesh at < half their depth (p90 photo 1.8–4.3 %). A few photos are
+  wrong as a whole: berlin_3_2_05501–05574 inside a hall (60–100 %: a smooth Poisson bubble 0.5–4 m in front of the
+  walls; berlin's patch-hole size was 50 m, its largest patch 38 m), berlin_3_4_006xx (40–60 %: fat blobs around
+  bushes / crowns, distant closures above the horizon).
+- **Support filtering does not pay** (faces kept only within k point spacings of an SfM point, 200 sample photos):
+  k = 3 keeps 78 % of the faces, covered pixels 87 → 72 %, the worst 40 photos' front-50 % share only 0.32 → 0.22;
+  k = 2: coverage 58 %. The unpatched (trimmed) mesh: 0.32 → 0.30, coverage 85 %.
+- **The splat's own depth vs the maps** (`splat_vs_map.py`, tile 0's trained splat at the map's camera, 1049 views):
+  pixel |D − z| / z median 1.5 %, p90 91 % (the training log's p90 reproduced), 12.6 % of covered pixels ≥ 50 % off,
+  93 % of those with the splat *farther* than the mesh... but per view it is bimodal: median view 0.7 % bad pixels,
+  174 views > 20 %. **They are the views that see mostly outside the tile** (`inregion.py`, share of the view's mesh
+  pixels inside tile 0's region): < 20 % inside: 591 views, bad pixels mean 21 %; ≥ 20 % inside: 458 views, 0.3–0.4 %.
+  Renders (`views/`): the splat paints fog close to the camera where the photo shows the neighbouring tiles; the
+  mesh is right there. The tile has no starting points outside its region + margin, so the photometric loss of those
+  pixels grows fog.
+- **So the large "depth outliers" are mostly splat fog, not wrong targets.** Wrong targets exist (hall interiors,
+  blobs at crowns), but are a small share.
+
+### Fix to A/B (GPU)
+
+1. **Tile mask**: per training view, drop the losses (photometric + depth) of pixels whose mesh surface lies outside
+   the tile's region + margin (computed once from the depth maps and regions.npz, cached next to them; pixels without
+   a mesh hit stay). Expected: no fog from views that mostly see the neighbours, faster tiles. A/B on berlin tile 0
+   (10k steps each): held-out PSNR / LPIPS of in-region views, the depth error, and renders of the merged splat.
+2. Then the remaining wrong targets: an outlier gate after warm-up (drop a pixel's depth target when |D − z| / z >
+   50 %), and a smaller patch-hole size for the prior (berlin's 50 m patched whole hall interiors).
