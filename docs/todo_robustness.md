@@ -1,6 +1,6 @@
 # TODO: robustness of long jobs
 
-Priority: **medium**. Status: proposed 2026-10-23, not started; the user will ask for it. Why: on 2026-10-23 the kernel OOM-killed the GUI
+Priority: **medium**. Status: §2 (resume refine) **done 2026-10-23**; §1 and §3 open. Why: on 2026-10-23 the kernel OOM-killed the GUI
 twice (07:26 next to a test run of mine, 09:53 alone at 30 GB in round 1 of kladno_dira's global refine, 5681
 images). Each time the GUI and the job inside it died together and the refine was lost (round 0 alone took 52 min),
 although `sparse/round_0` was on disk.
@@ -43,3 +43,15 @@ although `sparse/round_0` was on disk.
 - Measured values to start from are in CLAUDE.md (refine peaks, splat mesh 9–13 GB on berlin fine, cpu cache 2×).
 
 Order: 2 first (small, saves hours at once), then 1 (the real fix), then 3.
+
+## Done: resume refine (2026-10-23)
+
+`modelforge/sfm/checkpoint.py`: after every finished step (a global round; a calibration round, a chunk, the pose
+graph, each revisit / drift / global pass and the polish of a chunked refine) `sparse/refine_resume.pkl` holds the
+poses, intrinsics, prior model, stats and the chunked state (chunk edges, start poses, rejections); no points (each
+step triangulates afresh). `stage_refine(resume=True)` (Sparse tab **Resume refine**, enabled while a checkpoint
+exists; CLI `--resume-refine`) skips the finished steps; report `refine.resumed_after`. Key: database.db by content
+(images, keypoint and verified-match totals: COLMAP touches its mtime on every open, even for reading), poses.json
+size + mtime, the refine settings (rounds, BA mode, chunk settings, iteration cap, initial prior model). A finished
+refine deletes it. Tests: `tests/test_refine_resume.py` (global stopped after round 1 → resumes at round 2; chunked
+stopped after chunk 2 → calibration and chunks 1–2 skipped; other settings start afresh).

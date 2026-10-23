@@ -35,7 +35,7 @@ from modelforge import dense, jobs
 from modelforge.export import lidar as lidar_mod
 from modelforge.export import nerfstudio
 from modelforge.dji import ingest
-from modelforge.sfm import chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust
+from modelforge.sfm import checkpoint, chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust
 
 SFM_STAGES = ("features", "pairs", "match", "refine", "export")  # DJI: refine from the pose priors
 VIDEO_SFM_STAGES = ("features", "pairs", "match", "reconstruct", "export")  # no metadata: incremental SfM
@@ -269,11 +269,11 @@ def auto_ba_mode(report_data, n_images=None, available_gb=None, min_images=None)
 
 
 def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iterations, skip, refine_intrinsics,
-            write=True, ctx_extra=None, skip_round=None):
+            write=True, ctx_extra=None, skip_round=None, ck=None):
     """Refinement rounds [(i, Round)]: triangulate (poses fixed) -> global prior BA -> source offsets ->
     drift (not in a chunk: its model is a throwaway copy) -> prior-model calibration. Writes sparse/<prefix>_i[_tri] (write=False: a scratch triangulation
     folder, no snapshots, and no "round_done" events: a chunk). Returns (rec, the last Round that
-    ran, {"<prefix>_i": stats})."""
+    ran, {"<prefix>_i": stats}). ck (checkpoint.Checkpoint): finished rounds are skipped, each new one saved."""
     db_path = os.path.join(project, "database.db")
     image_path = os.path.join(project, "images")
     results, last = {}, None
@@ -282,6 +282,12 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
         if max_iterations == 0 or (skip is not None and skip.is_set()):
             break
         last = rnd
+        if ck is not None and ck.done(f"{prefix}_{i}"):
+            results[f"{prefix}_{i}"] = ck.get(f"round:{prefix}_{i}")
+            log(f"{prefix}_{i}: done before (resumed)")
+            continue
+        if ck is not None:
+            ck.restore(rec, model)
         t0 = time.time()
         ctx = {"round": k, "rounds": n, "stage": prefix, "name": f"{prefix}_{i}", **(ctx_extra or {})}
         emit({"phase": "triangulate", **ctx, "rec": rec})
@@ -327,6 +333,8 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
             log(f"   prior model: scales {calib.get('scales')} | abs {m['abs_sigmas']} rel {m['rel_sigmas']} | "
                 f"B {m['boresight_norm_deg']} deg, dt {m['dt_ms']} ms | rejected abs {calib['abs_rejected']} "
                 f"rel {calib['rel_rejected']} | d2 median abs {calib['abs_d2_median']} rel {calib['rel_d2_median']}")
+        if ck is not None:
+            ck.save(f"{prefix}_{i}", rec, model, **{f"round:{prefix}_{i}": results[f"{prefix}_{i}"]})
         if write:
             emit({"phase": "round_done", **ctx, "rec": rec, "eval": ev, "ba": ba, "max_iterations": max_iterations})
     return rec, last, results
@@ -347,23 +355,28 @@ def _pose(rec, image_id):
     return np.array(rec.frame(rec.image(image_id).frame_id).rig_from_world.params)
 
 
-def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_iterations, skip, skip_round=None):
+def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_iterations, skip, skip_round=None,
+                   ck=None):
     """Chunked refinement (modelforge.sfm.chunked): every chunk through `rounds` on its own (its images
     and matches only, intrinsics fixed), a pose graph over all cameras, then a triangulation of all
     images and a polish sweep of windows. rec (all images registered) gets the poses. Returns
-    (rec, the last Round, stats)."""
+    (rec, the last Round, stats). ck (checkpoint.Checkpoint): finished steps are skipped, each new one saved."""
     db_path = os.path.join(project, "database.db")
     image_path = os.path.join(project, "images")
+    ck = ck or _NoCheckpoint()
+    ck.restore(rec, model)  # the calibrated intrinsics and prior model, or the poses of the last finished step
     ids = {rec.image(i).name: i for i in rec.reg_image_ids()}
     order = priors_mod.by_order(pri, list(ids))
     parts = chunked.chunks(order, cfg.size, cfg.overlap)
     cams = {cid: np.array(cam.params) for cid, cam in rec.cameras.items()}
     log(f"refine: chunked, {len(order)} images in {len(parts)} chunks of {cfg.size} (overlap {cfg.overlap})")
     t0 = time.time()
-    init, centrality, edges, rejected, per_chunk = {}, {}, [], set(), []
+    init, centrality, edges, rejected, per_chunk = ck.get("chunks", ({}, {}, [], set(), []))
     for k, names in enumerate(parts):
         if skip is not None and skip.is_set():
             break
+        if ck.done(f"chunk_{k}"):
+            continue
         jobs.check(token)
         tc = time.time()
         crec = refine.init_from_database(db_path, pri, names=names)
@@ -388,33 +401,43 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             f"error median {err.get('median')} px, {time.time() - tc:.0f} s")
         emit({"phase": "chunk_done", "chunk": k, "chunks": len(parts)})
         del crec
+        ck.save(f"chunk_{k}", chunks=(init, centrality, edges, rejected, per_chunk))
     shutil.rmtree(os.path.join(project, "sparse", "_chunk_tri"), ignore_errors=True)
     jobs.check(token)
     corrected = robust.corrected_priors(pri, model)
     for name in order:  # cameras no chunk could place start (and stay, but for their prior) at the prior
         if name not in init:
             init[name] = np.array(corrected[name].params)
-    emit({"phase": "posegraph", "cameras": len(order), "edges": len(edges)})
-    pg = chunked.pose_graph(init, edges, corrected, model, rejected, token=token,
-                            solver=chunked.solver_options(cfg.posegraph_solver),
-                            on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
-                                                         "max_iterations": 200}))
-    log(f"refine: pose graph, {pg['cameras']} cameras, {pg['edges']} edges, {pg['abs_priors']} priors: "
-        f"{pg['iterations']} it ({pg['termination']}), {pg['seconds']} s")
-    for name, i in ids.items():
-        frame = rec.frame(rec.image(i).frame_id)
-        frame.rig_from_world = chunked._rigid(init[name])
-    for cid, p in cams.items():
-        rec.camera(cid).params = p
+    if ck.done("posegraph"):
+        ck.restore(rec, model)
+        stats = ck.get("stats")
+    else:
+        emit({"phase": "posegraph", "cameras": len(order), "edges": len(edges)})
+        pg = chunked.pose_graph(init, edges, corrected, model, rejected, token=token,
+                                solver=chunked.solver_options(cfg.posegraph_solver),
+                                on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
+                                                             "max_iterations": 200}))
+        jobs.check(token)
+        log(f"refine: pose graph, {pg['cameras']} cameras, {pg['edges']} edges, {pg['abs_priors']} priors: "
+            f"{pg['iterations']} it ({pg['termination']}), {pg['seconds']} s")
+        for name, i in ids.items():
+            frame = rec.frame(rec.image(i).frame_id)
+            frame.rig_from_world = chunked._rigid(init[name])
+        for cid, p in cams.items():
+            rec.camera(cid).params = p
+        stats = {"chunks": per_chunk, "pose_graph": pg, "chunk_size": cfg.size, "overlap": cfg.overlap,
+                 "rejected_priors": len(rejected)}
+        ck.save("posegraph", rec, model, stats=stats)
     rnd = rounds[-1][1]
-    stats = {"chunks": per_chunk, "pose_graph": pg, "chunk_size": cfg.size, "overlap": cfg.overlap,
-             "rejected_priors": len(rejected)}
     # revisits: the chunks and the pose graph never relate passes over the same ground at different times,
     # so with a drifting prior they triangulate as offset copies: loop-closure edges from the copies' offsets,
     # pose graph again, until they merge
-    if cfg.revisit_passes and not (skip is not None and skip.is_set()):
-        stats["revisits"] = []
+    if cfg.revisit_passes and not (skip is not None and skip.is_set()) and not ck.done("revisits"):
+        stats.setdefault("revisits", [])
         for k in range(cfg.revisit_passes):
+            if ck.done(f"revisit_{k}"):
+                continue
+            ck.restore(rec, model)
             emit({"phase": "revisits", "pass": k, "passes": cfg.revisit_passes})
             rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
             jobs.check(token)
@@ -423,6 +446,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
                 f"(p90 {rs['split_p90_m']} m)")
             if not loops or rs["split_median_m"] < cfg.revisit_done_m:
                 stats["revisits"].append(rs)
+                ck.save("revisits", rec, model, stats=stats)
                 break
             cur = {name: _pose(rec, i) for name, i in ids.items()}
             emit({"phase": "posegraph", "cameras": len(cur), "edges": len(edges), "loops": len(loops), "pass": k})
@@ -442,10 +466,14 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             stats["revisits"].append(rs)
             for name, i in ids.items():
                 rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(cur[name])
+            ck.save(f"revisit_{k}", rec, model, stats=stats)
     # what is left: measure and remove the drift globally
-    if model.estimate_drift and not (skip is not None and skip.is_set()):
-        stats["drift"] = []
+    if model.estimate_drift and not (skip is not None and skip.is_set()) and not ck.done("drift"):
+        stats.setdefault("drift", [])
         for k in range(DRIFT_PASSES):
+            if ck.done(f"drift_{k}"):
+                continue
+            ck.restore(rec, model)
             emit({"phase": "drift", "pass": k, "passes": DRIFT_PASSES})
             rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
             jobs.check(token)
@@ -453,21 +481,28 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             stats["drift"].append(dr)
             log(f"refine: drift pass {k + 1}: {_drift_line(dr)}")
             inc = max((d.get("increment_max_m", 0.0) for d in dr["sources"].values()), default=0.0)
+            ck.save(f"drift_{k}", rec, model, stats=stats)
             if inc < DRIFT_DONE_M:
                 break
-        corrected = robust.corrected_priors(pri, model)
+        ck.save("drift", rec, model, stats=stats)
+    ck.restore(rec, model)
+    corrected = robust.corrected_priors(pri, model)
     # a global BA pulls passes together that the pose graph leaves apart (each chunk keeps its own pass's drift):
     # over all cameras, on thinned points, each after a fresh triangulation (which merges what came closer)
-    if cfg.global_passes and not (skip is not None and skip.is_set()):
-        stats["global"] = []
+    if cfg.global_passes and not (skip is not None and skip.is_set()) and not ck.done("global"):
+        stats.setdefault("global", [])
         model.abs_rejected = rejected
         for k in range(cfg.global_passes):
+            if ck.done(f"global_{k}"):
+                continue
+            ck.restore(rec, model)
             ev = {"round": k, "rounds": cfg.global_passes, "stage": "global"}
             emit({"phase": "triangulate", **ev})
             rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
             jobs.check(token)
             _, rs = chunked.revisit_edges(rec, pri, db_path, cfg)
             if k and rs["split_median_m"] < cfg.revisit_done_m:
+                ck.save("global", rec, model, stats=stats)
                 break
             live = rec
             g = chunked.global_ba(rec, corrected, model, cfg, token=token, skip=skip, loss_scale_px=rnd.loss_scale_px,
@@ -478,7 +513,9 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             stats["global"].append({**rs, "ba": g})
             log(f"refine: global pass {k + 1}: revisits split {rs['split_median_m']} m before (p90 {rs['split_p90_m']} m); "
                 f"BA on {g['points']:,} of {g['of_points']:,} points, {g['iterations']} it ({g['termination']})")
-    if cfg.polish_sweeps and not (skip is not None and skip.is_set()):
+            ck.save(f"global_{k}", rec, model, stats=stats)
+    ck.restore(rec, model)
+    if cfg.polish_sweeps and not (skip is not None and skip.is_set()) and not ck.done("polish"):
         emit({"phase": "triangulate", "round": 0, "rounds": 1, "stage": "polish", "name": "posegraph", "rec": rec})
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
         jobs.check(token)
@@ -506,12 +543,38 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
         rec.write(out)
         emit({"phase": "round_done", "round": 0, "rounds": 1, "stage": "polish", "name": "posegraph", "rec": rec,
               "eval": refine.evaluate(rec, pri)})
+        ck.save("polish", rec, model, stats=stats)
+    ck.restore(rec, model)
     stats["seconds"] = round(time.time() - t0, 1)
     return rec, rnd, stats
 
 
+class _NoCheckpoint:
+    """checkpoint.Checkpoint without a file: nothing done, nothing restored or saved."""
+
+    def done(self, step):
+        return False
+
+    def get(self, name, default=None):
+        return default
+
+    def restore(self, rec, model=None):
+        pass
+
+    def save(self, step, rec=None, model=None, **extra):
+        pass
+
+
+def refine_key(project, rounds, use_chunks, cfg, max_iterations, model):
+    """The refine's checkpoint key: inputs (database.db, poses.json) and the settings that shape the result."""
+    import dataclasses
+    return checkpoint.key(project, {"rounds": [vars(r) for r in rounds], "chunked": bool(use_chunks),
+                                    "cfg": dataclasses.asdict(cfg) if use_chunks else None,
+                                    "max_iterations": max_iterations, "model": model.summary()})
+
+
 def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
-                 max_iterations=500, skip=None, ba_mode=DEFAULT_BA_MODE, chunks=None, skip_round=None):
+                 max_iterations=500, skip=None, ba_mode=DEFAULT_BA_MODE, chunks=None, skip_round=None, resume=False):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done", and in a
     chunked refine also "chunk_done" | "posegraph"; "ba" events carry the live Reconstruction (poses
     are updated every iteration). Events carry "stage" ("calib" | "round" | "chunk" | "polish"),
@@ -534,6 +597,9 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
 
     model (robust.PriorModel) holds prior sigmas, systematic corrections and rejected
     priors; it is self-calibrated after every round's BA.
+
+    Every finished step is checkpointed (modelforge.sfm.checkpoint, sparse/refine_resume.pkl); resume=True skips the
+    steps a checkpoint of the same inputs and settings holds and continues from its state.
     """
     emit = progress or (lambda event: None)
     model = model or robust.PriorModel()
@@ -546,6 +612,9 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         auto, auto_why = auto_ba_mode(report.data, n_images, min_images=cfg.min_images)
         log(f"refine: BA mode auto: {auto_why}")
     use_chunks = ba_mode == "chunked" or (ba_mode == "auto" and auto == "chunked")
+    ck = checkpoint.Checkpoint(project, refine_key(project, rounds, use_chunks, cfg, max_iterations, model), resume)
+    if ck.resumed:
+        log(f"refine: resuming after {', '.join(ck.state['done'])}")
     results = {"init": refine.evaluate(rec, pri)}
     t_start = time.time()
     free_intrinsics = known_camera(project) is None
@@ -557,7 +626,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         crec = refine.init_from_database(db_path, pri, names=subset)
         # rounds 0-1: round 0 converges the focal length, round 1 the prior model at a tight threshold
         crec, clast, cres = _rounds(project, crec, pri, model, main[:2], "calib", emit, token, max_iterations, skip,
-                                    free_intrinsics, skip_round=skip_round)
+                                    free_intrinsics, skip_round=skip_round, ck=ck)
         results.update(cres)
         if clast is not None:
             last = clast
@@ -566,10 +635,10 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
         del crec
         if not (skip is not None and skip.is_set()):
             rec, last, results["chunked"] = _refine_chunks(project, rec, pri, model, main[1:], cfg, emit, token,
-                                                           max_iterations, skip, skip_round)
+                                                           max_iterations, skip, skip_round, ck=ck)
     else:
         rec, mlast, rres = _rounds(project, rec, pri, model, main, "round", emit, token, max_iterations, skip,
-                                   free_intrinsics, skip_round=skip_round)
+                                   free_intrinsics, skip_round=skip_round, ck=ck)
         results.update(rres)
         last = mlast or last
     if max_iterations == 0:
@@ -583,6 +652,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     # final triangulation at the last round's threshold (the tightest after a full run) so the
     # exported cloud matches the refined poses
     jobs.check(token)
+    ck.restore(rec, model)  # resumed after the last step: its poses
     image_path = os.path.join(project, "images")
     rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "refined"), last, refine=True)
     jobs.check(token)  # stopped: sparse/refined is not (over)written
@@ -599,7 +669,10 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     results["seconds"] = round(time.time() - t_start, 1)
     import resource
     results["peak_rss_gb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, 2)  # of this process
+    if ck.resumed_from:
+        results["resumed_after"] = ck.resumed_from
     report.set("refine", results)
+    ck.remove()
     log(f"refine final: {results['final']}")
     emit({"phase": "done", "rec": rec, "eval": results["final"]})
     return rec
@@ -722,6 +795,9 @@ def main():
     ap.add_argument("--ba-iterations", type=int, default=500,
                     help="bundle-adjustment iteration cap per refine round (default 500; it stops earlier once the "
                          "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
+    ap.add_argument("--resume-refine", action="store_true",
+                    help="refine: continue after the last finished step of a refine that stopped or died "
+                         "(sparse/refine_resume.pkl; same database, poses and settings)")
     ap.add_argument("--ba-mode", default=DEFAULT_BA_MODE, choices=BA_MODES,
                     help="refine BA: global (all images at once), chunked (chunks on their own + a pose graph + "
                          "a polish sweep, after calibrating the intrinsics on a subset), auto (default: global if its "
@@ -772,7 +848,7 @@ def main():
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
                                   estimate_systematic=not args.no_systematic, estimate_drift=not args.no_drift)
         rec = stage_refine(args.project, report, pri, model=model, max_iterations=args.ba_iterations,
-                           ba_mode=args.ba_mode, chunks=chunked.Chunked(size=args.chunk_size, overlap=args.chunk_overlap,
+                           resume=args.resume_refine, ba_mode=args.ba_mode, chunks=chunked.Chunked(size=args.chunk_size, overlap=args.chunk_overlap,
                                                                          polish_sweeps=args.polish_sweeps))
     if "reconstruct" in stages:
         stage_reconstruct(args.project, report, mapper=args.mapper)

@@ -176,6 +176,7 @@ class App:
         self.selected = None
         self.snap = None
         self.running = False
+        self._refine_resume = False
         self.fov, self.aspect = np.radians(53.0), 16 / 9
         self._last_live = 0.0
         self._run_id = 0
@@ -489,6 +490,13 @@ class App:
                                    hint=STAGE_HINTS[stage])
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
+            b = gui.add_button("Resume refine", icon=viser.Icon.PLAYER_PLAY, disabled=True,
+                               hint="Continue a refine that stopped or died (Stop, out of memory, a GUI restart) "
+                                    "after its last finished step (a round; in a chunked refine a chunk, the pose "
+                                    "graph or a pass), instead of from the priors. Needs the same database.db, "
+                                    "poses.json and refine settings (BA mode, chunk size, ...).")
+            b.on_click(lambda _: self.run_stage("refine-resume"))
+            self.g_buttons["refine-resume"] = b
 
         with tabs.add_tab("Sparse Mesh", viser.Icon.TRIANGLES):  # the mesh from the SfM points, after Sparse
             gui.add_markdown("A surface from the SfM points (after **export**): the splat's depth prior (Splat tab) "
@@ -874,11 +882,18 @@ class App:
         """pipeline.sparse_kind: a ROS bag of images only reconstructs like a video."""
         return pipeline.sparse_kind(self.path)
 
+    def _refine_checkpoint(self):
+        """A refine checkpoint to resume from exists (sfm/checkpoint.py)."""
+        from modelforge.sfm import checkpoint
+        return bool(self.path) and os.path.exists(os.path.join(self.path, checkpoint.FILE))
+
     def _apply_kind(self):
         """Sparse tab: refine + BA controls for DJI projects, reconstruct for videos without metadata."""
         video = self._sparse_kind() == "video"
-        for name, show in (("refine", not video), ("reconstruct", video)):
+        for name, show in (("refine", not video), ("reconstruct", video), ("refine-resume", not video)):
             self.g_buttons[name].visible = show
+        if not self.running:
+            self.g_buttons["refine-resume"].disabled = not self._refine_checkpoint()
         self.g_ba_iters.visible = self.g_skip.visible = self.g_skip_round.visible = not video
         for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish, self.g_drop_isolated,
                   self.g_ba_auto):
@@ -1464,6 +1479,8 @@ class App:
         if self.project is None and stage != "all":  # the full pipeline extracts them itself
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
+        self._refine_resume = stage == "refine-resume"
+        stage = "refine" if self._refine_resume else stage
         self.running = True
         self.semantic.unload(stage if isinstance(stage, str) else " + ".join(stage))  # reconstructions get the memory; the text model loads again on demand
         self._token = jobs.Token()
@@ -1554,7 +1571,7 @@ class App:
                     try:
                         pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token,
                                               max_iterations=int(self.g_ba_iters.value), skip=self._skip,
-                                              skip_round=self._skip_round,
+                                              skip_round=self._skip_round, resume=self._refine_resume,
                                               ba_mode=self.g_ba_mode.value,
                                               chunks=chunked.Chunked(size=int(self.g_chunk_size.value),
                                                                      overlap=int(self.g_chunk_overlap.value),
@@ -1677,7 +1694,8 @@ class App:
             unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
                            "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
                            "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
-                           "splatmesh": splat_mesh.available() is not None}
+                           "splatmesh": splat_mesh.available() is not None,
+                           "refine-resume": not self._refine_checkpoint()}
             for name, b in self.g_buttons.items():
                 b.disabled = unavailable.get(name, False)
             self.g_progress.visible = False
