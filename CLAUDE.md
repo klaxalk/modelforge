@@ -95,28 +95,30 @@ Tested only partially:
   one sample clip (true offset 0, estimate 3 cm). **Not yet on two different
   flights.**
 
-Open items, in priority order:
-1. Run the full clip (all 300 images) through dense and splat (quality
+Open items, in priority order (this list is the priority order of the TODO docs too):
+1. **TODO: speed up the loop-closure pose graph** (chunked refine: ~37 min per revisit pass on kladno_dira 5681
+   images vs 60 s without loops, one core, unlogged): `docs/todo_posegraph_speed.md`.
+2. Run the full clip (all 300 images) through dense and splat (quality
    `low`, then higher if wanted).
-2. Test multi-video ingest on real separate flights of one site.
-3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
+3. Test multi-video ingest on real separate flights of one site.
+4. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
    weakly constrained. Trim it with the source range.
-4. Calibration is biased low (~0.7×) in weakly constrained directions. The
+5. Calibration is biased low (~0.7×) in weakly constrained directions. The
    fix is redundancy-aware variance component estimation.
-5. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
-6. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
+6. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+7. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). Plan and decisions: `docs/todo_multicamera.md`.
-7. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
+8. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
    heavy stages): `docs/todo_robustness.md`.
-8. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
+9. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
    anti-aliased rasterization): `docs/todo_splat_quality.md`.
-9. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
-   notification when done): `docs/todo_job_queue.md`.
-10. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
+10. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
+    notification when done): `docs/todo_job_queue.md`.
+11. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
     under a Gaussian budget): `docs/todo_splat_lod.md`.
-11. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
+12. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
     splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
-12. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
+13. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
     `docs/todo_splat_editing.md`.
 
 The user's working preferences, as seen so far:
