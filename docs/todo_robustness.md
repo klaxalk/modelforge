@@ -1,6 +1,6 @@
 # TODO: robustness of long jobs
 
-Priority: low. Status: proposed 2026-10-23, not started; the user will ask for it. Why: on 2026-10-23 the kernel OOM-killed the GUI
+Priority: **medium**. Status: proposed 2026-10-23, not started; the user will ask for it. Why: on 2026-10-23 the kernel OOM-killed the GUI
 twice (07:26 next to a test run of mine, 09:53 alone at 30 GB in round 1 of kladno_dira's global refine, 5681
 images). Each time the GUI and the job inside it died together and the refine was lost (round 0 alone took 52 min),
 although `sparse/round_0` was on disk.
