@@ -40,6 +40,27 @@ suggested:
 3. Difix3D+ (NVIDIA, 2025): a single-step diffusion model cleans renders from off-path views, which are added as
    pseudo training views, then fine-tune. SuperGaussian was judged a poor fit.
 - Judging it needs a berlin tile viewed **off the path**: held-out photos from the same pass cannot show the softness.
-- The SfM-mesh depth prior has p90 errors of ~400 % on berlin tiles (median 1.6 %): the mesh has surface where the
-  photos see far things (Poisson closure, patched holes, scene edge). Not investigated; candidates: drop depth
-  targets beyond the mesh's trusted range, or per pixel where rendered and mesh depth disagree by far.
+## 3. Depth prior outliers (check and fix as part of this TODO)
+
+- The SfM-mesh dense depth prior (`export/mesh_depth.py` maps, loss in `nsplugin/mf_splatfacto_lidar.py`:
+  weight × mean(min(|D − z| / z, 1)) over covered pixels) has wrong targets in places. berlin's last tiled run
+  (2026-10-23, 7 covisibility tiles, 50000 steps, mesh 22:18 / transforms.json 22:14 of 2026-10-22; per tile
+  `tiles/tile_KK/report.json` `splat.lidar_depth`), at step 50000:
+
+  | tile | median | p90 | within 5 % |
+  |---|---|---|---|
+  | 0 | 1.3 % | 88 % (239 % at 40500) | 72 % |
+  | 1 | 1.5 % | 54 % | 74 % |
+  | 2–6 | 0.9–1.5 % | 7–13 % | 78–86 % |
+
+  (Earlier berlin tile runs showed p90 ~400 %. The p90 pools only the last 500 training views, so it swings.)
+- ≥ 100 % = the splat sees at least twice as far as the mesh: the mesh has surface in front of what the photos
+  see. Suspects: Poisson closures (sky, scene edge, open gaps), patched holes (`sfmmesh/patched.npy`), surfaces the
+  SfM points miss (berlin_3_2 beside / inside the halls: floor under roof, through openings). Each such pixel pulls
+  with the clamp's full value towards something at mesh depth: a plausible source of fog / softness there.
+- **Check first** (CPU, no training): per photo of tiles 0 and 1, the cached maps (`sfmmesh/depth_x<N>/`) vs the
+  photo's own SfM points (as the alignment check in CLAUDE.md "Dense mesh prior"); render / overlay the worst
+  views and see what the mesh puts there.
+- **Fix candidates:** (a) no target on mesh faces without SfM support (patched faces, faces far from any point,
+  Poisson closures), written as 0 in the maps; (b) after warm-up, drop a pixel's target when rendered and mesh
+  depth disagree by > ~50 % (outlier gate in the plugin). A/B on tile 0: depth error, held-out PSNR / LPIPS, renders.

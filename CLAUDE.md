@@ -111,7 +111,7 @@ Open items, in priority order (this list is the priority order of the TODO docs 
 8. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
    heavy stages): `docs/todo_robustness.md`.
 9. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
-   anti-aliased rasterization): `docs/todo_splat_quality.md`.
+   anti-aliased rasterization, the depth prior outliers): `docs/todo_splat_quality.md`.
 10. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
     notification when done): `docs/todo_job_queue.md`.
 11. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
