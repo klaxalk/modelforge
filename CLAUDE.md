@@ -126,6 +126,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
 8. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
    `docs/todo_splat_editing.md`.
+9. **TODO: covisibility tiles too large** (kladno_dira 5187 photos: 479–2434 per tile, 2.5x slots; cap the extra
+   photos per tile, balance the split): `docs/todo_tile_size.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
