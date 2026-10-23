@@ -314,12 +314,16 @@ def regions_from_parts(xyz, obs_img, obs_pt, centers, part, k, grid=None):
     height = np.zeros(shape, np.float32)
     np.maximum.at(height, (r, c), np.clip(xyz[inb, 2] - ground[gk], 0, 50).astype(np.float32))
     feature = np.clip(cv2.dilate(height, np.ones((3, 3), np.uint8)) / FEATURE_M, 0, 1)
-    seam = np.full(shape, np.inf)
+    seed = np.zeros(shape, bool)
     for t in range(k):
         m = (init == t).astype(np.uint8)
-        if (m == 0).any():
-            seam = np.where(m > 0, cv2.distanceTransform(m, cv2.DIST_L2, 5) * grid, seam)
-    labels = _watershed(np.where(seam >= BAND_M, init, -1), feature, CONDUCT) if k > 1 else init
+        if not m.any():
+            continue
+        dist = cv2.distanceTransform(m, cv2.DIST_L2, 5) * grid if (m == 0).any() else np.full(shape, np.inf)
+        # a region narrower than 2 x BAND_M keeps its deepest half as seeds; without any it would be flooded by its
+        # neighbours (kladno_dira, 5187 photos: 2 of 11 regions vanished, their tiles got no points)
+        seed |= (m > 0) & (dist >= min(BAND_M, 0.5 * float(dist[m > 0].max())))
+    labels = _watershed(np.where(seed, init, -1), feature, CONDUCT) if k > 1 else init
     return Regions(lo, grid, labels)
 
 

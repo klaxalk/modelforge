@@ -383,3 +383,19 @@ def test_unrecorded_checkpoint_is_adopted(tmp_path):
     other = state["tiles"][2]
     other.update(status="training", step=0, iterations=50, schedule={})
     assert splat_tiles.adopt_checkpoint(project, 2, other, state, 1) is None and other["step"] == 0
+
+
+def test_narrow_region_keeps_its_seeds():
+    """A region narrower than 2 x BAND_M (a 30 m strip between two wide ones) still gets seeds for the seam
+    watershed: before, it had no cell BAND_M from a seam and its neighbours flooded it (kladno_dira: 2 of 11 tiles
+    without a region, so without points)."""
+    from modelforge import tile_regions
+    x, y = np.meshgrid(np.arange(0, 200, 0.5), np.arange(0, 60, 0.5))
+    xyz = np.c_[x.ravel(), y.ravel(), np.zeros(x.size)]
+    strip = np.digitize(xyz[:, 0], [85, 115])
+    centers = np.array([[42.0, 30, 20], [100, 30, 20], [157, 30, 20]])
+    obs_pt = np.arange(len(xyz))
+    reg = tile_regions.regions_from_parts(xyz, strip, obs_pt, centers, np.arange(3), 3)
+    area = [int((reg.labels == t).sum()) for t in range(3)]
+    assert min(area) > 0.8 * 30 * 60, area
+    assert (reg.label(np.array([[100.0, 30]])) == 1).all()
