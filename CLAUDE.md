@@ -98,8 +98,9 @@ Tested only partially:
 Open items by priority (high / medium / low; the user sets them; the TODO docs follow this list):
 
 **High**
-1. **TODO: speed up the loop-closure pose graph** (chunked refine: ~37 min per revisit pass on kladno_dira 5681
-   images vs 60 s without loops, one core, unlogged): `docs/todo_posegraph_speed.md`.
+- (none open) Done 2026-10-23: **the loop-closure pose graph** (~37 min per revisit pass on kladno_dira 5681): the
+  reference BLAS (now OpenBLAS) + CGNR instead of sparse Cholesky, dira2k loop graphs 368 s → 1–3 s with the same
+  revisit split: `docs/todo_posegraph_speed.md`.
 
 **Medium**
 1. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,

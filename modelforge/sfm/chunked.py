@@ -67,6 +67,18 @@ class Chunked:
     revisit_loss: float = 3.0  # Huber scale of the loop-closure edges (whitened)
     global_passes: int = 2  # triangulate all + global BA on thinned points, before the polish (0: none)
     global_points_per_image: int = 100
+    # pose-graph linear solver: "cgnr" (conjugate gradients, Jacobi) or "cholesky" (sparse normal Cholesky, CHOLMOD;
+    # loop edges fill its factor in: dira2k loop graphs 48-65 s vs 1-3 s, same revisit split; docs/todo_posegraph_speed.md)
+    posegraph_solver: str = "cgnr"
+
+
+def solver_options(name):
+    """pose_graph `solver` options for Chunked.posegraph_solver."""
+    if name == "cgnr":
+        return {"linear_solver_type": pyceres.LinearSolverType.CGNR}
+    if name != "cholesky":
+        raise ValueError(f"unknown pose-graph solver {name!r} (cholesky / cgnr)")
+    return {}
 
 
 def chunks(order, size, overlap):

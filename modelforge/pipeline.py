@@ -396,6 +396,7 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             init[name] = np.array(corrected[name].params)
     emit({"phase": "posegraph", "cameras": len(order), "edges": len(edges)})
     pg = chunked.pose_graph(init, edges, corrected, model, rejected, token=token,
+                            solver=chunked.solver_options(cfg.posegraph_solver),
                             on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
                                                          "max_iterations": 200}))
     log(f"refine: pose graph, {pg['cameras']} cameras, {pg['edges']} edges, {pg['abs_priors']} priors: "
@@ -425,8 +426,14 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
                 break
             cur = {name: _pose(rec, i) for name, i in ids.items()}
             emit({"phase": "posegraph", "cameras": len(cur), "edges": len(edges), "loops": len(loops), "pass": k})
+            if os.environ.get("MODELFORGE_DUMP_POSEGRAPH"):  # offline solver experiments (build/pg_bench.py)
+                import pickle
+                with open(os.path.join(os.environ["MODELFORGE_DUMP_POSEGRAPH"], f"posegraph_{k}.pkl"), "wb") as f:
+                    pickle.dump({"init": cur, "edges": edges, "priors": corrected, "model": model,
+                                 "rejected": rejected, "loops": loops, "loop_loss": cfg.revisit_loss}, f)
             rs["pose_graph"] = pg = chunked.pose_graph(
                 cur, edges, corrected, model, rejected, loops=loops, loop_loss=cfg.revisit_loss, token=token,
+                solver=chunked.solver_options(cfg.posegraph_solver),
                 on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
                                              "max_iterations": 200}))
             jobs.check(token)
