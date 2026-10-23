@@ -208,3 +208,55 @@ def test_drift_without_revisits_stays_zero(tmp_path):
     assert np.abs(model.drift[0][1]).max() < 0.02
     model = robust.PriorModel(estimate_drift=False)
     assert robust.update_drift(model, rec, pri, db_path) is None and not model.drift
+
+
+def make_three_flights(tmp_path, seed=0, n=60):
+    """Three flights over one synthetic scene (20 images each, hours apart); the middle one's priors drift 0.8 units
+    in z over its flight (and sit 0.5 off as a whole), the others are right: no constant offset fits it to both."""
+    pycolmap.set_random_seed(seed)
+    o = pycolmap.SyntheticDatasetOptions()
+    o.num_rigs, o.num_cameras_per_rig, o.num_frames_per_rig, o.num_points3D = 1, 1, n, 400
+    db_path = str(tmp_path / "database.db")
+    db = pycolmap.Database.open(db_path)
+    rec = pycolmap.synthesize_dataset(o, db)
+    db.close()
+    rng = np.random.default_rng(seed)
+    priors, gt = {}, {}
+    for k, image_id in enumerate(sorted(rec.reg_image_ids())):
+        img = rec.image(image_id)
+        p = np.array(rec.frame(img.frame_id).rig_from_world.params)
+        R = quat_to_rot(p[:4])
+        C = -R.T @ p[4:]
+        s = k * 3 // n
+        t = 1000.0 * s + (k - s * n // 3)
+        u = (k - s * n // 3) / (n // 3 - 1)
+        off = np.array([1.0, 0.0, 2.0 * (u - 0.5)]) if s == 1 else np.zeros(3)
+        Cp = C + rng.normal(size=3) * 0.01 + off
+        priors[img.name] = Prior.from_pose(img.name, k, t, R, Cp, np.zeros(3), source=s, order=k, time=t)
+        gt[img.name] = C
+    os.makedirs(tmp_path / "images", exist_ok=True)
+    return db_path, str(tmp_path / "images"), priors, gt
+
+
+@pytest.mark.parametrize("cross", [True, False])
+def test_drift_across_flights(tmp_path, monkeypatch, cross):
+    """A flight drifting within itself between two others, with and without the revisits across flights in the drift
+    (robust.CROSS_SOURCE_DRIFT, the joint solve): the cameras end consistent. (This scene does not split into copies:
+    every camera sees every point, so the BA merges the flights either way; berlin's 4 m split is the real case.)"""
+    monkeypatch.setattr(robust, "CROSS_SOURCE_DRIFT", cross)
+    db_path, image_path, pri, gt = make_three_flights(tmp_path)
+    model = robust.PriorModel(abs_sigmas=PriorSigmas(0.02, 0.02, 0.2, 0.2), calibrate=False,
+                              estimate_systematic=False, drift_knot_s=5.0)
+    rec = refine.init_from_database(db_path, pri)
+    for i in range(5):
+        rec = refine.triangulate(rec, db_path, image_path, str(tmp_path / f"round_{i}"), refine.Round(4.0, 1.0, 2.0))
+        refine.prior_ba(rec, robust.corrected_priors(pri, model), model, refine_intrinsics=False)
+        robust.update_source_offsets(model, rec, pri, db_path)
+        rep = robust.update_drift(model, rec, pri, db_path)
+        print(i, rep.get("cross"), {k: v["increment_max_m"] for k, v in rep["sources"].items()})
+    rec = refine.triangulate(rec, db_path, image_path, str(tmp_path / "final"), refine.Round(4.0, 1.0, 2.0))
+    pos = np.array([refine.center_of(np.array(rec.frame(rec.image(i).frame_id).rig_from_world.params))
+                    - gt[rec.image(i).name] for i in rec.reg_image_ids()])
+    spread = np.median(np.linalg.norm(pos - np.median(pos, 0), axis=1))
+    print("camera spread around the common offset", round(float(spread), 3))
+    assert spread < 0.05

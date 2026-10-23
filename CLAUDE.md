@@ -121,11 +121,16 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    of other projects without switching the view, memory check per entry): `docs/todo_job_queue.md`.
 
 **Low**
-1. Run the full clip (all 300 images) through dense and splat (quality
-   `low`, then higher if wanted).
-2. Test multi-video ingest on real separate flights of one site.
-3. The final ~10 s of `berlin_3_1` (t ≥ 515 s, a near-horizontal hover) is
-   weakly constrained. Trim it with the source range.
+1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
+   photos, tiled splats).
+2. **Multi-video on real separate flights: tested on `berlin`** (2026-10-23; 4 flights up to 84 min apart, take-off
+   heights 1.8 / 0.3 m apart): 3142/3142, 0.478 px, per-flight offsets up to 3.5 m; but flights are not all merged
+   (`build/cross_source_split.py`, split / merged per flight pair): 3_1–3_4 0.29 m (80 %), 3_3–3_4 0.17 m (79 %),
+   3_1–3_2 0.60 m (48 %), 3_1–3_3 0.85 m (73 %), **3_2–3_4 4.14 m (0 % merged)**: one constant offset per flight
+   cannot fit a flight that drifts within itself. Next: the revisits across flights in the drift, one solve over all
+   flights (`robust.CROSS_SOURCE_DRIFT`, written, off until a berlin refine validates it: 89 min, 16 GB).
+3. ~~Trim the final hover of `berlin_3_1`~~: superseded by the export's isolated-photo rule (29 photos of t ≥ 504 s
+   left out on berlin).
 4. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
 5. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). Plan and decisions: `docs/todo_multicamera.md`.

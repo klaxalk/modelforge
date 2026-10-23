@@ -368,6 +368,7 @@ def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
     use = {k: e for k, e in edges.items() if e["n_split"] >= min_split}
     inc = _solve_offsets(use, ref) if use else {}
     _shift_cameras(rec, priors_raw, inc)
+    model._offset_inc = {s: np.asarray(d, float) for s, d in inc.items()}  # update_drift: already applied
     for s, d in inc.items():
         model.source_offsets[s] = model.source_offsets.get(s, np.zeros(3)) + d
     return {"method": "split_points" if use else "none", "reference": int(ref),
@@ -431,6 +432,54 @@ def _solve_drift(ti, tj, diff, n, knots, times):
     return x
 
 
+MIN_CROSS = 5  # cross-source pairs a source needs before they, not its priors' mean, place its drift
+# revisits across sources (flights) in the drift, one solve over all sources (berlin: flight 3_2 sits 4.1 m off flight 3_4,
+# 0 % merged, with a constant offset per flight); off until validated on berlin (the synthetic scene merges either way)
+CROSS_SOURCE_DRIFT = False
+
+
+def _solve_drift_joint(blocks, eqs, anchored):
+    """All sources' drift increments in one least squares. blocks: {source: (knots, image times)}; eqs: (s_i, t_i,
+    s_j, t_j, diff, n) with o_sj(t_j) - o_si(t_i) = diff (within a source and across sources); anchored: the sources
+    whose mean over their images stays 0 (the reference, and sources too few cross pairs place). Otherwise as
+    _solve_drift (first differences, ridge, Huber). Returns {source: increments (K x 3)}."""
+    order = sorted(blocks)
+    base, tot = {}, 0
+    for s in order:
+        base[s] = tot
+        tot += len(blocks[s][0])
+
+    def hat(s, t):
+        h = np.zeros((len(t), tot))
+        h[:, base[s]:base[s] + len(blocks[s][0])] = _hat(np.asarray(t, float), blocks[s][0])
+        return h
+    A = np.vstack([hat(sj, [tj]) - hat(si, [ti]) for si, ti, sj, tj, _, _ in eqs])
+    diff = np.array([e[4] for e in eqs])
+    w0 = np.sqrt(np.minimum(np.array([e[5] for e in eqs], float), 400.0))
+    rows = [np.eye(tot) * DRIFT_RIDGE]
+    for s in order:
+        knots, times = blocks[s]
+        K, o = len(knots), base[s]
+        if s in anchored:
+            m = np.zeros((1, tot))
+            m[0, o:o + K] = _hat(np.asarray(times, float), knots).mean(0) * 1e3
+            rows.append(m)
+        n_s = sum(1 for e in eqs if s in (e[0], e[2]))
+        D1 = np.zeros((K - 1, tot))
+        for k in range(K - 1):
+            D1[k, o + k], D1[k, o + k + 1] = 1.0, -1.0
+        rows.append(D1 * DRIFT_SMOOTH * np.sqrt(max(n_s, 1) / K))
+    fixed = np.vstack(rows)
+    w = w0.copy()
+    for _ in range(5):  # IRLS (Huber on the pair residual norm)
+        M = np.vstack([A * w[:, None], fixed])
+        b = np.vstack([diff * w[:, None], np.zeros((len(fixed), 3))])
+        x = np.linalg.lstsq(M, b, rcond=None)[0]
+        r = np.linalg.norm(A @ x - diff, axis=1)
+        w = w0 * np.sqrt(np.minimum(1.0, DRIFT_HUBER_M / np.maximum(r, 1e-9)))
+    return {s: x[base[s]:base[s] + len(blocks[s][0])] for s in order}
+
+
 def update_drift(model, rec, priors_raw, db_path, min_split=DRIFT_MIN_SPLIT):
     """One drift update after a BA (or a triangulation): per source, the increments of a position offset
     linear in time between knots every model.drift_knot_s, from the split points between its images (as
@@ -449,6 +498,20 @@ def update_drift(model, rec, priors_raw, db_path, min_split=DRIFT_MIN_SPLIT):
             continue
         p1, p2 = priors_raw[im1.name], priors_raw[im2.name]
         pairs.setdefault(p1.source, []).append((p1.time, p2.time, np.median(d, axis=0), len(d), merged))
+    offset_inc = getattr(model, "_offset_inc", None) or {}  # this round's source offsets moved those cameras already
+    model._offset_inc = {}
+    cross = []
+    if len(by_src) > 1 and CROSS_SOURCE_DRIFT:  # revisits across sources (flights) tie the sources' drifts together
+        for im1, im2, d, merged in _split_pairs(rec, priors_raw, db_path, same_source=False):
+            if len(d) < min_split:
+                continue
+            p1, p2 = priors_raw[im1.name], priors_raw[im2.name]
+            if p1.source not in by_src or p2.source not in by_src:
+                continue
+            dd = np.median(d, axis=0) - (offset_inc.get(p2.source, 0.0) - offset_inc.get(p1.source, 0.0))
+            cross.append((p1.source, p1.time, p2.source, p2.time, dd, len(d), merged))
+    if cross:
+        return _update_drift_joint(model, rec, priors_raw, by_src, pairs, cross)
     inc_by_image, rep = {}, {}
     for s, times in by_src.items():
         times = np.asarray(times, float)
@@ -479,6 +542,52 @@ def update_drift(model, rec, priors_raw, db_path, min_split=DRIFT_MIN_SPLIT):
                        "drift_range_z_m": round(float(np.ptp((off + x)[:, 2])), 3)}
     _shift_images(rec, inc_by_image)
     return {"knots_s": model.drift_knot_s, "sources": rep}
+
+
+def _update_drift_joint(model, rec, priors_raw, by_src, pairs, cross):
+    """update_drift with revisits across sources: one solve over all sources (_solve_drift_joint)."""
+    blocks = {}
+    for s, times in by_src.items():
+        times = np.asarray(times, float)
+        if s not in model.drift:
+            t0, t1 = float(times.min()), float(times.max())
+            K = max(2, int(np.ceil((t1 - t0) / model.drift_knot_s)) + 1)
+            model.drift[s] = (np.linspace(t0, t1, K), np.zeros((K, 3)))
+        blocks[s] = (model.drift[s][0], times)
+    eqs = [(s, ti, s, tj, d, n) for s, P in pairs.items() for ti, tj, d, n, _ in P]
+    eqs += [(a, ta, b, tb, d, n) for a, ta, b, tb, d, n, _ in cross]
+    ref = priors_raw[by_order(priors_raw)[0]].source
+    n_cross = {s: sum(1 for c in cross if s in (c[0], c[2])) for s in blocks}
+    anchored = {ref} | {s for s, k in n_cross.items() if k < MIN_CROSS}
+    xs = _solve_drift_joint(blocks, eqs, anchored)
+    inc_by_image, rep = {}, {}
+    for s, x in xs.items():
+        knots, off = model.drift[s]
+        model.drift[s] = (knots, off + x)
+        P = pairs.get(s, [])
+        rep[str(s)] = {"pairs": len(P), "cross_pairs": n_cross[s], "anchored": s in anchored,
+                       "increment_max_m": round(float(np.abs(x).max()), 3),
+                       "drift_max_m": round(float(np.abs(off + x).max()), 3),
+                       "drift_range_z_m": round(float(np.ptp((off + x)[:, 2])), 3)}
+        if P:
+            ti, tj = np.array([q[0] for q in P]), np.array([q[1] for q in P])
+            diff = np.array([q[2] for q in P])
+            far = np.abs(ti - tj) > model.drift_knot_s
+            rep[str(s)].update(split=int(sum(q[3] for q in P)), merged=int(sum(q[4] for q in P)),
+                               far_pairs=int(far.sum()),
+                               far_split_median_m=np.round(np.median(np.linalg.norm(diff[far], axis=1)), 3).item()
+                               if far.any() else None)
+    for i in rec.reg_image_ids():
+        p = priors_raw.get(rec.image(i).name)
+        if p is not None and p.source in xs and p.time is not None:
+            inc_by_image[p.name] = _interp(model.drift[p.source][0], xs[p.source], p.time)
+    pairs_split = {}
+    for a, _, b, _, d, n, _ in cross:
+        pairs_split.setdefault(f"{min(a, b)}-{max(a, b)}", []).append(float(np.linalg.norm(d)))
+    _shift_images(rec, inc_by_image)
+    return {"knots_s": model.drift_knot_s, "sources": rep,
+            "cross": {k: {"pairs": len(v), "split_median_m": round(float(np.median(v)), 3)}
+                      for k, v in sorted(pairs_split.items())}}
 
 
 def _shift_images(rec, inc_by_name):
