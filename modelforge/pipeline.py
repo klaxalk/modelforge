@@ -161,7 +161,7 @@ def copy_db(src, dst):
 
 
 def match_stats(db_path, seconds):
-    db = pycolmap.Database.open(db_path)
+    db = features.open_database(db_path)
     s = {"matched_pairs": db.num_matched_image_pairs(), "verified_pairs": db.num_verified_image_pairs(),
          "inlier_matches": db.num_inlier_matches(), "seconds": round(seconds, 1)}
     db.close()
@@ -172,9 +172,10 @@ def _watch_matches(db_path, total, progress, done, every=0.25):
     """progress(pairs done, total) while COLMAP matches: match_image_pairs has no callback, but each block
     of pairs is committed to the database as it finishes."""
     import sqlite3
-    last = -1
-    while not done.wait(every):
+    last, wait = -1, every
+    while not done.wait(wait):
         try:
+            t0 = time.time()
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.1)
             try:
                 n = con.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
@@ -182,6 +183,7 @@ def _watch_matches(db_path, total, progress, done, every=0.25):
                 con.close()
         except sqlite3.Error:
             continue
+        wait = max(every, 4 * (time.time() - t0))  # kladno_dira's 10 GB database: a count takes seconds
         if n != last:
             last = n
             progress(min(n, total), total)
@@ -200,12 +202,13 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
     m.sift.max_ratio, m.guided_matching = float(max_ratio), bool(guided)
     v = pycolmap.TwoViewGeometryOptions()
     v.min_num_inliers = int(min_inliers)
-    ct, done = pycolmap.CancellationToken(), threading.Event()
+    ct, done, watcher = pycolmap.CancellationToken(), threading.Event(), None
     if token is not None:
         threading.Thread(target=reconstruct._cancel_on, args=(token, ct, done), daemon=True).start()
     if progress:
         total = sum(1 for line in open(opts.match_list_path) if line.strip())
-        threading.Thread(target=_watch_matches, args=(db_path, total, progress, done), daemon=True).start()
+        watcher = threading.Thread(target=_watch_matches, args=(db_path, total, progress, done), daemon=True)
+        watcher.start()
     t0 = time.time()
     try:
         pycolmap.match_image_pairs(db_path, matching_options=m, pairing_options=opts, verification_options=v,
@@ -214,6 +217,8 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
         raise jobs.Cancelled("stopped")
     finally:
         done.set()
+        if watcher is not None:  # its last count must end before the database is opened again (kladno_dira: the
+            watcher.join(timeout=120)  # stats' open failed with "database is locked" on the 10 GB database)
     jobs.check(token)
     stats = {**match_stats(db_path, time.time() - t0), "max_ratio": float(max_ratio), "guided": bool(guided),
              "min_inliers": int(min_inliers)}

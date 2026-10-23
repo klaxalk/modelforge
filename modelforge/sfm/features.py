@@ -20,9 +20,10 @@ EXTRACTORS = {
 def _watch(db_path, total, progress, done, every=0.25):
     """progress(images done, total, last image name) while COLMAP fills the database: extract_features
     has no callback, but each image is committed as it finishes."""
-    last = -1
-    while not done.wait(every):
+    last, wait = -1, every
+    while not done.wait(wait):
         try:
+            t0 = time.time()
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.1)
             try:
                 n = con.execute("SELECT COUNT(*) FROM keypoints").fetchone()[0]
@@ -31,9 +32,21 @@ def _watch(db_path, total, progress, done, every=0.25):
                 con.close()
         except sqlite3.Error:  # not created yet, or busy
             continue
+        wait = max(every, 4 * (time.time() - t0))  # a count over a large database takes long: poll less often
         if n != last:
             last = n
             progress(n, total, row[0] if row else "")
+
+
+def open_database(path, tries=30):
+    """pycolmap.Database.open, retried while SQLite reports the database locked (another reader finishing)."""
+    for k in range(tries):
+        try:
+            return pycolmap.Database.open(path)
+        except RuntimeError:
+            if k == tries - 1:
+                raise
+            time.sleep(1.0)
 
 
 def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift", camera_params=None,
@@ -66,18 +79,21 @@ def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True,
         extraction.sift.estimate_affine_shape = True
         extraction.use_gpu = False
     t0 = time.time()
-    done = threading.Event()
+    done, watcher = threading.Event(), None
     if progress:
-        threading.Thread(target=_watch, args=(db_path, len(names), progress, done), daemon=True).start()
+        watcher = threading.Thread(target=_watch, args=(db_path, len(names), progress, done), daemon=True)
+        watcher.start()
     try:
         pycolmap.extract_features(db_path, os.path.join(project, "images"), image_names=names,
                                   camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                                   extraction_options=extraction)
     finally:
         done.set()
+        if watcher is not None:  # its read of the database must end before the database is opened again
+            watcher.join(timeout=120)
     if progress:
         progress(len(names), len(names), names[-1] if names else "")
-    db = pycolmap.Database.open(db_path)
+    db = open_database(db_path)
     stats = {"images": db.num_images(), "keypoints": db.num_keypoints(), "cameras": db.num_cameras(),
              "extractor": extractor, "max_num_features": max_num_features, "upright": upright,
              "seconds": round(time.time() - t0, 1)}
