@@ -70,3 +70,10 @@ report.json after each stage; `MODELFORGE_INPROCESS=1` runs them in the GUI proc
 semantic features and mesh colouring were subprocesses already. Not done: a job that survives a GUI restart and is
 re-attached (`PROJECT/job.json`), a memory limit per job. Tests: `tests/test_worker.py` (callbacks + log lines, Stop,
 Skip, a stuck job terminated, SIGKILL reported, errors); the GUI tests run the stages through it.
+
+## §3 deferred (2026-10-23)
+
+With heavy stages in job processes an out-of-memory kill no longer takes the GUI, a killed refine resumes from its
+last step, and BA mode auto already chooses chunked when a global refine would not fit. A per-stage estimate would
+mostly add warnings of unproven accuracy; revisit when a stage other than refine runs out of memory again (measure
+its peak first, as `auto_ba_mode` did).
