@@ -8,8 +8,8 @@ Priority: **high**. Status: found 2026-10-23 on kladno_dira (5681 images, BA mod
 - with the chunk edges only (26,638 edges, 5010 priors): 58 iterations, **60 s**;
 - with the ~4000 loop-closure edges of a revisit pass (`loops=`, Huber): **~37 min**, on one CPU core (the GUI
   process at 100 %), with no log line until it ends. Revisit pass 1 logged at 10:28 UTC, the next triangulation
-  started at 11:05; after pass 2 (11:09) it ran again as long. A triangulation of all 5681 images takes only ~4 min,
-  so with 3 revisit passes this solve is ~2 h of the refine.
+  started at 11:05; after pass 2 (11:09) it ran ~35 min, after pass 3 (11:48) **55 min** (11:48 → 12:43 UTC): ~2 h of the refine in total. A triangulation of all 5681 images takes only ~4 min,
+  
 - Its result is stored only in `stats["revisits"][k]["pose_graph"]` (report.json), not logged.
 
 ## Likely causes (to measure first)
