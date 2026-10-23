@@ -2108,7 +2108,7 @@ Code layout:
   - **Orbit** (View tab, the user asked): **Start / Stop orbit** + speed
     (°/s). **Since 2026-10-22 the browsers turn the view themselves** (the user could not zoom while orbiting: the
     server's 30 Hz poses overwrote each wheel step, a ~50 ms animation in the browser, before it was reported):
-    `docker/patch_viser_keys.sh` adds a per-frame `rotate` (as the arrow keys) at `data-orbit` °/s of the hidden
+    `docker/patch_viser_camera.py` (was `patch_viser_keys.sh`) adds a per-frame `rotate` (as the arrow keys) at `data-orbit` °/s of the hidden
     `#mf-move-speed` element; the server only sets that (`App._set_orbit`), shared by all browsers; Fly, Center and
     glides turn it off. viser renders on demand with a 1 s tick, so it starts within a second; steps capped at 0.1 s.
     The notes below describe the earlier server-driven orbit (`_orbit`, removed).
@@ -2135,13 +2135,24 @@ Code layout:
       for videos without metadata.
     - Positions follow a cubic Hermite curve (finite-difference tangents); orientations are slerped.
       The curve passes exactly through every camera.
-    - `App._fly` sets position, look-at (ahead by the median depth of the sparse points, so the
-      mouse pivot afterwards lies in the scene) and up = −y of the OpenCV camera (roll reproduced)
-      at 30 Hz.
+    - **The browsers fly it** (2026-10-23, the user asked; before, the server's `App._fly` sent the pose at 30 Hz):
+      `docker/patch_viser_camera.py` adds `window.__mfFly` to the page, called from viser's per-frame camera hook.
+      It reads the path from the hidden `#mf-fly-path` (`data-path`: path times, centres, wxyz quaternions,
+      sent once per path) and the clock from `#mf-move-speed` `data-fly` (path id, epoch, t0, speed, loop, look-at
+      distance, hold). It evaluates the same Hermite curve and slerp as `FlightPath` (checked in node: 0.1 mm, the
+      sent rounding), maps them through viser's scene root transform `NL(e)` and calls camera-controls
+      `updateCameraUp` + `setLookAt`. Look-at = ahead by the median depth of the sparse points (so the mouse pivot
+      afterwards lies in the scene); up = −y of the OpenCV camera (roll reproduced).
+    - **One flight for all browsers** (as Orbit). The server only runs the clock (`_fly_clock`: a new epoch on
+      start, speed / Loop changes and slider jumps; `_fly_now`) and `_fly_watch` at 4 Hz (slider, status, photo
+      window, the end with Loop off). A browser connecting during a flight joins it (no recenter); the last one
+      closing ends it; opening a project ends it.
     - Controls: speed in m/s (default 0.5), Loop (default on), and "Camera's field of view" (on: the real
       camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
     - The **Position** slider shows progress; dragging it jumps there, also when not flying.
-    - Mouse drags pause the flight for 1 s (detected as in Orbit), then it resumes on the path.
+    - A drag, wheel or held movement key on the 3D view hands the camera to the user until 1 s after the
+      last one; the clock runs on meanwhile, so the view then rejoins the flight where it is by then (the server
+      cannot see a browser's pause).
     - **Photo window** (the user asked, 2026-10-22): a floating panel right of the quick bar (`photo_panel`,
       420 px wide, height from the images' aspect) shows the photo of the camera the flight is nearest to
       (`FlightPath.pose`'s index), also when the Position slider jumps; decoded at ~630 px with JPEG DCT
@@ -2151,8 +2162,8 @@ Code layout:
       to the clicked spot (`App.ray_hit`: the nearest group of >= 3 sparse points within 0.6° of the ray, else the
       ground; a yellow ball for 2 s); **View → Carry the pivot forward** (default on, `_carry_pivot` on every camera
       update, not while Orbit / Fly drive it): within 1 % of the scene's size (>= 0.3 m) the pivot moves 8x that far
-      ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E), arrows turn; speed View → **Move speed** (default 5 m/s, remembered; viser's fixed 2 m/s). Both by `docker/patch_viser_keys.sh`, which makes viser's bundle loader edit the unpacked code (the speed is read from a hidden `#mf-move-speed` element at the top of the right panel while a key is held); a browser keeps the old code across GUI restarts: hard reload.
-    - One camera driver per browser: Fly stops Orbit and vice versa. Layers: points, cameras with
+      ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E), arrows turn; speed View → **Move speed** (default 5 m/s, remembered; viser's fixed 2 m/s). Both by `docker/patch_viser_camera.py`, which makes viser's bundle loader edit the unpacked code (the speed is read from a hidden `#mf-move-speed` element at the top of the right panel while a key is held); a browser keeps the old code across GUI restarts: hard reload.
+    - One camera driver: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
     time, or source; **time is the default** (2026-10-22, the user asked). Stats list the per-source offsets.

@@ -107,9 +107,10 @@ RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
 COPY docker/patch_viser_page.py docker/favicon.svg /tmp/
 RUN python /tmp/patch_viser_page.py \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" /tmp/favicon.svg
-# Camera keys R / F for up / down instead of viser's E / Q (the user asked).
-COPY docker/patch_viser_keys.sh /tmp/patch_viser_keys.sh
-RUN sh /tmp/patch_viser_keys.sh \
+# The browser's camera: keys R / F for up / down instead of viser's E / Q (the user asked), the move speed, View →
+# Orbit and View → Fly run in the page (docker/patch_viser_camera.py).
+COPY docker/patch_viser_camera.py /tmp/patch_viser_camera.py
+RUN python /tmp/patch_viser_camera.py \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
 
 # Run as the host user so files written to the bind-mounted repo are not root-owned.

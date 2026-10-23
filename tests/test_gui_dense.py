@@ -289,9 +289,13 @@ def test_quick_bar(app):
 
 
 def test_fly_the_camera_path(app):
-    """Fly: the view runs along the cameras to the end, looking through them; field of view and up come
-    back afterwards; the position slider moves the view."""
+    """Fly: the browsers fly the path themselves (docker/patch_viser_camera.py), from the path and the clock in
+    hidden elements; the server keeps the slider and the photo window on that clock, ends the flight at the path's
+    end with Loop off, and gives back each browser's field of view and up; the slider moves the view."""
     import contextlib
+    import html
+    import json
+    import re
     import time
 
     class Camera:
@@ -303,47 +307,49 @@ def test_fly_the_camera_path(app):
         def atomic(self):
             return contextlib.nullcontext()
 
+    def attr(content, name):
+        return json.loads(html.unescape(re.search(f'{name}="([^"]*)"', content).group(1)) or "null")
+
     c = Client()
     path = app._flight_path()
     app.g_fly_speed.value, app.g_fly_loop.value, app.g_fly_fov.value = 20.0, False, True
     app.g_fly_pos.value = 0.0
     app.toggle_fly(c)
     assert app.g_fly.label == "Stop flying" and "● Fly" in app._quick_labels
-    time.sleep(0.3)
     assert np.isclose(c.camera.fov, app.fov)  # the real camera's field of view while flying
+    sent = attr(app.g_fly_path_html.content, "data-path")  # the path, as FlightPath has it
+    assert np.allclose(np.reshape(sent["p"], (-1, 3)), path.centers, atol=1e-4)
+    assert np.allclose(sent["t"], path.t, atol=1e-4)
+    assert np.allclose(np.reshape(sent["q"], (-1, 4)), path.quats, atol=1e-6)
+    clock = attr(app.g_speed_html.content, "data-fly")
+    assert clock["path"] == sent["id"] and clock["t0"] == 0.0 and clock["speed"] == 20.0 and not clock["loop"]
+    app.g_fly_speed.value = 25.0  # a new speed restarts the clock where the flight is
+    clock2 = attr(app.g_speed_html.content, "data-fly")
+    assert clock2["e"] > clock["e"] and clock2["speed"] == 25.0 and clock2["t0"] >= 0.0
     t0 = time.time()
-    while app._flights and time.time() - t0 < path.duration / 20 + 10:
+    while app._flight is not None and time.time() - t0 < path.duration / 25 + 10:
         time.sleep(0.1)
-    assert not app._flights and app.g_fly.label == "Fly the camera path" and "finished" in app.g_fly_md.content
-    end, R, _ = path.pose(path.duration)
-    assert np.allclose(c.camera.position, end)  # at the last camera, looking along it
-    look = np.asarray(c.camera.look_at) - end
-    assert np.allclose(look / np.linalg.norm(look), R[:, 2], atol=1e-6)
+    assert app._flight is None and app.g_fly.label == "Fly the camera path" and "finished" in app.g_fly_md.content
+    assert attr(app.g_speed_html.content, "data-fly") is None  # the browsers stop flying
+    assert app.g_fly_pos.value == 100.0 and app._photo_shown == int(path.index[-1])
     assert c.camera.fov == 1.0 and np.allclose(c.camera.up_direction, (0, 0, 1))  # restored
     app.g_fly_pos.value = 0.0
     app._fly_scrub(c)  # the slider, while not flying: the view jumps there
     assert np.allclose(c.camera.position, path.centers[0])
     i = int(path.index[0])  # the Photo window shows the camera the flight is at
     assert app._photo_shown == i and app.project.names[i] in app.g_photo_md.content
+    app.toggle_fly(c)  # the slider while flying restarts the clock there
+    app.g_fly_pos.value = 50.0
+    app._fly_scrub(c)
+    assert abs(attr(app.g_speed_html.content, "data-fly")["t0"] - path.duration / 2) < 1e-6
     app.toggle_fly(c)  # and Stop works mid-flight
-    time.sleep(0.2)
-    app.toggle_fly(c)
-    time.sleep(0.2)
-    assert not app._flights and app.g_fly.label == "Fly the camera path"
+    assert app._flight is None and app.g_fly.label == "Fly the camera path"
 
-    # a browser that closes mid-flight (or orbit) ends it: viser does not fail on a closed connection, so the
-    # flight ran on and the shared buttons said "Stop flying" / "Stop orbit" for every browser
-    gone = Client()
-    gone.client_id = 22
+    # the last browser gone ends the flight (here no browser is connected at all)
     app.g_fly_loop.value = True
-    app.toggle_fly(gone)
-    app.toggle_orbit(c)
-    time.sleep(0.2)
-    app._on_disconnect(gone)
+    app.toggle_fly(c)
     app._on_disconnect(c)
-    time.sleep(0.3)
-    assert not app._flights
-    assert app.g_fly.label == "Fly the camera path"
+    assert app._flight is None and app.g_fly.label == "Fly the camera path"
     app._set_orbit(False)
     app.g_fly_loop.value = False
 
