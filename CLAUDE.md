@@ -1514,7 +1514,7 @@ helped little):
   (dira2k: 0.05 / 0.15 m). The experiments were stopped (workspace `build/dira_t3_exp`).
 - **Tile layout "covisibility"** (the user asked, 2026-10-22: straight cuts cannot bend around an orbited object or a
   building; `modelforge/tile_regions.py`, Splat tab "Tile layout", CLI `--tile-layout`). **The Splat tab's and the
-  CLI's default since 2026-10-23** (the user's choice, before the paused comparison below finished;
+  CLI's default since 2026-10-23** (the user's choice;
   `splat_tiles.DEFAULT_LAYOUT`); the library functions keep "rectangles" (old tiles.json / resume.json without a
   layout). It needs the SfM model (synthetic test projects without one name rectangles). A project's existing set-up
   keeps its layout (the GUI adopts it) until Set up tiles runs again. Untested above ~3000 photos (dense graph):
@@ -1528,13 +1528,8 @@ helped little):
   above ground within 3 / 10 m of a seam 1.2 / 3.9 % vs rectangles 2.4 / 9.5 %, seams 1.9 vs 1.7 km; the right-hand
   orbits stay in one tile (the rectangles cut them). Plain vote maps were ragged (seams 3x longer) and an MRF with
   iterated local updates could not move seams. Not yet for 10k photos (dense n x n graph, dense eigh).
-  - **Training comparison, paused for the user** (`build/tiles_cmp.py`, workspaces `build/tiles_cmp/{rectangles,
-    covisibility}` linking berlin; 30000 steps x1, mesh prior 0.2 dense; 200 held-out frames looking into both pairs'
-    area, `holdout.json` / `located.json`, 26 / 18 within 15 m of the rectangles' / covisibility seam): rectangles
-    tiles 2 + 3 trained (28 / 24 min); **to do**: `train covisibility 0`, `train covisibility 1`, then
-    `score 2,3 0,1`. Its covisibility set-up already has slack 0.25 and the area-based margin (cores 403 / 661 /
-    365 / 305). Flattening and mesh seeds became GUI defaults later; the script passes neither, so the four tiles
-    stay comparable.
+  - A training comparison against rectangles (`build/tiles_cmp.py`) was cancelled by the user on 2026-10-23
+    (covisibility was already the default); only rectangles tiles 2 + 3 had trained. Do not resume it.
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).
 - **Photos join the tiles they show, by the SfM mesh** (berlin, 2026-10-22; the user's idea): a building shot from
   a low oblique pass (berlin_3_1_12380-12585) rendered at 11.7 dB in the merged splat, 20.1 dB in tile 1's own
