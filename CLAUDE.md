@@ -1357,7 +1357,11 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     - **dira2k** (2000 images, `build/dira2k_chunk2`, `build/split_check.py`, pairs > 60 s): revisit passes 2.51 →
       0.39 → 0.34 m, drift passes → 0.29, global passes → 0.12 → 0.078 m (own metric); like-for-like **0.05 / 0.20 m,
       80 % merged** (chunked before 0.24 / 0.88, 64 %; global 0.05 / 0.15, 80 %). 50 min (old chunked 24, global 67),
-      peak 3.9 GB, final 0.59 px (global 0.574). The global BAs took 45 + 101 s. Not yet run on kladno_dira 5681.
+      peak 3.9 GB, final 0.59 px (global 0.574). The global BAs took 45 + 101 s.
+    - **kladno_dira 5681** (2026-10-23, GUI, auto → chunked): revisit passes 1.91 → 0.35 → 0.30 m (pose graphs
+      35–52 min each: `docs/todo_posegraph_speed.md`), drift passes no gain (0.27–0.30 m), global passes 0.30 → 0.20 →
+      **0.14 m** (p90 1.22 → 0.83 m; BAs 210 s + ~3 min on ~140k points), polish 29 min; final 0.58 / 1.29 px, 6.2M
+      points, 5.1 h, peak 14.6 GB. A third global pass would likely gain more.
   - **Global refine on kladno_dira** (2026-10-21, with terrain pairs, stopped after round 1 to diagnose): round 1 BA
     79 min (158 iterations, 15 CHOLMOD "not positive definite" step failures), point error 1.085 → 0.706 px
     median, revisits merged (far split 5 cm). Its log said 3.5 px: the after-BA stats were taken after the drift shift
@@ -1523,7 +1527,10 @@ helped little):
   CLI's default since 2026-10-23** (the user's choice;
   `splat_tiles.DEFAULT_LAYOUT`); the library functions keep "rectangles" (old tiles.json / resume.json without a
   layout). It needs the SfM model (synthetic test projects without one name rectangles). A project's existing set-up
-  keeps its layout (the GUI adopts it) until Set up tiles runs again. Untested above ~3000 photos (dense graph):
+  keeps its layout (the GUI adopts it) until Set up tiles runs again. On kladno_dira (5187 photos, 11 tiles, 2026-10-23) 2 regions vanished (narrow, ragged: no cell BAND_M from a
+  seam, so no watershed seed; their tiles got 0 points and the splat failed): a region narrower than 2 x BAND_M now
+  seeds from its deepest half (`test_narrow_region_keeps_its_seeds`). Its tiles then hold 479–2434 photos (13k slots,
+  2.5x; mostly the MIN_VISIBLE rule). Dense graph:
   photos linked by shared 3D points (+ 0.3 x shared 2 m ground cells, so passes at different heights stay together, +
   a tiny link along capture order), recursive spectral bisection (normalized cut, size slack 0.25); regions = a 1 m
   label map: points vote 1 / d^2 for the parts whose photos see them, majority filter, then a geodesic watershed
