@@ -9,8 +9,10 @@ the code after unpacking; each pattern occurs once, in the camera controls' per-
    (data-path: path times, camera centres, wxyz quaternions of R_wc in the GUI's world) let the page fly the path
    itself, every frame, through window.__mfFly (a script added to the page): the same cubic Hermite / slerp as
    gui.data.FlightPath, put into three.js' frame with viser's scene root transform. A drag, wheel or held movement
-   key on the 3D view hands the camera to the user until `hold` seconds after the last one; the flight's clock runs
-   on meanwhile (the server keeps the Position slider and the photo window on it).
+   key on the 3D view hands the camera to the user until `hold` seconds after the last one and pauses the flight:
+   the page stops its clock at once and reports "pause:k:t" / then "resume:k:t" as a GuiUpdateMessage to the
+   hidden input data-fly names (`report`), so the server pauses the clock (`paused`, for every browser, the
+   slider and the photo window) and continues it from t.
 
 Re-applying is safe: the loader's edit and the script are replaced, so this runs on an image patched by the older
 patch_viser_keys.sh too. Fails if viser's loader or the hook changed.
@@ -31,7 +33,7 @@ EDITS = ('.replaceAll("`KeyQ`","`KeyF`").replaceAll("`KeyE`","`KeyR`")'
          f'.replace("{HOOK}","{NEW_HOOK}")')
 
 FLY = """<script id="mf-fly">(()=>{
-let P=null,Pk=null,C=null,Ck=null,t0=0,touch=-1e9;
+let P=null,Pk=null,C=null,Ck=null,t0=0,touch=-1e9,hold=false,frozen=null,resumed=0,seq=0;
 const now=()=>performance.now(),mark=()=>{touch=now()};
 const on3d=e=>e.target&&e.target.tagName==="CANVAS";
 addEventListener("pointerdown",e=>{on3d(e)&&mark()},true);
@@ -51,10 +53,19 @@ const pose=(P,t)=>{const T=P.t,n=T.length;let lo=0,hi=n-1;while(hi-lo>1){const c
   q=q0.map((v,i)=>(Math.sin((1-u)*th)*v+Math.sin(u*th)*q1[i])/s)}
  const l=Math.hypot(...q),w=q[0]/l,X=q[1]/l,Y=q[2]/l,Z=q[3]/l;
  return [x,[2*(X*Z+w*Y),2*(Y*Z-w*X),1-2*(X*X+Y*Y)],[-2*(X*Y-w*Z),-(1-2*(X*X+Z*Z)),-2*(Y*Z+w*X)]]};
+const report=(a,k,t)=>{C.report&&a.sendMessage&&a.sendMessage({type:"GuiUpdateMessage",uuid:C.report,
+ updates:{value:k+":"+(++seq)+":"+t}})};
 window.__mfFly=(n,root,keys,a)=>{const el=document.getElementById("mf-move-speed"),s=el?el.dataset.fly||"":"";
- if(!s){C=null;Ck=null;return false}if(s!==Ck){Ck=s;C=JSON.parse(s);t0=now()}
- const P=path();if(!P||P.id!==C.path)return false;if(keys)mark();if(now()-touch<1000*C.hold)return false;
- const D=P.t[P.t.length-1];let t=C.t0+C.speed*(now()-t0)/1000;t=C.loop?((t%D)+D)%D:Math.min(t,D);
+ if(!s){C=null;Ck=null;hold=false;frozen=null;return false}
+ if(s!==Ck){Ck=s;C=JSON.parse(s);t0=now();if(!C.paused&&!hold)frozen=null}
+ const P=path();if(!P||P.id!==C.path)return false;if(keys)mark();
+ const D=P.t[P.t.length-1],clock=()=>{const t=C.paused?C.t0:C.t0+C.speed*(now()-t0)/1000;
+  return C.loop?((t%D)+D)%D:Math.min(t,D)};
+ if(now()-touch<1000*C.hold){if(!hold){hold=true;frozen=clock();report(a,"pause",frozen)}
+  a.requestRender&&a.requestRender();return false}
+ if(hold){hold=false;resumed=now();report(a,"resume",frozen)}
+ if(frozen!==null&&now()-resumed>3000)frozen=null;
+ const t=frozen!==null?frozen:clock();
  const [x,f,up]=pose(P,t),M=root().elements;
  const pt=v=>[M[0]*v[0]+M[4]*v[1]+M[8]*v[2]+M[12],M[1]*v[0]+M[5]*v[1]+M[9]*v[2]+M[13],M[2]*v[0]+M[6]*v[1]+M[10]*v[2]+M[14]];
  const dir=v=>[M[0]*v[0]+M[4]*v[1]+M[8]*v[2],M[1]*v[0]+M[5]*v[1]+M[9]*v[2],M[2]*v[0]+M[6]*v[1]+M[10]*v[2]];

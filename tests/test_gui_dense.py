@@ -342,6 +342,20 @@ def test_fly_the_camera_path(app):
     app.g_fly_pos.value = 50.0
     app._fly_scrub(c)
     assert abs(attr(app.g_speed_html.content, "data-fly")["t0"] - path.duration / 2) < 1e-6
+    # a browser's user takes the view over: the flight pauses where that browser stopped, for everyone, until the
+    # last browser holding it lets go; then it continues from there
+    app._fly_report(21, "pause:1:12.5")
+    clock = attr(app.g_speed_html.content, "data-fly")
+    assert clock["paused"] and clock["t0"] == 12.5 and app._fly_now() == 12.5
+    app._fly_report(22, "pause:1:13.0")  # a second browser: still paused at the first one's point
+    app._fly_report(21, "resume:2:12.5")
+    time.sleep(0.3)
+    assert attr(app.g_speed_html.content, "data-fly")["paused"] and app._fly_now() == 12.5
+    assert abs(app.g_fly_pos.value - round(100 * 12.5 / path.duration, 1)) < 0.11  # the slider waits too
+    app._fly_report(22, "resume:2:13.0")
+    clock = attr(app.g_speed_html.content, "data-fly")
+    assert not clock["paused"] and clock["t0"] == 12.5 and app._fly_now() >= 12.5
+    app._fly_report(21, "garbage")  # ignored
     app.toggle_fly(c)  # and Stop works mid-flight
     assert app._flight is None and app.g_fly.label == "Fly the camera path"
 

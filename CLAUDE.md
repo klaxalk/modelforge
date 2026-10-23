@@ -2150,9 +2150,12 @@ Code layout:
     - Controls: speed in m/s (default 0.5), Loop (default on), and "Camera's field of view" (on: the real
       camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
     - The **Position** slider shows progress; dragging it jumps there, also when not flying.
-    - A drag, wheel or held movement key on the 3D view hands the camera to the user until 1 s after the
-      last one; the clock runs on meanwhile, so the view then rejoins the flight where it is by then (the server
-      cannot see a browser's pause).
+    - A drag, wheel or held movement key on the 3D view **pauses** the flight and hands the camera to the user
+      until 1 s after the last one (the user asked: not skip ahead). The page freezes its clock at once and reports
+      "pause:k:t" / "resume:k:t" to the server through a hidden text input (`g_fly_report`; a `GuiUpdateMessage` sent
+      with viser's own `sendMessage`, its uuid in `data-fly`). `App._fly_report` holds the clock at t (`paused`)
+      while any browser holds it, for all browsers, the slider and the photo window, and continues from t when the
+      last one lets go (or disconnects). If no answer comes within 3 s, the page follows the server's clock again.
     - **Photo window** (the user asked, 2026-10-22): a floating panel right of the quick bar (`photo_panel`,
       420 px wide, height from the images' aspect) shows the photo of the camera the flight is nearest to
       (`FlightPath.pose`'s index), also when the Position slider jumps; decoded at ~630 px with JPEG DCT

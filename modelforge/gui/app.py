@@ -343,8 +343,9 @@ class App:
                     hint="Replay the flight: the view follows the cameras of the shown snapshot in capture order "
                          "(position and orientation interpolated smoothly between them), looking through the "
                          "camera. Press again to stop. The browser flies it itself, so it stays smooth. Dragging, "
-                         "zooming or a movement key takes the view over; a second after you let go it rejoins the "
-                         "flight where it is by then. Every open browser flies along, as with Orbit.")
+                         "zooming or a movement key pauses it and gives you the view; a second after you let go it "
+                         "continues from where it paused. Every open browser flies along (and pauses), as with "
+                         "Orbit.")
                 self.g_fly.on_click(lambda e: self.toggle_fly(e.client))
                 self.g_fly_speed = gui.add_slider(
                     "Speed (m/s)", min=0.1, max=20.0, step=0.1, initial_value=0.5,
@@ -365,6 +366,10 @@ class App:
                 for h in (self.g_fly_speed, self.g_fly_loop):
                     h.on_update(lambda _: self._fly_changed())
                 self.g_fly_md = gui.add_markdown("")
+                # where a browser reports that the user took the view over and gave it back ("pause:k:t" /
+                # "resume:k:t", docker/patch_viser_camera.py): the flight waits for them
+                self.g_fly_report = gui.add_text("fly report", initial_value="", visible=False)
+                self.g_fly_report.on_update(lambda e: self._fly_report(e.client_id, e.target.value))
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
             for h in (self.g_points, self.g_cams, self.g_thumbs, self.g_corr, self.g_traj):
@@ -1035,7 +1040,8 @@ class App:
         f, fly = getattr(self, "_flight", None), ""
         if f is not None:  # the flight's clock: the browsers run it from when this changes (docker/patch_viser_camera.py)
             fly = html.escape(json.dumps({"path": f["path_id"], "e": f["epoch"], "t0": f["t0"], "speed": f["speed"],
-                                          "loop": f["loop"], "dist": f["dist"], "hold": 1.0}), quote=True)
+                                          "loop": f["loop"], "paused": bool(f["holds"]), "dist": f["dist"],
+                                          "hold": 1.0, "report": self.g_fly_report._impl.uuid}), quote=True)
         return (f'<span id="mf-move-speed" data-speed="{self.move_speed:g}" data-orbit="{orbit:g}" '
                 f'data-fly="{fly}"></span>')
 
@@ -1793,6 +1799,8 @@ class App:
         only keep the slider and the photo window busy)."""
         if not any(c != client.client_id for c in self.server.get_clients()):
             self._stop_fly()
+        elif self._flight is not None and client.client_id in self._flight["holds"]:  # it held the flight
+            self._fly_report(client.client_id, f"resume:0:{self._flight['t0']}")
 
     def toggle_orbit(self, client):
         """Start / stop turning the view about its look-at point (+z). The browsers turn it themselves, every frame
@@ -1855,6 +1863,8 @@ class App:
         """Path time of the flight now: the same clock the browsers run (t0 + speed x elapsed, wrapped or held at
         the end)."""
         f = f or self._flight
+        if f["holds"]:  # paused while a browser's user holds the view
+            return f["t0"]
         t = f["t0"] + f["speed"] * (time.time() - f["start"])
         d = f["path"].duration
         return t % d if f["loop"] else min(t, d)
@@ -1868,6 +1878,28 @@ class App:
         f.update(t0=float(t), start=time.time(), speed=float(self.g_fly_speed.value), loop=bool(self.g_fly_loop.value))
         f["epoch"] += 1
         self.g_speed_html.content = self._speed_html()
+
+    def _fly_report(self, client_id, value):
+        """A browser's user took the view over ("pause:k:t", t = where that browser stopped) or gave it back
+        ("resume:k:t"): the flight pauses at t while any browser holds it, for every browser, the slider and
+        the photo window, and continues from there when the last one lets go."""
+        f = self._flight
+        try:
+            kind, _, t = value.split(":")
+            t = float(t)
+        except ValueError:
+            return
+        if f is None or not np.isfinite(t):
+            return
+        if kind == "pause":
+            was = bool(f["holds"])
+            f["holds"].add(client_id)
+            if not was:
+                self._fly_clock(min(max(t, 0.0), f["path"].duration))
+        elif kind == "resume" and client_id in f["holds"]:
+            f["holds"].discard(client_id)
+            if not f["holds"]:
+                self._fly_clock(f["t0"])
 
     def _fly_changed(self):
         """Speed or Loop changed: the browsers continue from where the flight is now."""
@@ -1907,7 +1939,7 @@ class App:
             self._fly_path_key = key
             self.g_fly_path_html.content = self._fly_path_html(path)
         self._flight = {"path": path, "dist": self._look_distance(path), "stop": threading.Event(), "saved": saved,
-                        "epoch": 0, "path_id": self._fly_path_id}
+                        "epoch": 0, "path_id": self._fly_path_id, "holds": set()}
         self._fly_clock(t)
         self.g_fly.label = "Stop flying"
         threading.Thread(target=self._fly_watch, args=(self._flight,), daemon=True).start()
