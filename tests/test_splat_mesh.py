@@ -130,6 +130,20 @@ def test_marching_cubes_in_pieces(tmp_path):
     assert abs(pieces["vertices"] - whole["vertices"]) <= 0.001 * whole["vertices"]
 
 
+def test_mesh_in_tiles(tmp_path):
+    """A grid too large for the GPU is fused in x / y tiles (each tile only the pixels landing in it + a margin, its
+    own triangles kept, seams merged): the same mesh as one grid, no doubled or missing faces along the seams."""
+    p = str(tmp_path)
+    scene(p)
+    whole = splat_mesh.run(p, "fine", width=640, on_line=lambda m: None)
+    lines = []
+    tiled = splat_mesh.run(p, "fine", width=640, on_line=lines.append, max_tile_blocks=60)
+    assert tiled["tiles"] >= 3 and whole["tiles"] == 1, (tiled["tiles"], whole["tiles"])
+    assert any("tile 2 /" in s for s in lines)
+    assert abs(tiled["faces_raw"] - whole["faces_raw"]) <= 0.002 * whole["faces_raw"]
+    assert abs(tiled["vertices"] - whole["vertices"]) <= 0.002 * whole["vertices"]
+
+
 def test_patch_holes(tmp_path):
     """Holes up to the size are closed (also two touching at a vertex); larger ones, the outer border and a separate
     piece's border stay open."""

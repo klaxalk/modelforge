@@ -1658,7 +1658,20 @@ export).
     quadric decimation of the whole mesh needs ~1 KB per face, while the splat, the voxel blocks and the
     marching-cubes arrays were still held. Now they are freed first, and `preview_mesh` clusters vertices first
     (cell = voxel x sqrt(faces / 4 x max preview faces), colours averaged), then quadric-decimates to 300k: on that
-    mesh 10 s, peak 3.0 GB (the mesh itself). `jobs.Token.run`'s error line skips lines that are
+    mesh 10 s, peak 3.0 GB (the mesh itself).
+  - **Tiles** (berlin fine, 6.6 cm voxel, 2026-10-23: one grid ran out of GPU memory on 24 GB): a cheap guess from the
+    Gaussian centres (blocks holding centres x 2.5) decides; above half the budget (0.6 x free GPU memory / 10.5 KB
+    per block) one pass counts the blocks exactly (Open3D's per-view block coordinates into a GPU hash set,
+    `count_blocks`) and cuts x / y at medians into tiles that fit (`plan_tiles`, margin 2 blocks). A tile fuses only
+    the pixels whose surface lands in it + margin (`in_blocks`) from the views that reach it, its grid allocated at
+    1.3 x its count (no doubling); its own triangles kept, seam vertices merged (`merge_parts`). Same mesh as one grid
+    (synthetic, 81 tiles: identical faces and vertices; `test_mesh_in_tiles`). torch's cache must be emptied after
+    `active_blocks` (its GPU copies, ~5 GB, made the next tile not fit). berlin fine: 3.0M blocks, 4 tiles of ~0.76M,
+    99M faces / 52.9M vertices, 469 s.
+  - **CPU side in numpy** (the same run was OOM-killed at 27 GB in Open3D's `cluster_connected_triangles`, ~420 B per
+    face): merge, small pieces (vertex-connected union-find, int32), normals (bincount), binary PLY in chunks
+    (float32 positions / normals, uint8 colours), preview by numpy vertex clustering + one quadric pass (it stops near
+    434k on that mesh). On berlin fine's mesh these steps peak at 9.1 GB (5.2 GB of it reading the file). `jobs.Token.run`'s error line skips lines that are
     only colour codes (Open3D ends its red errors with one).
 - **Patch holes** (Splat mesh tab "Max hole size (m)" + **Patch holes**, stage `splatmesh-fill`; `python -m modelforge.splat_mesh PROJECT --fill [MAX]`; the user asked for the SfM
   mesh's option here, 2026-10-22). Marching cubes leaves real gaps (no Poisson surface underneath as in the SfM mesh),
