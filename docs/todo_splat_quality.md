@@ -1,6 +1,6 @@
 # TODO: cheap splat quality fixes
 
-Status: proposed 2026-10-23, not started; the user will ask for it. Both are flags or small changes plus an A/B run;
+Priority: low. Status: proposed 2026-10-23, not started; the user will ask for it. Both are flags or small changes plus an A/B run;
 validate on a small project first (fullrun_test, karlak; held-out scoring as in `build/splat_exp.py`), not on
 kladno_dira.
 

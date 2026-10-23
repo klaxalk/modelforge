@@ -1,6 +1,6 @@
 # TODO: multi-camera DJI projects
 
-Status: planned 2026-10-23, not started. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
+Priority: low. Status: planned 2026-10-23, not started. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
 prior BA). Today a project is one camera: `dji/ingest.py` refuses sources of different resolutions, features use
 `CameraMode.SINGLE`, transforms.json carries one global camera. Two drones that both record 4K pass the resolution
 check today and wrongly share one set of intrinsics.

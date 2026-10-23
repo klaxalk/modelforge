@@ -1,6 +1,6 @@
 # TODO: normalize the lighting (sunny vs overcast photos)
 
-Status: discussed 2026-10-23, not started. **Waiting for the user's test project** with mixed lighting (same site,
+Priority: low. Status: discussed 2026-10-23, not started. **Waiting for the user's test project** with mixed lighting (same site,
 sunny and overcast flights, or flights at different times of day; keep the SRT / MP4s for UTC time; do not run the
 full pipeline on it before the comparison). Goal: the splat looks like overcast, diffuse light, without hard
 shadows, also when parts of the dataset were flown in direct sun.

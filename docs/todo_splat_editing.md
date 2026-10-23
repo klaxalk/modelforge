@@ -1,6 +1,6 @@
 # TODO (idea, not now): splat editing, SuperSplat-like
 
-Status: proposed 2026-10-23; the user said not now. Their use: removing sky floaters and fog, and opening holes that
+Priority: low. Status: proposed 2026-10-23; the user said not now. Their use: removing sky floaters and fog, and opening holes that
 should be open.
 
 ## Automatic selection

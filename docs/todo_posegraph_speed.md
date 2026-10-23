@@ -1,6 +1,6 @@
-# TODO (priority 1): speed up the loop-closure pose graph in the chunked refine
+# TODO: speed up the loop-closure pose graph in the chunked refine
 
-Status: found 2026-10-23 on kladno_dira (5681 images, BA mode auto → chunked), not started.
+Priority: **high**. Status: found 2026-10-23 on kladno_dira (5681 images, BA mode auto → chunked), not started.
 
 ## Symptom
 

@@ -1,6 +1,6 @@
 # TODO: job queue with completion notices
 
-Status: proposed 2026-10-23, not started; the user will ask for it.
+Priority: low. Status: proposed 2026-10-23, not started; the user will ask for it.
 
 ## Why
 
