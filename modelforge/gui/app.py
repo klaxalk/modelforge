@@ -2454,8 +2454,13 @@ class App:
         if phase == "chunk_done":
             return
         if phase == "posegraph":
-            self._job["detail"] = f"pose graph: {ev['cameras']} cameras, {ev['edges']:,} edges …"
-            self.g_progress.value = 86.0
+            loops = f" + {ev['loops']:,} loop edges (revisit pass {ev['pass'] + 1})" if ev.get("loops") else ""
+            self._job["pose_graph"] = f"pose graph: {ev['cameras']} cameras, {ev['edges']:,} edges{loops}"
+            self._job["detail"] = self._job["pose_graph"] + " …"
+            self.g_progress.value = 86.0 if not loops else 86.5
+        elif phase == "posegraph_iteration":
+            self._job["detail"] = (f"{self._job.get('pose_graph', 'pose graph')}: iteration {ev['iteration']} / "
+                                   f"{ev['max_iterations']}")
         elif phase == "revisits":
             self._job["detail"] = (f"revisit pass {ev['pass'] + 1} (≤ {ev['passes']}): triangulating all images, "
                                    "joining passes over the same ground …")

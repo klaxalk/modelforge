@@ -93,6 +93,11 @@ ENV NERFSTUDIO_BIN=/opt/nerfstudio/bin
 # ROS 2 bags (project kind "rosbag"): pure-Python reader for sqlite3 / MCAP bags, no ROS install needed.
 RUN pip install --no-cache-dir "rosbags==0.11.8"
 
+# OpenBLAS (threaded) instead of the reference netlib BLAS for CHOLMOD / LAPACK (Ceres, COLMAP's BA, the chunked
+# refine's pose graph): update-alternatives picks it on install. A late layer, so the COLMAP build stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends libopenblas0-pthread \
+    && rm -rf /var/lib/apt/lists/*
+
 # C-RADIOv3 for semantic search (modelforge/semantic.py), CUDA image only: RADIO needs einops, timm >= 1.0
 # and transformers, which clash with nerfstudio's pins (timm 0.6.7), so they go to their own folder that
 # only the semantic subprocesses put first on PYTHONPATH; torch and numpy stay nerfstudio's (--no-deps).

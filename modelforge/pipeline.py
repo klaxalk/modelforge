@@ -395,7 +395,9 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
         if name not in init:
             init[name] = np.array(corrected[name].params)
     emit({"phase": "posegraph", "cameras": len(order), "edges": len(edges)})
-    pg = chunked.pose_graph(init, edges, corrected, model, rejected)
+    pg = chunked.pose_graph(init, edges, corrected, model, rejected, token=token,
+                            on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
+                                                         "max_iterations": 200}))
     log(f"refine: pose graph, {pg['cameras']} cameras, {pg['edges']} edges, {pg['abs_priors']} priors: "
         f"{pg['iterations']} it ({pg['termination']}), {pg['seconds']} s")
     for name, i in ids.items():
@@ -422,8 +424,14 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
                 stats["revisits"].append(rs)
                 break
             cur = {name: _pose(rec, i) for name, i in ids.items()}
-            rs["pose_graph"] = chunked.pose_graph(cur, edges, corrected, model, rejected, loops=loops,
-                                                  loop_loss=cfg.revisit_loss)
+            emit({"phase": "posegraph", "cameras": len(cur), "edges": len(edges), "loops": len(loops), "pass": k})
+            rs["pose_graph"] = pg = chunked.pose_graph(
+                cur, edges, corrected, model, rejected, loops=loops, loop_loss=cfg.revisit_loss, token=token,
+                on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
+                                             "max_iterations": 200}))
+            jobs.check(token)
+            log(f"refine: revisit pass {k + 1}: pose graph with {len(loops)} loop edges: {pg['iterations']} it "
+                f"({pg['termination']}), {pg['seconds']} s")
             stats["revisits"].append(rs)
             for name, i in ids.items():
                 rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(cur[name])

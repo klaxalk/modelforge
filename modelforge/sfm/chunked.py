@@ -114,10 +114,11 @@ def chunk_edges(cfg, names, poses):
 
 
 def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge_loss=None, loops=(),
-               loop_loss=3.0):
+               loop_loss=3.0, solver=None, on_iteration=None, token=None):
     """Solve all poses: chunk edges (RelativePosePriorCost, Cauchy) + loop-closure edges (`loops`, the same
     form, Huber at `loop_loss`) + absolute priors (AbsolutePosePriorCost, Huber at 3 sigma, as in
-    refine.prior_ba; `rejected` names get none). init: name -> params, mutated in place. Returns the solver
+    refine.prior_ba; `rejected` names get none). init: name -> params, mutated in place. solver: extra
+    pyceres.SolverOptions attributes; on_iteration(summary) per iteration; token: Stop aborts. Returns the solver
     stats."""
     t0 = time.time()
     params = {n: np.array(p, float) for n, p in init.items()}
@@ -144,6 +145,10 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
     options.max_num_iterations = max_iterations
     options.num_threads = os.cpu_count() or 1
+    for k, v in (solver or {}).items():
+        setattr(options, k, v)
+    if on_iteration or token is not None:
+        options.callbacks = [refine._Progress(on_iteration, token=token)]
     summary = pyceres.SolverSummary()
     pyceres.solve(options, problem, summary)
     for n, p in params.items():
