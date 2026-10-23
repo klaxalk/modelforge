@@ -105,8 +105,12 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 **Medium**
 1. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
    anti-aliased rasterization, the depth prior outliers): `docs/todo_splat_quality.md`.
-2. Calibration is biased low (~0.7×) in weakly constrained directions. The
-   fix is redundancy-aware variance component estimation.
+2. ~~Calibration biased low (~0.7×)~~ **closed 2026-10-23, by measurement**: the 0.7× was one synthetic draw
+   (seed 1: its prior noise itself came out 0.81× nominal). A redundancy-aware estimate (Helmert VCE, tr(H) of the
+   prior blocks by one perturbed re-solve, Hutchinson; `build/vce_proto.py`) found tr(H) 1–13 of 120 (images pin
+   the cameras, the priors keep ~all their redundancy), also with 60 points per scene; median rule vs VCE on seeds
+   1–4: 0.67–1.07 vs 0.79–1.00 of the true σ, each within the draw's own scatter. Not implemented (an extra BA
+   solve per round for nothing measurable).
 3. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
    heavy stages): `docs/todo_robustness.md`.
 4. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
@@ -892,9 +896,8 @@ Results on `berlin_3_1` (CLI flags `--no-relative`, `--no-calibration`,
   for small turns.
 
 Known limitations:
-- Calibration is biased low in directions the images constrain weakly
-  (synthetic test: about 0.7× the true σ). Fixing this needs redundancy-aware
-  variance component estimation.
+- ~~Calibration is biased low in weakly constrained directions~~: not so (2026-10-23, see the priority list,
+  medium 2): the synthetic 0.7× was a single random draw.
 - **BA stops when the cameras settle** (`refine.Settle`), not at Ceres'
   convergence:
   - The rule: no camera centre moved > 0.5 mm, rotated > 0.001°, and no
