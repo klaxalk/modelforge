@@ -2151,9 +2151,11 @@ Code layout:
       returns `SOLVER_ABORT`). An aborted round writes no `round_N`, and a
       stopped refine leaves `sparse/refined` as it was.
     - Extraction checks the token at every frame.
-    - In-process pycolmap calls (features, matching, triangulation, fusion)
-      cannot be interrupted; the token is checked when they return, and the
-      state line reads "⏹ stopping …" meanwhile.
+    - pycolmap calls (features, matching, triangulation, fusion) cannot be
+      interrupted; the token is checked when they return, and the state line
+      reads "⏹ stopping …" meanwhile. Since 2026-10-23 these stages run in a job
+      process (`modelforge/worker.py`), which is terminated if it has not
+      stopped 60 s after Stop.
     - A stopped run ends as "⏹ stopped during <stage>", not as a failure.
     - The splat-only Stop button was folded into this one.
   - Tabs:
