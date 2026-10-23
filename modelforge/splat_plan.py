@@ -161,6 +161,9 @@ def needed_gaussians(s, downscale=1):
     return int(s["images"] * s["width"] * s["height"] / (s["overlap"] * (PX_PER_GAUSSIAN * downscale) ** 2))
 
 
+DEFAULT_ITERATIONS = 50000  # the Splat tab's and the CLI's Iterations (the user's choice, 2026-10-23; 0 = auto below)
+
+
 def auto_downscale(width):
     """The smallest downsample factor that trains the photos at <= MAX_TRAIN_WIDTH."""
     return next((f for f in DOWNSCALES if width / f <= MAX_TRAIN_WIDTH), DOWNSCALES[-1])

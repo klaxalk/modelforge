@@ -593,7 +593,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
     ap.add_argument("--method", choices=METHODS, default="splatfacto")
-    ap.add_argument("--iterations", type=int, help="training steps (default: from the project's size)")
+    ap.add_argument("--iterations", type=int, help="training steps, per tile in a tiled run (default 50000, "
+                    "splat_plan.DEFAULT_ITERATIONS; 0 = from the project's size; --no-plan: splatfacto's 30000)")
     ap.add_argument("--cache", choices=("auto",) + CACHE_MODES, default="auto",
                     help="where training images are kept (default auto: gpu if small, else cpu RAM, else disk)")
     ap.add_argument("--downscale", type=int, choices=DOWNSCALES,
@@ -609,14 +610,14 @@ def main():
     ap.add_argument("--tiles", choices=("auto", "on", "off"), default="auto",
                     help="train in tiles (modelforge/splat_tiles.py); auto: above 800 training images")
     ap.add_argument("--tile-photos", type=int, default=None, help="about this many photos look into each tile (default 500)")
-    ap.add_argument("--tile-layout", choices=("rectangles", "covisibility"), default="rectangles",
+    ap.add_argument("--tile-layout", choices=("rectangles", "covisibility"), default="covisibility",  # DEFAULT_LAYOUT
                     help="tiles cut by straight lines, or regions from what the photos see together (seams on flat "
                          "ground; modelforge/tile_regions.py)")
     ap.add_argument("--skip-tiles", metavar="K,K", default=None,
                     help="tiles (1-based, as in the GUI) to leave out of training and the merge, e.g. 1,4")
     ap.add_argument("--round-steps", type=int, default=None,
                     help="tiled runs: every tile advances this many steps per round, merged after each "
-                         "(default 4000; 0 = one tile after the other)")
+                         "(default 10000; 0 = one tile after the other)")
     ap.add_argument("--tile", type=int, metavar="K", default=None,
                     help="train only tile K (1-based) of the set-up tiles from scratch; the others keep their splats "
                          "and all are merged again")
@@ -644,6 +645,10 @@ def main():
             resume(project, on_line=lambda m: print(m, flush=True))
             return
         from modelforge import splat_plan, splat_tiles
+        if args.iterations is None and not args.no_plan:
+            args.iterations = splat_plan.DEFAULT_ITERATIONS
+        if args.iterations == 0:  # auto: from the project's size
+            args.iterations = None
         if args.setup_tiles:
             splat_tiles.setup(project, args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
                               on_line=lambda m: print(m, flush=True), layout=args.tile_layout)

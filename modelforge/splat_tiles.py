@@ -42,7 +42,8 @@ The live preview shows the finished tiles (cleaned) plus the training one (cropp
 Layout "covisibility" (modelforge/tile_regions.py; Splat tab "Tile layout", CLI --tile-layout): the photos are
 partitioned by the points they see together and each tile's region is a label map (tiles/regions.npz) whose seams
 avoid what sticks out of the ground; cropping, the clean (distance to the nearest seam instead of the shared sides)
-and the photos joining a tile use the region instead of the rectangle. Default "rectangles".
+and the photos joining a tile use the region instead of the rectangle. The Splat tab and the CLI default to
+"covisibility" (DEFAULT_LAYOUT, the user's choice, 2026-10-23; "rectangles" before), which needs the SfM model.
 """
 
 import json
@@ -65,7 +66,8 @@ SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off t
 #                   up to ~2x the photos still train well, the user found)
 BALANCE = 0.3  # weight of being off balance (1 at the slack's end) against the cut's cost in median costs
 GAP_WIDTH = 0.02  # of the look-ats' extent: half the band of sparse points a candidate cut is charged for
-ROUND_STEPS = 4000  # steps every tile advances per round, merged after each (0: one tile after the other)
+ROUND_STEPS = 10000  # steps every tile advances per round, merged after each (0: one tile after the other; the
+#                      user's default since 2026-10-23, 4000 before)
 FAR = 2.0  # of the scene box's longer side beyond it: the clean's outlier limit (outer tiles keep their background)
 MARGIN = 0.25  # of the cell's longer side: initial points and the clean's reach beyond the cell
 MAX_POINTS = 50_000  # sparse points sampled for the partition
@@ -75,6 +77,8 @@ REGIONS = os.path.join(DIR, "regions.npz")  # layout "covisibility": the tiles' 
 SKIP = os.path.join(DIR, "skip.json")  # tiles left out of training and the merge (apart from tiles.json, which a
 #                                        running job rewrites: a click in the View tab must survive that)
 LAYOUTS = ("rectangles", "covisibility")
+DEFAULT_LAYOUT = "covisibility"  # the GUI's and the CLI's default (the user's choice, 2026-10-23); the functions
+#                                  here default to "rectangles" (old tiles.json / resume.json without a layout)
 LIVE = os.path.join("splat", "live_tiles.npz")
 IDENTITY = os.path.join(DIR, "identity_transforms.json")  # the live preview's arrays are already ENU
 BAND0 = ("x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",

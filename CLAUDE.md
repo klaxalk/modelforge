@@ -1064,6 +1064,9 @@ inside the CUDA dev container, where nerfstudio sits in its own venv at
     projects into (in front, in frame, nearer than 4× that camera's median depth; no occlusion test)
     → overlap = mean count; GSD = median over cameras of median point depth / focal; surface = Σ
     footprints / overlap. Without sparse points the scene size is unknown.
+  - **Iterations default 50000** (the user's choice, 2026-10-23; `splat_plan.DEFAULT_ITERATIONS`): the Splat tab's
+    Iterations starts at it and the CLI uses it (per tile in a tiled run, as every explicit value); 0 = the auto rule
+    below; `--no-plan` keeps splatfacto's 30000.
   - `suggest`: iterations = 20 × training images in [30k, 300k]; Gaussians needed = all image pixels
     / (overlap × (2 px × factor)²), rough (karlak ×1: 14M estimated, 2.0M grown by default densification);
     GPU fits ~0.35M per GB above 4 GB. **Since 2026-10-20 (the karlak investigation, below; the user asked):**
@@ -1427,7 +1430,7 @@ helped little):
   margin (25 % of the cell's longer side), `images/` and `images_N/` as relative links to the project's; then
   `splat.run` with its own plan (`suggest(survey(tile), tiles="off")`: steps from its photos, the tab's explicit
   values apply per tile), one tile after the other, image cache auto per tile.
-- **Rounds** (`ROUND_STEPS` = 4000 (the user's default; 6000 at first), Splat tab "Steps per round", CLI `--round-steps`, 0 = one tile after the other;
+- **Rounds** (`ROUND_STEPS` = 10000 (the user's default since 2026-10-23; 4000 before, 6000 at first), Splat tab "Steps per round", CLI `--round-steps`, 0 = one tile after the other;
   the user asked, to see the whole scene early and have it improve evenly): every tile advances that many steps per
   round (`splat.run(stop_at=)`: the trainer checkpoints and ends as on Stop, resume.json written, the splat so far
   exported, no exception) and continues from its checkpoint next round, so step, optimizer state and learning-rate /
@@ -1479,7 +1482,11 @@ helped little):
   drift passes stopped at 0.47 m (`build/split_check2.py MODEL PROJECT`). Fix to try: refine with BA mode global
   (dira2k: 0.05 / 0.15 m). The experiments were stopped (workspace `build/dira_t3_exp`).
 - **Tile layout "covisibility"** (the user asked, 2026-10-22: straight cuts cannot bend around an orbited object or a
-  building; `modelforge/tile_regions.py`, Splat tab "Tile layout", CLI `--tile-layout`; default stays rectangles):
+  building; `modelforge/tile_regions.py`, Splat tab "Tile layout", CLI `--tile-layout`). **The Splat tab's and the
+  CLI's default since 2026-10-23** (the user's choice, before the paused comparison below finished;
+  `splat_tiles.DEFAULT_LAYOUT`); the library functions keep "rectangles" (old tiles.json / resume.json without a
+  layout). It needs the SfM model (synthetic test projects without one name rectangles). A project's existing set-up
+  keeps its layout (the GUI adopts it) until Set up tiles runs again. Untested above ~3000 photos (dense graph):
   photos linked by shared 3D points (+ 0.3 x shared 2 m ground cells, so passes at different heights stay together, +
   a tiny link along capture order), recursive spectral bisection (normalized cut, size slack 0.25); regions = a 1 m
   label map: points vote 1 / d^2 for the parts whose photos see them, majority filter, then a geodesic watershed

@@ -519,10 +519,10 @@ class App:
                 "Method", options=splat.METHODS, initial_value="splatfacto",
                 hint="splatfacto: default. splatfacto-big: more Gaussians and detail, more GPU memory and time.")
             self.g_splat_iters = gui.add_number(
-                "Iterations", initial_value=0, min=0, step=1000,
-                hint="Training steps; 0 = auto: ~20 views per training image, at least 30000 (splatfacto's "
-                     "default) and at most 300000. The learning-rate decay and the densification schedule "
-                     "follow the value. Use a few thousand for a quick check.")
+                "Iterations", initial_value=splat_plan.DEFAULT_ITERATIONS, min=0, step=1000,
+                hint="Training steps (default 50000; per tile in a tiled run). 0 = auto: ~20 views per training "
+                     "image, at least 30000 (splatfacto's default) and at most 300000. The learning-rate decay and "
+                     "the densification schedule follow the value. Use a few thousand for a quick check.")
             self.g_splat_cache = gui.add_dropdown(
                 "Image cache", options=("auto",) + tuple(reversed(splat.CACHE_MODES)), initial_value="auto",
                 hint="Where the training photos are kept. gpu: decoded in GPU memory (costs GPU memory the "
@@ -569,7 +569,7 @@ class App:
                      f"(≥ {int(100 * splat_tiles.MIN_VISIBLE)} % of their view, or "
                      f"≥ {int(100 * splat_tiles.MIN_IN_CELL)} % looking just across its edge), so tiles hold more.")
             self.g_splat_tile_layout = gui.add_dropdown(
-                "Tile layout", options=splat_tiles.LAYOUTS, initial_value="rectangles",
+                "Tile layout", options=splat_tiles.LAYOUTS, initial_value=splat_tiles.DEFAULT_LAYOUT,
                 hint="rectangles: the scene cut by straight lines, each placed where it splits the least. "
                      "covisibility: the photos split by what they see together (an orbit or a pass over a building "
                      "shares its points, so it stays in one tile), regions drawn on the ground with seams moved onto "

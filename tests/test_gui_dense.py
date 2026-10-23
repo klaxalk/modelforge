@@ -375,6 +375,7 @@ def test_tile_boundaries(app, monkeypatch):
     real = app.server.scene.add_line_segments
     monkeypatch.setattr(app.server.scene, "add_line_segments",
                         lambda name, *a, **k: (added.append((name, k.get("colors"))), real(name, *a, **k))[1])
+    app.g_splat_tile_layout.value = "rectangles"  # boxes (covisibility, the default, draws outlines)
     app.g_splat_tile_photos.value = 30  # ~80 images -> 3 planned cells
     app.g_tiles_view.value = True
     t0 = _time.time()
