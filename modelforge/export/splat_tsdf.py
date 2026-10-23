@@ -146,10 +146,31 @@ def marching_cubes(keys, attrs, voxel, min_weight, device, max_blocks=MC_MAX_BLO
     return v, f, c
 
 
+def preview_mesh(mesh, voxel, max_faces, cluster_factor=4):
+    """A copy of at most max_faces for the GUI. Above cluster_factor x max_faces, vertex clustering (cheap, colours
+    averaged) first brings it near that size, then quadric decimation: Open3D's quadric decimation of the whole
+    mesh needs ~1 KB per face (berlin, 24.3M faces: the process was OOM-killed at 27.6 GB)."""
+    if len(mesh.triangles) <= max_faces:
+        return mesh
+    faces = len(mesh.triangles)
+    if faces > cluster_factor * max_faces:  # faces scale with 1 / cell^2 on a surface
+        cell = voxel * np.sqrt(faces / (cluster_factor * max_faces))
+        print(f"[tsdf] simplifying the preview: clustering {faces:,} faces at {cell * 100:.1f} cm", flush=True)
+        mesh = mesh.simplify_vertex_clustering(cell, o3d.geometry.SimplificationContraction.Average)
+        mesh.remove_degenerate_triangles()
+        mesh.remove_unreferenced_vertices()
+    print(f"[tsdf] simplifying the preview: {len(mesh.triangles):,} faces to {max_faces:,}", flush=True)
+    if len(mesh.triangles) > max_faces:
+        mesh = mesh.simplify_quadric_decimation(max_faces)
+    mesh.compute_vertex_normals()
+    return mesh
+
+
 def main():
     inp, out_dir, params = sys.argv[1], sys.argv[2], json.load(open(sys.argv[3]))
     t0 = time.time()
     d = np.load(inp)
+    n_gaussians = int(len(d["means"]))
     dev = torch.device("cuda")
     k = d["sh"].shape[1]
     g = {"means": torch.tensor(d["means"], device=dev, dtype=torch.float32),
@@ -239,9 +260,11 @@ def main():
         print(f"[tsdf] marching cubes failed on the GPU over {len(keys):,} voxel blocks at {voxel * 100:.1f} cm "
               f"({e}): try a coarser quality (or a larger voxel)", flush=True)
         os._exit(2)
+    del keys, attrs, d  # the voxel blocks and the splat: the preview's decimation needs the room (berlin: OOM at 28 GB)
     mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(v.astype(np.float64)),
                                      o3d.utility.Vector3iVector(f.astype(np.int32)))
     mesh.vertex_colors = o3d.utility.Vector3dVector(np.clip(c, 0, 1).astype(np.float64))
+    del v, f, c
     raw_faces = len(mesh.triangles)
     if raw_faces:
         clusters, counts, _ = mesh.cluster_connected_triangles()
@@ -252,13 +275,9 @@ def main():
     mesh.compute_vertex_normals()
     os.makedirs(out_dir, exist_ok=True)
     o3d.io.write_triangle_mesh(os.path.join(out_dir, "mesh.ply"), mesh)
-    preview = mesh
-    if len(mesh.triangles) > params["max_preview_faces"]:
-        print("[tsdf] simplifying the preview", flush=True)
-        preview = mesh.simplify_quadric_decimation(params["max_preview_faces"])
-        preview.compute_vertex_normals()
+    preview = preview_mesh(mesh, voxel, params["max_preview_faces"])
     o3d.io.write_triangle_mesh(os.path.join(out_dir, "preview.ply"), preview)
-    stats = {"views": n, "width": W, "height": H, "gaussians": int(len(d["means"])),
+    stats = {"views": n, "width": W, "height": H, "gaussians": n_gaussians,
              "median_depth_m": round(median_depth, 3), "voxel_m": round(voxel, 4), "max_depth_m": round(max_depth, 2),
              "depth_pixels": used, "faces_raw": raw_faces, "faces": len(mesh.triangles),
              "vertices": len(mesh.vertices), "preview_faces": len(preview.triangles),

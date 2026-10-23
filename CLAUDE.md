@@ -1653,7 +1653,12 @@ export).
     the piece grids get 2× the room, and a missing block is an error.
   - Views with nothing to fuse (1–2 stray pixels in range; 14 of 2574) are skipped: Open3D aborted the run on
     them ("No block is touched in TSDF volume").
-  - kladno_dira medium (11.6 cm voxel): 23.4M faces, 9 min. `jobs.Token.run`'s error line skips lines that are
+  - kladno_dira medium (11.6 cm voxel): 23.4M faces, 9 min.
+  - **Preview** (berlin, 2026-10-23: 24.3M faces, the process OOM-killed at 27.6 GB after writing mesh.ply): Open3D's
+    quadric decimation of the whole mesh needs ~1 KB per face, while the splat, the voxel blocks and the
+    marching-cubes arrays were still held. Now they are freed first, and `preview_mesh` clusters vertices first
+    (cell = voxel x sqrt(faces / 4 x max preview faces), colours averaged), then quadric-decimates to 300k: on that
+    mesh 10 s, peak 3.0 GB (the mesh itself). `jobs.Token.run`'s error line skips lines that are
     only colour codes (Open3D ends its red errors with one).
 - **Patch holes** (Splat mesh tab "Max hole size (m)" + **Patch holes**, stage `splatmesh-fill`; `python -m modelforge.splat_mesh PROJECT --fill [MAX]`; the user asked for the SfM
   mesh's option here, 2026-10-22). Marching cubes leaves real gaps (no Poisson surface underneath as in the SfM mesh),
