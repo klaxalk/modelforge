@@ -114,6 +114,10 @@ Open items, in priority order:
    notification when done): `docs/todo_job_queue.md`.
 10. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
     under a Gaussian budget): `docs/todo_splat_lod.md`.
+11. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
+    splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
+12. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
+    `docs/todo_splat_editing.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").

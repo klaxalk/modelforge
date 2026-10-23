@@ -14,7 +14,7 @@ kladno_dira.
   exports render at a reference exposure (the median).
 - On top: splatfacto's **bilateral grid** (`--pipeline.model.use-bilateral-grid True`; `splat.train_command` already
   sets its scheduler steps) for white balance / tone per photo, as a Splat tab option. It cannot remove hard shadows
-  (spatially varying), see the lighting plan in the user's notes / gui-todos.
+  (spatially varying): see `docs/todo_lighting.md`.
 - Check first: how much exposure actually varies in the user's flights (fixed exposure on kladno_dira per the user).
   Also useful for the mixed sunny / overcast project.
 
@@ -26,8 +26,20 @@ kladno_dira.
 - A Splat tab option (default after the A/B decides), stored in resume.json / tiles.json like the other settings.
 - A/B: held-out PSNR / SSIM / LPIPS, plus renders from heights between the flight's passes.
 
-## Also open (from earlier sessions, details in the user's notes)
+## Also open (earlier sessions; the user's main complaint: flat ground seen from one straight pass at ~45° stays soft)
 
-- Lower SH degree (1) for one-sided views; full resolution for 4K with splatfacto-big's split threshold (0.0005);
-  Difix3D+ (generative clean-up of off-path renders, then fine-tune).
-- The SfM-mesh depth prior's p90 errors of ~400 % on berlin tiles (mesh surface where photos see far things).
+Done for it already (CLAUDE.md "Flattening", "Starting Gaussians from the SfM mesh"): flattening 0.02, mesh seeds
+(default on); a far-field mask was tried and removed (it did not work well for the user). Not done, in the order
+suggested:
+
+1. Lower SH degree (1) for one-sided views: higher bands overfit view-dependent colour where every photo looks
+   from one side. splatfacto `--pipeline.model.sh-degree 1`; A/B on a tile.
+2. Full resolution ×1 for 4K with splatfacto-big's split gradient threshold (0.0005), so 4K detail gets Gaussians
+   (karlak: 4K default densification peaked at only 8.4 GB and grew no more Gaussians than ×2; CLAUDE.md "karlak
+   investigation").
+3. Difix3D+ (NVIDIA, 2025): a single-step diffusion model cleans renders from off-path views, which are added as
+   pseudo training views, then fine-tune. SuperGaussian was judged a poor fit.
+- Judging it needs a berlin tile viewed **off the path**: held-out photos from the same pass cannot show the softness.
+- The SfM-mesh depth prior has p90 errors of ~400 % on berlin tiles (median 1.6 %): the mesh has surface where the
+  photos see far things (Poisson closure, patched holes, scene edge). Not investigated; candidates: drop depth
+  targets beyond the mesh's trusted range, or per pixel where rendered and mesh depth disagree by far.
