@@ -220,18 +220,20 @@ def test_refine_shows_iterations_of_the_cap(tmp_path):
         app.server.stop()
 
 
-def test_revisit_edges_join_two_passes(tmp_path):
+@pytest.mark.parametrize("amp, sigma, loss", [(1.0, 0.05, "huber"), (3.0, 0.3, "huber"), (3.0, 0.3, "cauchy")])
+def test_revisit_edges_join_two_passes(tmp_path, amp, sigma, loss):
     """Two passes over the same scene, solved as separate chunks with drifting priors (0.8 units over the
-    flight): the pose graph alone leaves them as offset copies; loop-closure edges from the copies' offsets
-    join them, rigidly right up to the gauge."""
+    flight, `amp` times that): the pose graph alone leaves them as offset copies; loop-closure edges from the
+    copies' offsets join them, rigidly right up to the gauge. As Huber terms (the default); with the chunk edges'
+    Cauchy a large split carries almost no weight and the passes stay apart."""
     from modelforge.sfm import chunked
     from modelforge.sfm.priors import PriorSigmas
     from tests.test_multi_source import make_drift_scene
 
     def drift(t):
-        return np.array([0.3 * np.sin(t / 119 * np.pi), 0.0, 0.8 * t / 119])
+        return amp * np.array([0.3 * np.sin(t / 119 * np.pi), 0.0, 0.8 * t / 119])
     db_path, image_path, pri, gt = make_drift_scene(tmp_path, drift)
-    model = robust.PriorModel(abs_sigmas=PriorSigmas(0.05, 0.05, 0.2, 0.2), calibrate=False,
+    model = robust.PriorModel(abs_sigmas=PriorSigmas(sigma, sigma, 0.2, 0.2), calibrate=False,
                               estimate_systematic=False, use_relative=False, estimate_drift=False)
     cfg = chunked.Chunked(edge_steps=(1, 4))
     order = sorted(pri, key=lambda n: pri[n].order)
@@ -265,11 +267,31 @@ def test_revisit_edges_join_two_passes(tmp_path):
         if not loops or st["split_median_m"] < cfg.revisit_done_m:
             break
         init = {n: np.array(rec.frame(rec.image(i).frame_id).rig_from_world.params) for n, i in ids.items()}
-        chunked.pose_graph(init, edges + loops, pri, model)
+        if loss == "huber":
+            chunked.pose_graph(init, edges, pri, model, loops=loops)
+        else:
+            chunked.pose_graph(init, edges + loops, pri, model)
         apply()
     after = spread()
     print("split per pass", splits, "camera spread before", round(before, 3), "after", round(after, 3))
+    if loss == "cauchy":  # measured: split 0.31 -> 1.0 -> 1.98, spread 1.03 -> 1.03
+        assert splits[-1] > 0.2 and after > 0.5 * before
+        return
     assert splits[0] > 0.2 and splits[-1] < cfg.revisit_done_m  # offset copies first, then merged
-    # measured 0.34 -> 0.048 (a global BA with these tight priors stays split here: 0.34); the rest is the drift
-    # within each pass, which its chunk follows
+    # measured 0.34 -> 0.048 (amp 1, sigma 0.05; a global BA with these tight priors stays split: 0.34) and
+    # 1.03 -> 0.11 (amp 3, sigma 0.3); the rest is the drift within each pass, which its chunk follows
     assert before > 0.2 and after < 0.2 * before
+
+
+def test_auto_ba_mode_by_memory():
+    """auto: global while its estimated peak fits in the available RAM, else chunked; without match statistics by
+    the image count."""
+    from modelforge import pipeline
+    big = {"match": {"inlier_matches": 82_679_112}}  # kladno_dira, 5681 images: OOM-killed at 30 GB
+    small = {"match": {"inlier_matches": 14_712_904}}  # dira2k: 7.2 GB measured
+    assert pipeline.auto_ba_mode(big, 5681, available_gb=27)[0] == "chunked"
+    assert pipeline.auto_ba_mode(small, 2000, available_gb=27)[0] == "global"
+    assert pipeline.auto_ba_mode(small, 2000, available_gb=8)[0] == "chunked"
+    assert pipeline.auto_ba_mode({}, 3000, available_gb=27)[0] == "chunked"
+    assert pipeline.auto_ba_mode({}, 300, available_gb=27)[0] == "global"
+    assert 7.2 < pipeline.global_ba_need_gb(14_712_904) < 15

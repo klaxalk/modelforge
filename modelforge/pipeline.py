@@ -227,7 +227,45 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
 
 
 BA_MODES = ("auto", "global", "chunked")
-DEFAULT_BA_MODE = "global"  # the user's choice (2026-10-22): chunks leave revisits apart (kladno_dira, dira2k)
+# auto (the user's choice, 2026-10-23): global whenever it fits in RAM (chunks leave revisits apart: kladno_dira,
+# dira2k), chunked otherwise (kladno_dira, 5681 images: the global refine was OOM-killed at 30 GB in round 1)
+DEFAULT_BA_MODE = "auto"
+# a global refine's peak RSS per million verified (inlier) matches: dira2k 0.49 (2000 images), berlin 0.67 (2535),
+# kladno_dira 0.65 (2883), berlin in the GUI 0.72 (3142); kladno_dira at 5681 images (82.7M) did not fit in 31 GB
+GLOBAL_GB_PER_M_MATCHES = 0.7
+GLOBAL_GB_BASE = 1.0
+RAM_SHARE = 0.8  # of the memory available when refine starts
+
+
+def ram_available_gb():
+    """MemAvailable from /proc/meminfo (host-wide, also inside the container), None if unknown."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 2 ** 20
+    except OSError:
+        pass
+    return None
+
+
+def global_ba_need_gb(inlier_matches):
+    return GLOBAL_GB_BASE + GLOBAL_GB_PER_M_MATCHES * inlier_matches / 1e6
+
+
+def auto_ba_mode(report_data, n_images=None, available_gb=None, min_images=None):
+    """BA mode "auto": (mode, why) - global if its estimated peak (global_ba_need_gb of the match stage's inlier
+    matches) fits in RAM_SHARE of the available memory, else chunked. Without match stats or a memory reading: chunked
+    from min_images (chunked.Chunked.min_images) images on."""
+    inl = (report_data.get("match") or {}).get("inlier_matches")
+    avail = ram_available_gb() if available_gb is None else available_gb
+    if inl is None or avail is None:
+        min_images = min_images or chunked.Chunked.min_images
+        mode = "chunked" if n_images is not None and n_images >= min_images else "global"
+        return mode, f"no match statistics or memory reading: {mode} ({'≥' if mode == 'chunked' else '<'} {min_images} images)"
+    need = global_ba_need_gb(inl)
+    mode = "global" if need <= RAM_SHARE * avail else "chunked"
+    return mode, (f"global needs ~{need:.0f} GB ({inl / 1e6:.1f}M inlier matches), {avail:.0f} GB available "
+                  f"({RAM_SHARE:.0%} usable): {mode}")
 
 
 def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iterations, skip, refine_intrinsics,
@@ -384,7 +422,8 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
                 stats["revisits"].append(rs)
                 break
             cur = {name: _pose(rec, i) for name, i in ids.items()}
-            rs["pose_graph"] = chunked.pose_graph(cur, edges + loops, corrected, model, rejected)
+            rs["pose_graph"] = chunked.pose_graph(cur, edges, corrected, model, rejected, loops=loops,
+                                                  loop_loss=cfg.revisit_loss)
             stats["revisits"].append(rs)
             for name, i in ids.items():
                 rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(cur[name])
@@ -402,10 +441,36 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
             if inc < DRIFT_DONE_M:
                 break
         corrected = robust.corrected_priors(pri, model)
+    # a global BA pulls passes together that the pose graph leaves apart (each chunk keeps its own pass's drift):
+    # over all cameras, on thinned points, each after a fresh triangulation (which merges what came closer)
+    if cfg.global_passes and not (skip is not None and skip.is_set()):
+        stats["global"] = []
+        model.abs_rejected = rejected
+        for k in range(cfg.global_passes):
+            ev = {"round": k, "rounds": cfg.global_passes, "stage": "global"}
+            emit({"phase": "triangulate", **ev})
+            rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
+            jobs.check(token)
+            _, rs = chunked.revisit_edges(rec, pri, db_path, cfg)
+            if k and rs["split_median_m"] < cfg.revisit_done_m:
+                break
+            live = rec
+            g = chunked.global_ba(rec, corrected, model, cfg, token=token, skip=skip, loss_scale_px=rnd.loss_scale_px,
+                                  max_iterations=max_iterations, skip_round=skip_round,
+                                  on_iteration=lambda s: emit({"phase": "ba", **ev, "rec": live,
+                                                               "iteration": s.iteration, "cost": s.cost}))
+            jobs.check(token)
+            stats["global"].append({**rs, "ba": g})
+            log(f"refine: global pass {k + 1}: revisits split {rs['split_median_m']} m before (p90 {rs['split_p90_m']} m); "
+                f"BA on {g['points']:,} of {g['of_points']:,} points, {g['iterations']} it ({g['termination']})")
     if cfg.polish_sweeps and not (skip is not None and skip.is_set()):
         emit({"phase": "triangulate", "round": 0, "rounds": 1, "stage": "polish", "name": "posegraph", "rec": rec})
         rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "posegraph_tri"), rnd)
         jobs.check(token)
+        if stats.get("global"):  # what the global passes left
+            _, stats["global_split"] = chunked.revisit_edges(rec, pri, db_path, cfg)
+            log(f"refine: after the global passes, revisits split {stats['global_split']['split_median_m']} m "
+                f"(p90 {stats['global_split']['split_p90_m']} m)")
         win = {}
 
         def on_window(w, nw, sweep, r):
@@ -461,7 +526,11 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     db_path = os.path.join(project, "database.db")
     rec = refine.init_from_database(db_path, pri)
     n_images = rec.num_reg_images()
-    use_chunks = ba_mode == "chunked" or (ba_mode == "auto" and n_images >= cfg.min_images)
+    auto_why = None
+    if ba_mode == "auto":
+        auto, auto_why = auto_ba_mode(report.data, n_images, min_images=cfg.min_images)
+        log(f"refine: BA mode auto: {auto_why}")
+    use_chunks = ba_mode == "chunked" or (ba_mode == "auto" and auto == "chunked")
     results = {"init": refine.evaluate(rec, pri)}
     t_start = time.time()
     free_intrinsics = known_camera(project) is None
@@ -493,7 +562,7 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     elif skip is not None and skip.is_set():
         log("refine: skipped by the user")
     results["ba"] = {"max_iterations": max_iterations, "skipped": bool(skip is not None and skip.is_set()),
-                     "mode": "chunked" if use_chunks else "global",
+                     "mode": "chunked" if use_chunks else "global", **({"auto": auto_why} if auto_why else {}),
                      **({"chunk_size": cfg.size, "overlap": cfg.overlap, "calibration_images": len(subset)}
                         if subset else {})}
     # final triangulation at the last round's threshold (the tightest after a full run) so the
@@ -639,8 +708,9 @@ def main():
                     help="bundle-adjustment iteration cap per refine round (default 500; it stops earlier once the "
                          "cameras settle); 0 = no BA (poses at the priors, intrinsics at their start values)")
     ap.add_argument("--ba-mode", default=DEFAULT_BA_MODE, choices=BA_MODES,
-                    help="refine BA: global (all images at once; default), chunked (chunks on their own + a pose graph + "
-                         "a polish sweep, after calibrating the intrinsics on a subset), auto (chunked from 2500 images on)")
+                    help="refine BA: global (all images at once), chunked (chunks on their own + a pose graph + "
+                         "a polish sweep, after calibrating the intrinsics on a subset), auto (default: global if its "
+                         "estimated memory fits in the RAM available, else chunked)")
     ap.add_argument("--chunk-size", type=int, default=chunked.Chunked.size, help="images per chunk (default 500)")
     ap.add_argument("--chunk-overlap", type=int, default=chunked.Chunked.overlap,
                     help="images shared by consecutive chunks (default 100)")

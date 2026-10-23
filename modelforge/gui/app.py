@@ -413,10 +413,12 @@ class App:
                      "the intrinsics and the prior model are calibrated on 300 images spread over the flight; then "
                      "each chunk of consecutive images is refined on its own (its matches only, so memory does not "
                      "grow with the project), a pose graph (cameras only, no points) joins the chunks under the "
-                     "priors, and one sweep of windows polishes all images. auto: chunked from 2500 images on. Default "
-                     "global: it pulls revisits of a long flight together, chunks do not (2000 images: 0.05 m "
-                     "between passes vs 0.24 m chunked), but takes longer and more memory (67 vs 24 min, 7.2 vs "
-                     "3.9 GB there).")
+                     "priors, and one sweep of windows polishes all images. auto (default): global if it fits in the "
+                     "computer's RAM (estimated from the inlier matches, ~0.7 GB per million), else chunked; the line "
+                     "below shows the choice. On 2000 images both bring revisits of a long flight together (0.05 m "
+                     "median between passes; p90 0.15 global, 0.20 chunked); global took 67 min and 7.2 GB, chunked "
+                     "50 min and 3.9 GB.")
+            self.g_ba_auto = gui.add_markdown("")
             self.g_chunk_size = gui.add_number(
                 "Chunk size (images)", initial_value=chunked.Chunked.size, min=100, step=100,
                 hint="Images per chunk in a chunked refine; consecutive chunks share the overlap.")
@@ -878,7 +880,8 @@ class App:
         for name, show in (("refine", not video), ("reconstruct", video)):
             self.g_buttons[name].visible = show
         self.g_ba_iters.visible = self.g_skip.visible = self.g_skip_round.visible = not video
-        for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish, self.g_drop_isolated):
+        for g in (self.g_ba_mode, self.g_chunk_size, self.g_chunk_overlap, self.g_polish, self.g_drop_isolated,
+                  self.g_ba_auto):
             g.visible = not video
         self.g_mapper.visible = video
         self.g_dense_lidar.visible = self.g_splat_lidar.visible = self._kind() == "rosbag"
@@ -1072,7 +1075,30 @@ class App:
                     self.g_status_html.content = content
             except Exception:  # never let the title stop the GUI
                 pass
+            try:
+                tick = getattr(self, "_auto_tick", 0) + 1
+                self._auto_tick = tick
+                if tick % 5 == 1:
+                    self._show_ba_auto()
+            except Exception:  # noqa: BLE001
+                pass
             time.sleep(1.0)
+
+    def _show_ba_auto(self):
+        """Sparse tab, under BA mode: what auto would pick now (from the match stage's inlier matches and the RAM
+        available); a running refine keeps what it chose at its start."""
+        if self.g_ba_mode.value != "auto" or self.path is None:
+            text = ""
+        else:
+            try:
+                data = json.load(open(os.path.join(self.path, "report.json")))
+            except (OSError, ValueError):
+                data = {}
+            n = len(self.project.names) if self.project else None
+            mode, why = pipeline.auto_ba_mode(data, n)
+            text = f"<small>auto → **{mode}**: {why}</small>"
+        if text != self.g_ba_auto.content:
+            self.g_ba_auto.content = text
 
     def _set_move_speed(self, v):
         self.move_speed = max(0.01, v)
@@ -2334,6 +2360,11 @@ class App:
                 if rv:  # loop closures: passes over the same ground joined
                     mode += (f" · revisits split {rv[0]['split_median_m']} → {rv[-1]['split_median_m']} m median "
                              f"({len(rv)} passes)")
+                gs = r.get("chunked", {}).get("global_split")
+                if gs:  # the global BA passes after the pose graph
+                    mode += (f" · global BA ×{len(r['chunked']['global'])}: revisits split "
+                             f"{r['chunked']['global'][0]['split_median_m']} → {gs['split_median_m']} m median "
+                             f"(p90 {gs['split_p90_m']} m)")
                 drifts = [v["drift"] for k, v in sorted(r.items()) if isinstance(v, dict) and v.get("drift")]
                 drifts += r.get("chunked", {}).get("drift") or []
                 if drifts:  # the last estimate: revisits of a long flight brought together
@@ -2412,7 +2443,7 @@ class App:
         phase, rnd, rounds = ev["phase"], ev.get("round", 0), ev.get("rounds", 1)
         stage = ev.get("stage")
         what = {"calib": "calibration round", "chunk": f"chunk {ev.get('chunk', 0) + 1}/{ev.get('chunks', 1)}, round",
-                "polish": "polish"}.get(stage, "round")
+                "polish": "polish", "global": "global BA on thinned points, pass"}.get(stage, "round")
         step = f"{what} {rnd + 1}/{rounds}" if stage != "polish" else what
         if "chunks" in ev:  # chunked: the chunks fill the bar up to 85 %
             frac = (ev["chunk"] + (rnd + (phase == "ba") * 0.5) / max(1, rounds)) / ev["chunks"]
@@ -2433,7 +2464,8 @@ class App:
         elif phase == "triangulate":
             self._job["detail"] = f"{step}: triangulating …"
             if "chunks" not in ev:
-                self.g_progress.value = 88.0 if stage == "polish" else 100.0 * rnd / rounds
+                self.g_progress.value = (88.0 if stage == "polish" else 87.5 if stage == "global"
+                                         else 100.0 * rnd / rounds)
         elif phase == "ba":
             now = time.time()
             if now - self._last_live < 0.25:  # throttle scene updates

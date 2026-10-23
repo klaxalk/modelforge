@@ -922,11 +922,14 @@ Known limitations:
   Sparse tab "BA mode" (auto / global / chunked), "Chunk size", "Chunk overlap", "Polish sweeps";
   CLI `--ba-mode --chunk-size --chunk-overlap --polish-sweeps`. `modelforge/sfm/chunked.py`,
   `pipeline._refine_chunks`.
-  - **Default BA mode: global** (the user's choice, 2026-10-22; `pipeline.DEFAULT_BA_MODE`, GUI and CLI): chunked
-    refines left revisits apart on dira2k and kladno_dira. Chunked runs only when chosen (or auto from 2500 images).
-  - **auto = chunked from 2500 images on** (was 1000 until 2026-10-20: on dira2k, 2000 images, the chunked refine
-    left revisits 0.24 m apart (p90 0.88), global BA 0.05 m (p90 0.15) at 67 vs 24 min, 7.2 vs 3.9 GB; see "Large
-    flights: SfM splits revisits"). `stage_refine` then:
+  - **Default BA mode: auto = global if it fits in RAM, else chunked** (the user asked, 2026-10-23, after kladno_dira
+    at 5681 images was OOM-killed at 30 GB in round 1 of a global refine; `pipeline.auto_ba_mode`, GUI and CLI):
+    estimated peak = 1 GB + 0.7 GB per million inlier matches (report.json `match`; measured 0.49–0.72 on dira2k,
+    berlin, kladno_dira 2883; 5681 images = 82.7M → ~59 GB), global if ≤ 80 % of MemAvailable at refine start. Without
+    match stats: chunked from 2500 images (`Chunked.min_images`). The Sparse tab shows the choice under BA mode
+    ("auto → global: needs ~12 GB …", every 5 s); report `refine.ba.auto`. Before: global (2026-10-22, chunks left
+    revisits apart, fixed since: see below), auto = chunked from 2500 images (was 1000 until 2026-10-20).
+  - A chunked refine (`stage_refine`):
     1. calibrates intrinsics + prior model on a subset (`refine.calibration_subset`: 5 runs of 60
        consecutive images spread over the flight; rounds 0–1, global BA; snapshots `calib_N`);
     2. cuts the capture order into chunks (500 images, 100 shared with the next) and runs each
@@ -1314,13 +1317,25 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
     again (chunk edges + priors + these) → repeat until the median split < 5 cm. Log / state line "revisit pass k";
     History "revisits split a → b m". Synthetic two passes as separate chunks, drifting priors (`test_local_ba.py::
     test_revisit_edges_join_two_passes`): split 0.67 → 0 in one pass, camera spread 0.34 → 0.048 (a global BA with
-    those tight priors stays at 0.34). fullrun_test (no real revisits): final error unchanged. Not yet validated on
-    dira2k / kladno_dira.
+    those tight priors stays at 0.34). fullrun_test (no real revisits): final error unchanged.
   - **Loop closures measured on kladno_dira** (2026-10-21, chunked, old pairs): revisit split 1.53 → 0.73 → 0.76 m
     over 3 passes (p90 3.1 → 2.5 m), drift passes after it 0.74 → 0.51 m; no better than without. Likely cause: the
     revisit edges go through the same Cauchy (3σ) as the chunk edges, so a 1.5 m split at σ 3 cm (50σ) weighs ~0.4 %
     (untested), and the chunk edges (5 mm, 0.02°) keep each chunk's drift rigid. Tile 3 retrained on it: no better
     (held-out 16.3 dB, training views 16.6).
+  - **Fixed (2026-10-23): Huber loop edges + global passes on thinned points.**
+    1. Loop-closure edges are Huber (3, `Chunked.revisit_loss`; `pose_graph(loops=)`), chunk edges stay Cauchy
+       (Huber there brought nothing). Synthetic 3x drift, sigma 0.3: Cauchy split 0.31 → 1.98 (diverges), spread 1.03;
+       Huber split → 0, spread 0.11 (`test_revisit_edges_join_two_passes[...]`).
+    2. After the drift passes, `Chunked.global_passes` (2) x (triangulate all → `chunked.global_ba`: one BA over all
+       cameras on ~100 points per image (`global_points_per_image`, thin_points in place), weighted, intrinsics fixed,
+       stops at 90 % settled) → the polish. The revisit split is logged before each pass and after (report
+       `chunked.global`, `global_split`; History "global BA x2: revisits split a → b m"). On the 40-image synthetic
+       scene it hurts (its 400 points cannot hold the passes against the drifting priors); on real photos it works.
+    - **dira2k** (2000 images, `build/dira2k_chunk2`, `build/split_check.py`, pairs > 60 s): revisit passes 2.51 →
+      0.39 → 0.34 m, drift passes → 0.29, global passes → 0.12 → 0.078 m (own metric); like-for-like **0.05 / 0.20 m,
+      80 % merged** (chunked before 0.24 / 0.88, 64 %; global 0.05 / 0.15, 80 %). 50 min (old chunked 24, global 67),
+      peak 3.9 GB, final 0.59 px (global 0.574). The global BAs took 45 + 101 s. Not yet run on kladno_dira 5681.
   - **Global refine on kladno_dira** (2026-10-21, with terrain pairs, stopped after round 1 to diagnose): round 1 BA
     79 min (158 iterations, 15 CHOLMOD "not positive definite" step failures), point error 1.085 → 0.706 px
     median, revisits merged (far split 5 cm). Its log said 3.5 px: the after-BA stats were taken after the drift shift

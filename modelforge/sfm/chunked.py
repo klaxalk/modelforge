@@ -21,7 +21,14 @@ copies; the windows cannot pull them together either (kladno_dira, 2883 images: 
 every image pair far apart in capture order whose inlier matches landed on different 3D points gives an
 edge: its current relative pose with the second camera moved by the median offset between the copies
 (X_a - X_b). The pose graph is solved again with these edges, the chunk edges and the priors, and the
-loop repeats until the copies merge (`revisit_done_m`).
+loop repeats until the copies merge (`revisit_done_m`). The loop-closure edges are Huber, not Cauchy like the chunk
+edges: a 1.5 m split at sigma 3 cm is 50 sigma, where Cauchy (3) keeps ~0.4 % of the weight, so on kladno_dira the
+passes stayed apart (1.53 -> 0.73 -> 0.76 m); Huber keeps a constant pull, bounded per edge.
+
+What the pose graph cannot do, a global BA does (dira2k: revisits 0.05 m after global refine, 0.24 m chunked): after
+the drift passes, `global_passes` global BAs over all cameras on a thinned copy of the points
+(`global_points_per_image`, refine.thin_points; a full one does not fit in memory at ~6000 images), each after a
+fresh triangulation, which merges the copies that came closer.
 """
 
 import os
@@ -32,6 +39,7 @@ import numpy as np
 import pyceres
 import pycolmap
 
+from modelforge.sfm import refine
 from modelforge.sfm.refine import center_of
 
 
@@ -39,10 +47,8 @@ from modelforge.sfm.refine import center_of
 class Chunked:
     size: int = 500  # images per chunk
     overlap: int = 100  # images shared by consecutive chunks
-    # BA mode "auto": chunked from this many images on. Chunks + pose graph + windowed polish never pull two passes
-    # over the same ground together the way one global BA does (dira2k, 2000 images, revisit split median /
-    # p90: chunked 0.24 / 0.88 m, global 0.05 / 0.15 m), so global runs as long as it is affordable (dira2k:
-    # 67 min, 7.2 GB vs chunked 24 min, 3.9 GB; 4000 images: > 30 min for round 0 alone, ~20 GB)
+    # BA mode "auto" without match statistics: chunked from this many images on (with them: pipeline.auto_ba_mode,
+    # by the memory a global refine needs)
     min_images: int = 2500
     edge_steps: tuple = (1, 4, 16, 64)  # pose-graph edges i -> i + step within a chunk
     # pose-graph edge sigmas: a + b * baseline (position), c (rotation); far below the priors'
@@ -58,6 +64,9 @@ class Chunked:
     revisit_pos_m: float = 0.03  # edge sigmas: position floor (the offset's own uncertainty when larger), rotation
     revisit_rot_deg: float = 0.1
     revisit_done_m: float = 0.05  # stop when the median split of the far pairs is below this
+    revisit_loss: float = 3.0  # Huber scale of the loop-closure edges (whitened)
+    global_passes: int = 2  # triangulate all + global BA on thinned points, before the polish (0: none)
+    global_points_per_image: int = 100
 
 
 def chunks(order, size, overlap):
@@ -104,10 +113,12 @@ def chunk_edges(cfg, names, poses):
     return out
 
 
-def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge_loss=None):
-    """Solve all poses: chunk edges (RelativePosePriorCost) + absolute priors (AbsolutePosePriorCost,
-    Huber at 3 sigma, as in refine.prior_ba; `rejected` names get none). init: name -> params,
-    mutated in place. Returns the solver stats."""
+def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge_loss=None, loops=(),
+               loop_loss=3.0):
+    """Solve all poses: chunk edges (RelativePosePriorCost, Cauchy) + loop-closure edges (`loops`, the same
+    form, Huber at `loop_loss`) + absolute priors (AbsolutePosePriorCost, Huber at 3 sigma, as in
+    refine.prior_ba; `rejected` names get none). init: name -> params, mutated in place. Returns the solver
+    stats."""
     t0 = time.time()
     params = {n: np.array(p, float) for n, p in init.items()}
     problem = pyceres.Problem()
@@ -115,6 +126,9 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
     for a, b, i_from_j, cov in edges:
         cost = pycolmap.cost_functions.RelativePosePriorCost(cov, _rigid(i_from_j))
         problem.add_residual_block(cost, edge_loss, [params[a], params[b]])
+    for a, b, i_from_j, cov in loops:
+        cost = pycolmap.cost_functions.RelativePosePriorCost(cov, _rigid(i_from_j))
+        problem.add_residual_block(cost, pyceres.HuberLoss(loop_loss), [params[a], params[b]])
     n_abs = 0
     abs_loss = pyceres.HuberLoss(3.0)
     for n, p in params.items():
@@ -134,7 +148,7 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
     pyceres.solve(options, problem, summary)
     for n, p in params.items():
         init[n] = p
-    return {"cameras": len(params), "edges": len(edges), "abs_priors": n_abs, "iterations": summary.num_successful_steps + summary.num_unsuccessful_steps,
+    return {"cameras": len(params), "edges": len(edges), "loops": len(loops), "abs_priors": n_abs, "iterations": summary.num_successful_steps + summary.num_unsuccessful_steps,
             "initial_cost": summary.initial_cost, "final_cost": summary.final_cost,
             "termination": str(summary.termination_type).split(".")[-1], "seconds": round(time.time() - t0, 1)}
 
@@ -165,3 +179,16 @@ def revisit_edges(rec, priors, db_path, cfg):
     st = {"pairs": len(out), "split_median_m": round(float(np.median(split)), 3) if split else 0.0,
           "split_p90_m": round(float(np.percentile(split, 90)), 3) if split else 0.0}
     return out, st
+
+
+def global_ba(rec, priors, model, cfg, **kw):
+    """One BA over all cameras on about cfg.global_points_per_image points per image (refine.thin_points, deleted
+    from rec itself: the next triangulation starts afresh), the reprojection terms weighted by full / thinned
+    observations so images and priors balance as in a full BA; it ends when 90 % of the cameras settle
+    (refine.Local.global_settle). Intrinsics fixed (calibrated on the subset). kw go to refine.prior_ba."""
+    n_points, n_obs = rec.num_points3D(), rec.compute_num_observations()
+    deleted = refine.thin_points(rec, cfg.global_points_per_image)
+    weight = n_obs / max(1, rec.compute_num_observations())
+    g = refine.prior_ba(rec, priors, model, refine_intrinsics=False, image_weight=weight,
+                        settle=refine.Local().global_settle, **kw)
+    return {**g, "points": n_points - deleted, "of_points": n_points, "image_weight": round(weight, 2)}
