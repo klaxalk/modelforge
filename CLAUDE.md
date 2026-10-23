@@ -106,6 +106,10 @@ Open items, in priority order:
 5. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
 6. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). Plan and decisions: `docs/todo_multicamera.md`.
+7. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
+   heavy stages): `docs/todo_robustness.md`.
+8. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
+   anti-aliased rasterization): `docs/todo_splat_quality.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
