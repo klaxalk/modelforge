@@ -111,9 +111,11 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    the cameras, the priors keep ~all their redundancy), also with 60 points per scene; median rule vs VCE on seeds
    1–4: 0.67–1.07 vs 0.79–1.00 of the true σ, each within the draw's own scatter. Not implemented (an extra BA
    solve per round for nothing measurable).
-3. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, memory estimates before heavy stages;
-   **resume refine done** 2026-10-23: Sparse tab "Resume refine", CLI `--resume-refine`, a checkpoint after every
-   round / chunk / pass in `sparse/refine_resume.pkl`): `docs/todo_robustness.md`.
+3. **TODO: robustness of long jobs** (left: memory estimates before heavy stages, re-attaching a job after a GUI
+   restart). **Done 2026-10-23:** resume refine (Sparse tab "Resume refine", CLI `--resume-refine`, a checkpoint
+   after every round / chunk / pass in `sparse/refine_resume.pkl`); the GUI's in-process stages (features … refine,
+   export, SfM mesh, COLMAP dense) run in a job process of their own (`modelforge/worker.py`: an OOM kill takes only
+   the job; `MODELFORGE_INPROCESS=1` = as before): `docs/todo_robustness.md`.
 4. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
    notification when done): `docs/todo_job_queue.md`.
 

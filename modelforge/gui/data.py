@@ -337,14 +337,19 @@ class Project:
                         obs=Observations(os.path.join(d, "images.bin"), blocks, ids))
 
     def poses_from_reconstruction(self, rec):
-        """Registered poses only (cheap enough to call on every BA iteration)."""
+        """Registered poses only (cheap enough to call on every BA iteration). rec: a pycolmap.Reconstruction, or
+        {"poses": {image name: cam_from_world params}} from a job process (modelforge.worker)."""
         cams = Cameras.empty(len(self.names))
-        for image_id in rec.reg_image_ids():
-            img = rec.image(image_id)
-            i = self.index.get(img.name)
+        if isinstance(rec, dict):
+            items = rec["poses"].items()
+        else:
+            items = ((rec.image(i).name, rec.frame(rec.image(i).frame_id).rig_from_world.params)
+                     for i in rec.reg_image_ids())
+        for name, p in items:
+            i = self.index.get(name)
             if i is None:
                 continue
-            params = np.array(rec.frame(img.frame_id).rig_from_world.params)
+            params = np.array(p)
             R_cw = xyzw_to_rot(params[:4])
             cams.R_wc[i] = R_cw.T
             cams.centers[i] = -R_cw.T @ params[4:]

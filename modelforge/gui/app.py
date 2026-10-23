@@ -18,7 +18,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_mesh, splat_plan, splat_tiles
+from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -1552,42 +1552,45 @@ class App:
                 self._begin_stage(st, k, len(seq))
                 ts = time.time()
                 if st == "features":
-                    pipeline.stage_features(project, report, self._sparse_kind(), self.g_extractor.value,
-                                            int(self.g_max_features.value), bool(self.g_upright.value),
-                                            progress=self._on_features_progress)
+                    self._in_job("modelforge.pipeline:stage_features", kind=self._sparse_kind(),
+                              extractor=self.g_extractor.value, max_features=int(self.g_max_features.value),
+                              upright=bool(self.g_upright.value), callbacks={"progress": self._on_features_progress})
                 elif st == "reconstruct":
-                    pipeline.stage_reconstruct(project, report, progress=self._on_reconstruct_event,
-                                               token=self._token, mapper=self.g_mapper.value)
+                    self._in_job("modelforge.pipeline:stage_reconstruct", mapper=self.g_mapper.value, token=worker.TOKEN,
+                              callbacks={"progress": self._on_reconstruct_event})
                 elif st == "pairs":
-                    pipeline.stage_pairs(project, report, pri, self.project.meta, self.g_pairs.value,
-                                         int(self.g_neighbors.value))
+                    self._in_job("modelforge.pipeline:stage_pairs", pri=worker.PRIORS, meta=worker.META,
+                              mode=self.g_pairs.value, neighbors=int(self.g_neighbors.value))
                 elif st == "match":
-                    pipeline.stage_match(project, report, float(self.g_ratio.value), bool(self.g_guided.value),
-                                         int(self.g_min_inliers.value), token=self._token,
-                                         progress=lambda k, n: self._on_count_progress("match", "pair", k, n))
+                    self._in_job("modelforge.pipeline:stage_match", max_ratio=float(self.g_ratio.value),
+                              guided=bool(self.g_guided.value), min_inliers=int(self.g_min_inliers.value),
+                              token=worker.TOKEN,
+                              callbacks={"progress": lambda k, n: self._on_count_progress("match", "pair", k, n)})
                 elif st == "refine":
                     self._skip, self._skip_round = threading.Event(), threading.Event()
                     self.g_skip.disabled = self.g_skip_round.disabled = False
                     try:
-                        pipeline.stage_refine(project, report, pri, progress=self._on_refine_event, token=self._token,
-                                              max_iterations=int(self.g_ba_iters.value), skip=self._skip,
-                                              skip_round=self._skip_round, resume=self._refine_resume,
-                                              ba_mode=self.g_ba_mode.value,
-                                              chunks=chunked.Chunked(size=int(self.g_chunk_size.value),
-                                                                     overlap=int(self.g_chunk_overlap.value),
-                                                                     polish_sweeps=int(self.g_polish.value)))
+                        self._in_job("modelforge.pipeline:stage_refine", pri=worker.PRIORS, token=worker.TOKEN,
+                                  max_iterations=int(self.g_ba_iters.value), resume=self._refine_resume,
+                                  ba_mode=self.g_ba_mode.value,
+                                  chunks=chunked.Chunked(size=int(self.g_chunk_size.value),
+                                                         overlap=int(self.g_chunk_overlap.value),
+                                                         polish_sweeps=int(self.g_polish.value)),
+                                  callbacks={"progress": self._on_refine_event},
+                                  events={"skip": self._skip, "skip_round": self._skip_round})
                     finally:
                         self.g_skip.disabled = self.g_skip_round.disabled = True
                 elif st == "export":
-                    pipeline.stage_export(project, report, drop_isolated=bool(self.g_drop_isolated.value),
-                                          progress=self._on_export_progress)
+                    self._in_job("modelforge.pipeline:stage_export", drop_isolated=bool(self.g_drop_isolated.value),
+                              callbacks={"progress": self._on_export_progress})
                 elif st == "analyze":
                     from modelforge.sfm import overlap
                     if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
                         self._history("⚪ **analyze** · the overlap analysis of these images exists: reused")
                         continue
-                    overlap.analyze(project, kind=self._sparse_kind(), token=self._token, log=self._on_log,
-                                    progress=self._on_analysis_progress)
+                    self._in_job("modelforge.sfm.overlap:analyze", report=None, kind=self._sparse_kind(),
+                              token=worker.TOKEN, callbacks={"log": self._on_log,
+                                                             "progress": self._on_analysis_progress})
                     self.subset.refresh()
                 elif st == "semantic":
                     semantic.run(project, on_line=self._on_log, job=self._token,
@@ -1626,14 +1629,16 @@ class App:
                             self._refresh_dense()  # the colours so far were kept: show them
                             raise
                     elif st == "sfmmesh":
-                        sfm_mesh.run(project, on_line=self._on_sfm_mesh_line, token=self._token)
+                        self._in_job("modelforge.sfm_mesh:run", report=None, token=worker.TOKEN,
+                                  callbacks={"on_line": self._on_sfm_mesh_line})
                     else:
                         if not sfm_mesh.can_fill(project):  # none yet, or built before patching existed
                             self._on_log("sfm mesh: no mesh to patch yet: building it first")
-                            sfm_mesh.run(project, on_line=self._on_sfm_mesh_line, token=self._token)
-                        sfm_mesh.fill(project, max_hole=float(self.g_fill_max.value) or None,
-                                      on_line=self._on_sfm_mesh_line,
-                                      token=self._token)
+                            self._in_job("modelforge.sfm_mesh:run", report=None, token=worker.TOKEN,
+                                      callbacks={"on_line": self._on_sfm_mesh_line})
+                        self._in_job("modelforge.sfm_mesh:fill", report=None,
+                                  max_hole=float(self.g_fill_max.value) or None, token=worker.TOKEN,
+                                  callbacks={"on_line": self._on_sfm_mesh_line})
                     report = pipeline.Report(project)
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
@@ -1649,11 +1654,12 @@ class App:
                     if "splat" in self.g_mesh.options:
                         self.g_mesh.value = "splat"  # show the new mesh in the View tab
                 else:
-                    pipeline.stage_dense(project, report, st, methods, DENSE_QUALITY[self.g_dense_quality.value],
-                                         token=self._token, on_progress=self._on_stereo_progress,
-                                         lidar=bool(self.g_dense_lidar.value))
+                    self._in_job("modelforge.pipeline:stage_dense", stage=st, mesh_methods=methods,
+                              quality=DENSE_QUALITY[self.g_dense_quality.value], token=worker.TOKEN,
+                              lidar=bool(self.g_dense_lidar.value), callbacks={"on_progress": self._on_stereo_progress})
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
+                report = pipeline.Report(project)  # what the stage (in its job process) wrote
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "splatmesh", "splatmesh-fill", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
                          "all") or \
@@ -1702,6 +1708,20 @@ class App:
             self.g_stop.disabled = not self.ingest.running
             self.g_splat_pause.disabled = True
             self._sync_resume()
+
+    def _in_job(self, target, callbacks=None, events=None, report=worker.REPORT, **kwargs):
+        """One stage: target(project=, report=, **kwargs) in a job process of its own (modelforge.worker: an
+        out-of-memory kill takes only the job), or here when MODELFORGE_INPROCESS=1. kwargs may name worker.PRIORS /
+        META / TOKEN; report=None: the target takes none."""
+        kwargs = dict(kwargs, project=self.path, **({"report": report} if report is not None else {}))
+        if os.environ.get("MODELFORGE_INPROCESS") == "1":
+            import importlib
+            real = {worker.REPORT: lambda: pipeline.Report(self.path), worker.PRIORS: lambda: self.project.priors,
+                    worker.META: lambda: self.project.meta, worker.TOKEN: lambda: self._token}
+            kw = {k: real[v]() if isinstance(v, str) and v in real else v for k, v in kwargs.items()}
+            module, fn = target.split(":")
+            return getattr(importlib.import_module(module), fn)(**kw, **(callbacks or {}), **(events or {}))
+        worker.run(target, kwargs, callbacks, token=self._token, events=events, on_log=self._on_log)
 
     def pause_splat(self):
         """Pause button: like Stop (the trainer saves a checkpoint and ends), but splat.run skips the
@@ -2519,7 +2539,7 @@ class App:
                 # than converting the Reconstruction (8000 images: 8 s instead of 4.5 min under the lock)
                 if os.path.isdir(os.path.join(self.path, "sparse", name)):
                     self.snap = self.project.load_snapshot(name)
-                else:
+                elif not isinstance(ev.get("rec"), dict):  # in-process: the live Reconstruction
                     self.snap = self.project.snapshot_from_reconstruction(name, ev["rec"])
                 self._draw_points()
                 self._draw_cameras()
