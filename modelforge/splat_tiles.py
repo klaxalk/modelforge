@@ -283,6 +283,61 @@ def set_skipped(project, k, skip=True):
     return s
 
 
+MASK_STRIDE = 4  # loss masks: one ray per 4 x 4 pixels, then nearest upsampling
+
+
+def loss_masks(project, k, tile, maps, on_line=print, job=None):
+    """Tile k's loss masks (splat.run loss_masks): per training photo a PNG at the undistorted training camera, 0 where
+    the photo's SfM-mesh surface (the dense depth maps `maps`, depth_x<N>) lies outside the tile's region / cell +
+    margin, else 255 (pixels without a mesh hit stay in). Such pixels show other tiles, for which the tile has no
+    points: unmasked they grew fog in front of the camera (berlin tile 0: views with < 20 % of their pixels in the
+    tile had 21 % of their depth targets >= 50 % off, the others 0.3 %). -> tiles/tile_KK/loss_mask_x<N>/ (kept while
+    the maps, the regions and the tile's margin stay)."""
+    import cv2
+    from modelforge.export.mesh_depth import undistorted_camera
+    tdir = tile_dir(project, k)
+    n_down = int(os.path.basename(os.path.normpath(maps)).rsplit("_x", 1)[1])
+    out = os.path.join(tdir, f"loss_mask_x{n_down}")
+    os.makedirs(out, exist_ok=True)
+    t = json.load(open(os.path.join(tdir, "transforms.json")))
+    reg = os.path.join(project, REGIONS)
+    key = {"maps": os.path.getmtime(os.path.join(maps, "manifest.json")) if os.path.exists(
+        os.path.join(maps, "manifest.json")) else 0.0, "regions": os.path.getmtime(reg) if os.path.exists(reg) else 0.0,
+        "margin": tile["margin"], "region": tile.get("region"), "cell": tile.get("cell")}
+    man = os.path.join(out, "manifest.json")
+    if os.path.exists(man) and json.load(open(man)) != key:
+        for f in os.listdir(out):
+            os.remove(os.path.join(out, f))
+    K, W, H = undistorted_camera(t, n_down)
+    vs, us = np.mgrid[0:H:MASK_STRIDE, 0:W:MASK_STRIDE]
+    rays = np.stack([(us + 0.5 - K[0, 2]) / K[0, 0], (vs + 0.5 - K[1, 2]) / K[1, 1], np.ones(us.shape)], -1)
+    kept, made = [], 0
+    for f in t["frames"]:
+        jobs.check(job)
+        name = os.path.basename(f["file_path"])
+        dst = os.path.join(out, name + ".png")
+        src = os.path.join(maps, name + ".npy")
+        if os.path.exists(dst) or not os.path.exists(src):
+            continue
+        z = np.load(src).astype(np.float32)[::MASK_STRIDE, ::MASK_STRIDE]
+        c2w = np.array(f["transform_matrix"], float)
+        c2w[:3, 1:3] *= -1  # OpenGL -> OpenCV
+        X = (rays * z[..., None]) @ c2w[:3, :3].T + c2w[:3, 3]
+        m = z <= 0
+        hit = ~m
+        m[hit] = in_tile(project, tile, X[hit][:, :2], tile["margin"])
+        full = cv2.resize(m.astype(np.uint8) * 255, (W, H), interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(dst + ".part.png", full)
+        os.replace(dst + ".part.png", dst)
+        kept.append(float(m.mean()))
+        made += 1
+    json.dump(key, open(man, "w"))
+    if made:
+        on_line(f"splat: tile {k + 1}: loss masks for {made} photos (median {100 * np.median(kept):.0f} % of the pixels "
+                "in the tile)")
+    return out
+
+
 def in_tile(project, tile, xy, pad=0.0):
     """Positions (n, 2) inside the tile's region (layout covisibility) or cell, grown by pad."""
     if "region" in tile:
@@ -545,7 +600,7 @@ def _reset(project, k, tile):
 def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, on_progress=None, job=None,
         cache="auto", preview_every=None, on_snapshot=None, on_prepare=None, on_tile=None, pause=None,
         lidar_depth=None, photos=PHOTOS_PER_TILE, resume=False, round_steps=ROUND_STEPS, only=None, depth_cloud=None,
-        depth_dense=False, layout="rectangles", skip=None, regularize=None, seed_mesh=None):
+        depth_dense=False, layout="rectangles", skip=None, regularize=None, seed_mesh=None, tile_mask=False):
     """Train the project in tiles and merge them into splat/splat_enu.ply. Returns stats (report.json["splat"]).
     plan_args: splat_plan.suggest overrides (iterations, downscale, strategy, max_gaussians, camera_opt; auto
     values come from each tile). on_tile(k, n, target step, label): a tile starts (label "round r / R" or ""). on_progress(step, percent of the whole run). resume: continue a paused / stopped tiled run (its own settings, PROJECT/splat/resume.json).
@@ -555,7 +610,8 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     only: train just that tile (index) from scratch, in one go; the others keep their splats, and all are merged.
     skip: tile indices to leave out (written after a new set-up; None keeps tiles/skip.json as it is).
     regularize: the flattening for every tile (splat.run). seed_mesh: starting Gaussians from the SfM mesh, per
-    tile where its SfM points are thin (splat.run)."""
+    tile where its SfM points are thin (splat.run). tile_mask: leave each photo's pixels showing other tiles out of
+    the losses (loss_masks; needs the dense mesh prior's depth maps)."""
     from modelforge.export import splat_to_enu
     from modelforge.pipeline import Report
     job = job or jobs.Token()
@@ -587,7 +643,7 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
             _reset(project, k, state["tiles"][k])
         state.update(method=method, plan_args=dict(plan_args, downscale=down), extra=list(extra), cache=cache,
                      lidar_depth=lidar_depth, depth_cloud=depth_cloud, depth_dense=bool(depth_dense),
-                     regularize=regularize, seed_mesh=seed_mesh,
+                     regularize=regularize, seed_mesh=seed_mesh, tile_mask=bool(tile_mask),
                      round_steps=0 if only is not None else int(round_steps or 0),
                      only=only, round=1)
         json.dump(state, open(state_path, "w"), indent=1)
@@ -686,6 +742,8 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
                                   lidar_depth=lidar_depth, schedule=tile["schedule"], depth_cloud=depth_cloud,
                                   depth_dense=depth_dense, regularize=state.get("regularize"),
                                   seed_mesh=state.get("seed_mesh"),
+                                  loss_masks=(lambda maps: loss_masks(project, k, tile, maps, on_line, job))
+                                  if state.get("tile_mask") and depth_dense else None,
                                   **common)
         except splat.Paused:
             tile["status"] = "paused"

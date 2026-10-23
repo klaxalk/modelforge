@@ -21,6 +21,9 @@ Dense targets instead (dataparser --depth-maps: metadata["depth_files"], one z-d
 undistorted training camera, e.g. the SfM mesh rendered by modelforge/export/mesh_depth.py): the map of the training
 image (camera.metadata["cam_idx"]), scaled into nerfstudio's units and resized (nearest) to the current training
 resolution, replaces the projected points; the same loss over every pixel with a depth > 0.
+Loss masks (dataparser --loss-masks: metadata["mask_files"], same camera as the depth maps): pixels with mask 0 are
+left out of splatfacto's photometric loss (its batch["mask"]) and of the depth loss: a tile's pixels that show other
+tiles, which it has no points for (it would paint them as fog in front of the camera; berlin tile 0).
 Every lidar_report_every steps it prints "[lidar] step N: depth error median x% p90 y% within 5% z%"
 (over the steps since the last report), which splat.py puts into report.json.
 
@@ -115,6 +118,10 @@ class SplatfactoLidarModel(SplatfactoModel):
                 :self.config.lidar_max_points]]
         meta = self.kwargs.get("metadata") or {}
         self.depth_files, self.depth_scale = meta.get("depth_files"), float(meta.get("depth_scale", 1.0))
+        self.mask_files = meta.get("mask_files")
+        if self.mask_files:
+            print(f"[lidar] loss masks for {sum(f is not None for f in self.mask_files)} of {len(self.mask_files)} "
+                  "training images", flush=True)
         self.has_lidar = (xyz is not None and len(xyz) > 0) or bool(self.depth_files)
         # not persistent: checkpoints stay as splatfacto's (the live preview and ns-export read them)
         self.register_buffer("lidar_xyz", xyz.float() if xyz is not None and len(xyz) else torch.zeros(0, 3),
@@ -130,8 +137,21 @@ class SplatfactoLidarModel(SplatfactoModel):
               if self.has_lidar else "[lidar] no LiDAR points (transforms.json lidar_ply_file_path): "
               "training as plain splatfacto", flush=True)
 
+    def _loss_mask(self, camera):
+        """(H, W) bool loss mask of the training image at the undistorted training camera, or None."""
+        idx = (camera.metadata or {}).get("cam_idx")
+        f = self.mask_files[int(idx)] if self.mask_files and idx is not None else None
+        if f is None:
+            return None
+        import cv2
+        return torch.from_numpy(cv2.imread(f, cv2.IMREAD_GRAYSCALE) > 127)
+
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
+        if self.training and self.mask_files:
+            m = self._loss_mask(camera)
+            if m is not None:
+                out["mf_mask"] = m  # full training size, as batch["image"]: splatfacto downscales it
         if self.training and self.depth_files and out.get("depth") is not None:
             idx = (camera.metadata or {}).get("cam_idx")
             f = self.depth_files[int(idx)] if idx is not None else None
@@ -156,6 +176,14 @@ class SplatfactoLidarModel(SplatfactoModel):
         return out
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
+        m = outputs.get("mf_mask")
+        if m is not None and m.shape[:2] == batch["image"].shape[:2]:
+            batch = dict(batch, mask=m[:, :, None].float())
+            target = outputs.get("lidar_depth")
+            if target is not None:
+                H, W = target.shape[:2]
+                mm = F.interpolate(m[None, None].float(), size=(H, W), mode="nearest")[0, 0].to(target.device) > 0.5
+                outputs = dict(outputs, lidar_depth=torch.where(mm[:, :, None], target, torch.zeros_like(target)))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
         if self.training and self.config.flatten_lambda > 0:
             # only the smallest axis may give: with the middle one free, the optimizer shrank the ratio by

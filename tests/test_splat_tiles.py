@@ -399,3 +399,35 @@ def test_narrow_region_keeps_its_seeds():
     area = [int((reg.labels == t).sum()) for t in range(3)]
     assert min(area) > 0.8 * 30 * 60, area
     assert (reg.label(np.array([[100.0, 30]])) == 1).all()
+
+
+def test_loss_masks_keep_the_tiles_pixels(tmp_path):
+    """A camera 10 m above flat ground looking straight down, region 0 = x < 0: the mask keeps exactly the pixels whose
+    ground point lies in region 0 (+ margin), and pixels without a mesh hit."""
+    import cv2
+    from modelforge import tile_regions
+    p = str(tmp_path)
+    w, h, f = 64, 48, 40.0
+    tdir = splat_tiles.tile_dir(p, 0)
+    os.makedirs(tdir)
+    json.dump({"w": w, "h": h, "fl_x": f, "fl_y": f, "cx": w / 2, "cy": h / 2, "camera_model": "OPENCV",
+               "frames": [{"file_path": "images/a.jpg", "transform_matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 10],
+                                                                              [0, 0, 0, 1]]}]},
+              open(os.path.join(tdir, "transforms.json"), "w"))
+    labels = np.zeros((40, 40), np.int32)
+    labels[:, 20:] = 1  # lo = (-20, -20), 1 m cells: x >= 0 is region 1
+    tile_regions.Regions(np.array([-20.0, -20.0]), 1.0, labels).save(os.path.join(p, splat_tiles.REGIONS))
+    maps = os.path.join(p, "depth_x1")
+    os.makedirs(maps)
+    z = np.full((h, w), 10.0, np.float16)
+    z[:4] = 0  # no hit (sky): kept
+    np.save(os.path.join(maps, "a.jpg.npy"), z)
+    out = splat_tiles.loss_masks(p, 0, {"region": 0, "margin": 0.0}, maps, on_line=lambda m: None)
+    m = cv2.imread(os.path.join(out, "a.jpg.png"), cv2.IMREAD_GRAYSCALE) > 127
+    assert m.shape == (h, w)
+    s = splat_tiles.MASK_STRIDE
+    for v in range(4, h, s):
+        for u in range(0, w, s):
+            x = (u + 0.5 - w / 2) / f * 10  # the ground point of the sampled pixel
+            assert m[v, u] == (x < 0), (u, v, x)
+    assert m[:4].all()

@@ -25,6 +25,9 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     depth_maps: Optional[Path] = None
     """Dense depth targets instead of points: a folder of <image name>.npy z-depth maps (world units, 0 = none) at
     the undistorted training camera (modelforge/export/mesh_depth.py: the SfM mesh rendered)."""
+    loss_masks: Optional[Path] = None
+    """Per-image loss masks: a folder of <image name>.png (255 = in the losses, 0 = left out) at the undistorted
+    training camera, as the depth maps (modelforge splat_tiles.loss_masks: a tile's pixels showing other tiles)."""
     seed_ply: Optional[Path] = None
     """Extra starting points with normals and colours (modelforge sfm_mesh.seed_points: the SfM mesh where the SfM
     points are thin), appended to the SfM points; the model starts them flat in the surface (metadata
@@ -51,6 +54,10 @@ class LidarDataParser(Nerfstudio):
                                                           (xyz @ T[:, :3].T + T[:, 3]) * out.dataparser_scale])
                 out.metadata["points3D_rgb"] = torch.cat([out.metadata["points3D_rgb"], rgb])
                 out.metadata["mf_seed_normals"] = nrm @ T[:, :3].T  # rotation only: directions
+        if self.config.loss_masks:
+            folder = Path(self.config.loss_masks)
+            files = [str(folder / (Path(f).name + ".png")) for f in out.image_filenames]
+            out.metadata["mask_files"] = [f if Path(f).exists() else None for f in files]
         if self.config.depth_maps:
             folder = Path(self.config.depth_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]
