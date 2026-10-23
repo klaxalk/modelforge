@@ -2,7 +2,9 @@
 
 Sets the title ModelForge and our icon (docker/favicon.svg), and adds a script that follows a hidden element of the
 GUI (#mf-status, `App._status_html`): data-title becomes the tab title, data-state (idle / running / failed) picks
-the icon (running: a green dot, failed: a red one).
+the icon (running: a green dot, failed: a red one), and a change of data-notice ("<n>|<text>", `App._notice`: a queue
+entry or the queue ended) shows a browser notification (the browser asks for permission after the first click in the
+page; notifications need https or localhost).
 
 Usage: python patch_viser_page.py VISER_INDEX_HTML FAVICON_SVG
 """
@@ -12,11 +14,16 @@ from urllib.parse import quote
 
 BADGES = {"idle": "", "running": "#2ecc71", "failed": "#ff4d4f"}
 
-SCRIPT = """<script>(()=>{const I=%s;let s0="";const f=()=>{const e=document.getElementById("mf-status");if(!e)return;
+SCRIPT = """<script>(()=>{const I=%s;let s0="",n0=null;const f=()=>{const e=document.getElementById("mf-status");if(!e)return;
 const t=e.dataset.title||"ModelForge";if(document.title!==t)document.title=t;const s=e.dataset.state||"idle";
-if(s!==s0){s0=s;const l=document.getElementById("mf-icon");if(l)l.href=I[s]||I.idle;}};
+if(s!==s0){s0=s;const l=document.getElementById("mf-icon");if(l)l.href=I[s]||I.idle;}
+const n=e.dataset.notice||"";if(n0===null){n0=n;}else if(n!==n0){n0=n;const k=n.indexOf("|");
+if(k>=0&&window.Notification&&Notification.permission==="granted"){try{new Notification("ModelForge",
+{body:n.slice(k+1),icon:I.idle});}catch(x){}}}};
+document.addEventListener("click",()=>{if(window.Notification&&Notification.permission==="default")
+Notification.requestPermission();},{once:true});
 new MutationObserver(f).observe(document.documentElement,{subtree:true,childList:true,attributes:true,
-attributeFilter:["data-title","data-state"]});setInterval(f,2000);})()</script>"""
+attributeFilter:["data-title","data-state","data-notice"]});setInterval(f,2000);})()</script>"""
 
 
 def icon(svg, colour):

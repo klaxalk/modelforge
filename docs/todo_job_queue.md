@@ -1,6 +1,7 @@
 # TODO: job queue with completion notices
 
-Priority: **medium**. Status: proposed 2026-10-23, not started; the user will ask for it.
+Priority: **medium**. Status: **first version done 2026-10-23** (see the end); open: entries of other projects
+without switching the view, a memory check per entry, a command hook per notice.
 
 ## Why
 
@@ -37,3 +38,23 @@ user started (Run full pipeline covers one fixed sequence of one project).
 
 Best after `docs/todo_robustness.md` §1 (jobs in their own process); a first version can queue within the current
 single-job model (one entry at a time, the project switched when needed).
+
+## Done: first version (2026-10-23)
+
+`modelforge/gui/jobqueue.py`, right panel folder **Queue** (above History): Stage (Run full pipeline, Run SfM (all),
+Refine, Resume refine, Export, SfM mesh (all), Set up tiles, Train splat, Resume splat, Splat mesh, Semantic features,
+COLMAP dense (all)), **Add to queue** (the open project + the tabs' settings now), **Start queue** / **Pause queue**,
+"On failure: go on" (skip the failed project's other entries; off: stop), Entry k: Up / Remove / Retry / Clear
+finished.
+- Settings: every input created in the right panel's tabs (Sparse, Sparse Mesh, Splat, Splat mesh, Dense; recorded
+  while `_build_gui` builds them, `App._settings_names`, 44 on fullrun_test) plus the Search tab's "Include in Run full
+  pipeline"; put back by `App._apply_settings` after the entry's project is opened (opening resets some of them).
+  Not included: Images used (the subset panel keeps its choice per project).
+- Runner: a thread starts the next pending entry when no job runs: opens its project if needed, applies its
+  settings, `run_stage`; the end is read from the state line (✅ done, ⏹ / ⏸ stopped = the queue pauses, ❌ failed).
+  `ROOT/.modelforge_queue.json`; after a GUI restart a running entry is "interrupted" and the queue waits.
+- Notices: `App._notice(text)` (an entry or the queue ended) adds a History line and sets `#mf-status data-notice`;
+  the page script (`docker/patch_viser_page.py`) shows a browser notification when it changes (permission asked
+  after the first click; needs https or localhost).
+- Tests: `tests/test_jobqueue.py` (file, restart, policies, editing; two projects queued with different Pairs settings
+  run with their own).

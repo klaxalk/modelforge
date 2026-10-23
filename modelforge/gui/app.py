@@ -25,6 +25,7 @@ from modelforge.sfm import chunked, features, reconstruct
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.hardware import HardwarePanel
+from modelforge.gui.jobqueue import QueuePanel
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
@@ -121,6 +122,22 @@ PHOTO_PANEL_WIDTH = 420  # px, the Photo window right of the quick bar
 SELECTED_COLOR = (255, 255, 255)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
+
+
+def _is_input(h):
+    """A viser input handle whose value is a setting (not a button, text output, image, progress bar)."""
+    name = type(h).__name__
+    return hasattr(h, "value") and any(k in name for k in ("Number", "Checkbox", "Dropdown", "Slider", "Text", "Vector",
+                                                            "Rgb")) and "Markdown" not in name
+
+
+def _jsonable(v):
+    import numpy as _np
+    if isinstance(v, (tuple, list, _np.ndarray)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, _np.generic):
+        return v.item()
+    return v
 
 
 def _fmt_s(sec):
@@ -393,6 +410,7 @@ class App:
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
 
+        before = set(vars(self))  # the right panel's inputs: the settings a queued entry keeps (_settings)
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
@@ -744,6 +762,8 @@ class App:
                 b.on_click(lambda _, s=stage: self.run_stage(s))
                 self.g_buttons[stage] = b
 
+        self._settings_names = [n for n in vars(self) if n not in before and n.startswith("g_")
+                                and _is_input(getattr(self, n))]
         with self.left.add_tab("Export", viser.Icon.DOWNLOAD):
             self.g_export_md = gui.add_markdown("")
             with gui.add_folder("Mesh"):
@@ -785,6 +805,8 @@ class App:
                                            hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
                                                 "for every open browser. Remembered across restarts.")
             self.g_dark.on_update(lambda _: self.set_dark(self.g_dark.value))
+        with gui.add_folder("Queue", expand_by_default=False):
+            self.queue = QueuePanel(self, gui)
         with gui.add_folder("History", expand_by_default=False):
             self.g_history = gui.add_markdown("_nothing run in this session_")
         # bottom windows: the log and the hardware monitor, floating at the bottom of the 3D view (viser
@@ -1078,8 +1100,36 @@ class App:
         else:
             state, what = "idle", "idle"
         title = " · ".join(t for t in ("ModelForge", what, name) if t)
-        return (f'<span id="mf-status" data-state="{state}" data-title="{html.escape(title, quote=True)}">'
-                '</span>')
+        notice = getattr(self, "_notice_last", "")  # "<n>|<text>": a new n = a browser notification
+        return (f'<span id="mf-status" data-state="{state}" data-title="{html.escape(title, quote=True)}" '
+                f'data-notice="{html.escape(notice, quote=True)}"></span>')
+
+    def _notice(self, text):
+        """A browser notification (docker/patch_viser_page.py; in browsers that allowed them) and a History line."""
+        self._notice_n = getattr(self, "_notice_n", 0) + 1
+        self._notice_last = f"{self._notice_n}|{text}"
+        self._history(f"🔔 {text}")
+
+    def _settings(self):
+        """The right panel's inputs (Sparse … Dense tabs) and the Search tab's "Include in Run full pipeline": what a
+        queued entry keeps (gui/jobqueue.py)."""
+        out = {n: _jsonable(getattr(self, n).value) for n in self._settings_names}
+        out["semantic.g_in_all"] = bool(self.semantic.g_in_all.value)
+        return out
+
+    def _apply_settings(self, d):
+        """Put settings of _settings back into the tabs (those that no longer exist or no longer fit are left)."""
+        for n, v in d.items():
+            h = getattr(self.semantic, n.split(".", 1)[1], None) if n.startswith("semantic.") else getattr(self, n, None)
+            if h is None or not _is_input(h):
+                continue
+            try:
+                if isinstance(v, list):
+                    v = tuple(v)
+                if h.value != v:
+                    h.value = v
+            except Exception:  # noqa: BLE001 - e.g. a dropdown option this project lacks
+                pass
 
     def _watch_status(self):
         """Keeps the tab title / icon element in step with the run state (only sends changes)."""
