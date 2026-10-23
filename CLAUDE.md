@@ -104,6 +104,8 @@ Open items, in priority order:
 4. Calibration is biased low (~0.7×) in weakly constrained directions. The
    fix is redundancy-aware variance component estimation.
 5. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+6. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
+   common training resolution). Plan and decisions: `docs/todo_multicamera.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
