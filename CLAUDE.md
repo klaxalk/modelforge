@@ -112,6 +112,8 @@ Open items, in priority order:
    anti-aliased rasterization): `docs/todo_splat_quality.md`.
 9. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
    notification when done): `docs/todo_job_queue.md`.
+10. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
+    under a Gaussian budget): `docs/todo_splat_lod.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
