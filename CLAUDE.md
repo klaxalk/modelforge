@@ -102,7 +102,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    images vs 60 s without loops, one core, unlogged): `docs/todo_posegraph_speed.md`.
 
 **Medium**
-- (none)
+1. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
+   anti-aliased rasterization, the depth prior outliers): `docs/todo_splat_quality.md`.
 
 **Low**
 1. Run the full clip (all 300 images) through dense and splat (quality
@@ -117,15 +118,13 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    common training resolution). Plan and decisions: `docs/todo_multicamera.md`.
 7. **TODO: robustness of long jobs** (heavy jobs out of the GUI process, resume refine, memory estimates before
    heavy stages): `docs/todo_robustness.md`.
-8. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
-   anti-aliased rasterization, the depth prior outliers): `docs/todo_splat_quality.md`.
-9. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
+8. **TODO: job queue with completion notices** (queue stages of any project with their settings, browser
    notification when done): `docs/todo_job_queue.md`.
-10. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
+9. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
    under a Gaussian budget): `docs/todo_splat_lod.md`.
-11. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
+10. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
    splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
-12. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
+11. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
    `docs/todo_splat_editing.md`.
 
 The user's working preferences, as seen so far:
