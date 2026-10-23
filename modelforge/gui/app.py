@@ -1465,7 +1465,7 @@ class App:
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         self.running = True
-        self.semantic.unload(stage)  # reconstructions get the memory; the text model loads again on demand
+        self.semantic.unload(stage if isinstance(stage, str) else " + ".join(stage))  # reconstructions get the memory; the text model loads again on demand
         self._token = jobs.Token()
         self.g_stop.disabled = False
         self._run_id = getattr(self, "_run_id", 0) + 1
@@ -1489,7 +1489,10 @@ class App:
             report = pipeline.Report(project)
             pri = self.project.priors
             sfm = pipeline.sfm_stages(self._sparse_kind())
-            if stage == "all":  # Run SfM (all) stops at export; the full pipeline builds the SfM mesh too
+            given = list(stage) if isinstance(stage, (list, tuple)) else None  # a stage list (main's --run)
+            if given:
+                stage, seq = " + ".join(given), given
+            elif stage == "all":  # Run SfM (all) stops at export; the full pipeline builds the SfM mesh too
                 seq, skipped = list(sfm) + ["sfmmesh", "sfmmesh-fill"], []  # the splat's depth prior, holes patched
                 if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
                     seq = ["analyze", "images"] + seq
@@ -1637,7 +1640,7 @@ class App:
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "splatmesh", "splatmesh-fill", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
                          "all") or \
-                    stage in pipeline.DENSE_STAGES:
+                    stage in pipeline.DENSE_STAGES or given:
                 self._refresh_dense()
             self.refresh_snapshot_list(select="main" if stage in ("refine", "reconstruct", "sfm", "all", "export")
                                        else None)
@@ -2846,6 +2849,9 @@ def main():
                          "project under --root")
     ap.add_argument("--root", default="data", help="folder holding the projects (default data/)")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--run", metavar="STAGE,STAGE",
+                    help="run these stages of the project at start, with the tabs' defaults, as one job shown in "
+                         "the GUI (e.g. sfmmesh,sfmmesh-fill,splat,sfmmesh-colour)")
     args = ap.parse_args()
     root = os.path.abspath(args.root)
     if args.project:
@@ -2856,6 +2862,10 @@ def main():
     app._remember_project()  # here, not in App(): tests open projects too
     app.semantic.preload()  # the text model loads in the background, ready for the first search
     print(f"modelforge GUI on http://localhost:{args.port}", flush=True)
+    if args.run:
+        stages = tuple(st.strip() for st in args.run.split(",") if st.strip())
+        print(f"running {', '.join(stages)}", flush=True)
+        app.run_stage(stages)
     app.serve_forever()
 
 

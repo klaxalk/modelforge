@@ -91,6 +91,17 @@ def test_run_mesh_stage_from_gui(app, project):
     assert os.path.exists(os.path.join(project, "dense", "preview-delaunay.ply"))
 
 
+def test_run_a_stage_list(app, project):
+    """A tuple of stages (main's --run) runs as one job: here the SfM mesh, then its holes patched."""
+    app.run_stage(("sfmmesh", "sfmmesh-fill"))
+    t0 = time.time()
+    while app.running and time.time() - t0 < 300:
+        time.sleep(0.2)
+    assert "sfmmesh + sfmmesh-fill finished" in app.g_state.content, app.g_state.content
+    assert os.path.exists(os.path.join(project, "sfmmesh", "mesh.ply"))
+    assert os.path.exists(os.path.join(project, "sfmmesh", "patched.npy"))
+
+
 def test_features_progress_in_the_state_line(app):
     """Feature extraction shows "image k / n · name" while it runs (COLMAP's database is polled)."""
     details = []
