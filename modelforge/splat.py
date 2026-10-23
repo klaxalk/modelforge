@@ -199,7 +199,9 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     latest checkpoint there (a paused / stopped run; `run` trains through nsplugin/mf_train.py, which
     makes that work for splatfacto). depth_cloud: the depth loss's points from this ply instead (absolute path;
     the SfM mesh, sfm_mesh.depth_cloud). depth_maps: dense depth targets instead, a folder of per-image maps
-    (mesh_depth_maps). regularize: {"flatten": w} for the plugin (see regularizing); needs the -lidar
+    (mesh_depth_maps). regularize: {"flatten": w, "exposure": bool, "bilateral": bool} (see regularizing; exposure:
+    each render scaled by its photo's relative exposure, transforms.json "mf_exposure"; bilateral: splatfacto's
+    bilateral grid per photo, plain splatfacto too); flatten and exposure need the -lidar
     method (lidar_depth 0 = depth loss off). seed_ply: extra starting points (sfm_mesh.seed_points), started flat;
     lidar-data only. loss_masks: a folder of per-image masks at the undistorted training camera (splat_tiles.loss_masks:
     a tile's pixels outside it are left out of the losses); lidar-data only."""
@@ -231,6 +233,10 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         reg = regularize or {}
         if reg.get("flatten"):
             cmd += ["--pipeline.model.flatten-lambda", f"{float(reg['flatten']):g}"]
+        if reg.get("exposure"):
+            cmd += ["--pipeline.model.use-exposure", "True"]
+    if (regularize or {}).get("bilateral"):
+        cmd += ["--pipeline.model.use-bilateral-grid", "True"]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
     # auto-picking a leftover images_2/ for images wider than 1600 px
     parser = "nerfstudio-data" if lidar_depth is None else "lidar-data"
@@ -250,7 +256,8 @@ FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian comple
 
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
-    return bool(regularize) and float(regularize.get("flatten") or 0) > 0  # older records may name far_mask: gone
+    return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or bool(regularize.get("exposure")))
+    # older records may name far_mask: gone
 
 
 def mesh_depth_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
@@ -452,7 +459,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
             f"(viewer on http://localhost:{VIEWER_PORT})")
     if regularizing(regularize):
         reg = regularize
-        on_line(f"splat: flattening weight {float(reg['flatten']):g}")
+        on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
+                + (", exposure from the metadata" if reg.get("exposure") else ""))
     stop = threading.Event()
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
@@ -648,9 +656,13 @@ def main():
     ap.add_argument("--tile-mask", action="store_true",
                     help="tiled runs: leave each photo's pixels that show other tiles out of the losses (needs "
                          "--mesh-prior dense)")
+    ap.add_argument("--exposure", action="store_true",
+                    help="scale each training render by its photo's relative exposure from the DJI metadata "
+                         "(transforms.json mf_exposure; the export writes it)")
+    ap.add_argument("--bilateral-grid", action="store_true", help="splatfacto's bilateral grid per photo (colour / tone)")
     args, extra = ap.parse_known_args()
-    reg = {"flatten": args.flatten}
-    reg = reg if regularizing(reg) else None
+    reg = {"flatten": args.flatten, "exposure": args.exposure, "bilateral": args.bilateral_grid}
+    reg = reg if regularizing(reg) or args.bilateral_grid else None
     project = os.path.abspath(args.project)
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None

@@ -54,6 +54,10 @@ class LidarDataParser(Nerfstudio):
                                                           (xyz @ T[:, :3].T + T[:, 3]) * out.dataparser_scale])
                 out.metadata["points3D_rgb"] = torch.cat([out.metadata["points3D_rgb"], rgb])
                 out.metadata["mf_seed_normals"] = nrm @ T[:, :3].T  # rotation only: directions
+        # relative exposure per photo (modelforge/exposure.py, transforms.json frames "mf_exposure"; 1 = the median)
+        gain = {Path(f["file_path"]).name: float(f["mf_exposure"]) for f in meta.get("frames", []) if "mf_exposure" in f}
+        if gain:
+            out.metadata["exposure_gains"] = [gain.get(Path(f).name, 1.0) for f in out.image_filenames]
         if self.config.loss_masks:
             folder = Path(self.config.loss_masks)
             files = [str(folder / (Path(f).name + ".png")) for f in out.image_filenames]

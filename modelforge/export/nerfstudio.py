@@ -41,6 +41,11 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
         intr = {"camera_model": "OPENCV", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
                 "k1": k1, "k2": k2, "p1": p1, "p2": p2}
 
+    from modelforge import exposure
+    try:
+        gains = {k: v["gain"] for k, v in exposure.per_image(project).items()}
+    except Exception:  # noqa: BLE001 - metadata unreadable (moved video, ...): no exposure gains
+        gains = {}
     frames = []
     for image_id in sorted(rec.reg_image_ids(), key=lambda i: rec.image(i).name):
         img = rec.image(image_id)
@@ -51,7 +56,7 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
         c2w = np.linalg.inv(w2c)
         c2w[0:3, 1:3] *= -1  # OpenCV -> OpenGL camera axes
         frames.append({"file_path": f"{image_dir}/{img.name}", "transform_matrix": c2w.tolist(),
-                       "colmap_im_id": int(image_id)})
+                       "colmap_im_id": int(image_id)} | ({"mf_exposure": gains[img.name]} if img.name in gains else {}))
 
     n_lidar = 0
     from modelforge.export import lidar as lidar_mod

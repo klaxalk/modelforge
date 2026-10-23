@@ -97,6 +97,9 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     lidar_report_every: int = 500
     flatten_lambda: float = 0.0
     """weight of mean(smallest / middle scale): flat Gaussians, no needles (0 = off)"""
+    use_exposure: bool = False
+    """scale each training render by the photo's relative exposure (dataparser metadata "exposure_gains", from the
+    DJI metadata), in linear light: the Gaussians hold the colours at the median exposure"""
 
 
 class SplatfactoLidarModel(SplatfactoModel):
@@ -119,6 +122,12 @@ class SplatfactoLidarModel(SplatfactoModel):
         meta = self.kwargs.get("metadata") or {}
         self.depth_files, self.depth_scale = meta.get("depth_files"), float(meta.get("depth_scale", 1.0))
         self.mask_files = meta.get("mask_files")
+        self.exposure_gains = meta.get("exposure_gains") if self.config.use_exposure else None
+        if self.config.use_exposure:
+            g = np.array(self.exposure_gains or [1.0])
+            print(f"[lidar] exposure gains for {len(self.exposure_gains or [])} training images (x{g.min():.2f} .. "
+                  f"x{g.max():.2f})" if self.exposure_gains else "[lidar] use_exposure: no exposure gains in "
+                  "transforms.json (frames mf_exposure)", flush=True)
         if self.mask_files:
             print(f"[lidar] loss masks for {sum(f is not None for f in self.mask_files)} of {len(self.mask_files)} "
                   "training images", flush=True)
@@ -148,6 +157,12 @@ class SplatfactoLidarModel(SplatfactoModel):
 
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
+        if self.training and self.exposure_gains:
+            idx = (camera.metadata or {}).get("cam_idx")
+            if idx is not None:
+                g = float(self.exposure_gains[int(idx)])
+                lin = out["rgb"].clamp(1e-6, 1) ** 2.2  # sRGB-like camera response, approximated by a gamma
+                out["rgb"] = (lin * g).clamp(1e-6, 1) ** (1 / 2.2)
         if self.training and self.mask_files:
             m = self._loss_mask(camera)
             if m is not None:
