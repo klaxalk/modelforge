@@ -237,6 +237,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
             cmd += ["--pipeline.model.use-exposure", "True"]
     if (regularize or {}).get("bilateral"):
         cmd += ["--pipeline.model.use-bilateral-grid", "True"]
+    if (regularize or {}).get("antialiased"):  # Mip-Splatting's 2D filter (gsplat)
+        cmd += ["--pipeline.model.rasterize-mode", "antialiased"]
     # the dataparser subcommand goes last; an explicit factor (also 1) stops nerfstudio from
     # auto-picking a leftover images_2/ for images wider than 1600 px
     parser = "nerfstudio-data" if lidar_depth is None else "lidar-data"
@@ -660,9 +662,11 @@ def main():
                     help="scale each training render by its photo's relative exposure from the DJI metadata "
                          "(transforms.json mf_exposure; the export writes it)")
     ap.add_argument("--bilateral-grid", action="store_true", help="splatfacto's bilateral grid per photo (colour / tone)")
+    ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
-    reg = {"flatten": args.flatten, "exposure": args.exposure, "bilateral": args.bilateral_grid}
-    reg = reg if regularizing(reg) or args.bilateral_grid else None
+    reg = {"flatten": args.flatten, "exposure": args.exposure, "bilateral": args.bilateral_grid,
+           "antialiased": args.antialiased}
+    reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     project = os.path.abspath(args.project)
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None
