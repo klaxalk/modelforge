@@ -51,6 +51,7 @@ INTERMEDIATE = (
     ("images_*", "downscaled frames for splat training"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("splat/lod", "splat level of detail (View; built again when shown)"),
+    ("sky", "sky masks for splat training"),
     ("previous", "archived earlier extractions"),
     ("extracted", "all extracted frames (a subset of them is in images/)"),
     ("analysis", "overlap analysis of the extracted frames (features + matches)"),

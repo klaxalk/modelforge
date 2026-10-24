@@ -314,6 +314,9 @@ def test_splat_lidar_command():
     assert seeded[seeded.index("--seed-ply") + 1] == "/x/seeds.ply" and seeded.index("--seed-ply") > \
         seeded.index("lidar-data")  # a dataparser option
     assert reg[reg.index("--pipeline.model.flatten-lambda") + 1] == "0.1"
+    sk = splat.train_command("p", "splatfacto", lidar_depth=0.0, regularize={"sky": True}, sky_masks="/m")
+    assert sk[-2:] == ["--sky-masks", "/m"] and "--pipeline.model.sky-alpha-lambda" in sk
+    assert splat.regularizing({"sky": True})
     nd = splat.train_command("p", "splatfacto", lidar_depth=0.0, regularize={"needle": 0.02})
     assert nd[nd.index("--pipeline.model.needle-lambda") + 1] == "0.02" and splat.regularizing({"needle": 0.02})
     assert splat.regularizing({"flatten": 0.1}) and not splat.regularizing({"flatten": 0})
@@ -358,7 +361,8 @@ print("ok")
     r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "--help"], env=splat._env(),
                        capture_output=True, text=True, timeout=300)
     assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]
-    assert "flatten-lambda" in r.stdout
+    assert "flatten-lambda" in r.stdout and "sky-alpha-lambda" in r.stdout and "needle-lambda" in r.stdout
     r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "lidar-data", "--help"],
                        env=splat._env(), capture_output=True, text=True, timeout=300)
     assert "seed-ply" in r.stdout, (r.stdout + r.stderr)[-2000:]
+    assert "sky-masks" in r.stdout

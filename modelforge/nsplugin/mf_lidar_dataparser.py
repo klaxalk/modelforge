@@ -28,6 +28,10 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     loss_masks: Optional[Path] = None
     """Per-image loss masks: a folder of <image name>.png (255 = in the losses, 0 = left out) at the undistorted
     training camera, as the depth maps (modelforge splat_tiles.loss_masks: a tile's pixels showing other tiles)."""
+    sky_masks: Optional[Path] = None
+    """Sky masks: a folder of <image name>.png (0 = sky, 255 = the rest) at the training images' size, before
+    undistortion (modelforge/sky.py): nerfstudio's own masks (undistorted with the photo, left out of the photometric
+    loss); the model adds its opacity loss on them (sky_alpha_lambda)."""
     seed_ply: Optional[Path] = None
     """Extra starting points with normals and colours (modelforge sfm_mesh.seed_points: the SfM mesh where the SfM
     points are thin), appended to the SfM points; the model starts them flat in the surface (metadata
@@ -58,6 +62,13 @@ class LidarDataParser(Nerfstudio):
         gain = {Path(f["file_path"]).name: float(f["mf_exposure"]) for f in meta.get("frames", []) if "mf_exposure" in f}
         if gain:
             out.metadata["exposure_gains"] = [gain.get(Path(f).name, 1.0) for f in out.image_filenames]
+        if self.config.sky_masks:
+            folder = Path(self.config.sky_masks)
+            files = [folder / (Path(f).name + ".png") for f in out.image_filenames]
+            missing = [f.name for f in files if not f.exists()]
+            if missing:
+                raise FileNotFoundError(f"sky masks missing for {len(missing)} photos, e.g. {missing[0]} in {folder}")
+            out.mask_filenames = files
         if self.config.loss_masks:
             folder = Path(self.config.loss_masks)
             files = [str(folder / (Path(f).name + ".png")) for f in out.image_filenames]

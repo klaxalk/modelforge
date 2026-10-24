@@ -194,7 +194,7 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
-                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None):
+                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
     (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
@@ -206,7 +206,9 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     bilateral grid per photo, plain splatfacto too); flatten and exposure need the -lidar
     method (lidar_depth 0 = depth loss off). seed_ply: extra starting points (sfm_mesh.seed_points), started flat;
     lidar-data only. loss_masks: a folder of per-image masks at the undistorted training camera (splat_tiles.loss_masks:
-    a tile's pixels outside it are left out of the losses); lidar-data only."""
+    a tile's pixels outside it are left out of the losses); lidar-data only. sky_masks: a folder of sky masks
+    (modelforge/sky.py; regularize["sky"]): left out of the photometric loss, their rendered opacity pulled to 0;
+    lidar-data only."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
@@ -239,6 +241,9 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
             cmd += ["--pipeline.model.needle-lambda", f"{float(reg['needle']):g}"]
         if reg.get("exposure"):
             cmd += ["--pipeline.model.use-exposure", "True"]
+        if sky_masks:
+            from modelforge import sky
+            cmd += ["--pipeline.model.sky-alpha-lambda", f"{sky.ALPHA:g}"]
     if (regularize or {}).get("bilateral"):
         cmd += ["--pipeline.model.use-bilateral-grid", "True"]
     if (regularize or {}).get("antialiased"):  # Mip-Splatting's 2D filter (gsplat)
@@ -254,6 +259,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         depth_args += ["--seed-ply", str(seed_ply)]
     if loss_masks and lidar_depth is not None:
         depth_args += ["--loss-masks", str(loss_masks)]
+    if sky_masks and lidar_depth is not None:
+        depth_args += ["--sky-masks", str(sky_masks)]
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
@@ -275,7 +282,7 @@ def exposure_known(project):
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
     return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or float(regularize.get("needle") or 0) > 0
-                                 or bool(regularize.get("exposure")))
+                                 or bool(regularize.get("exposure")) or bool(regularize.get("sky")))
     # older records may name far_mask: gone
 
 
@@ -479,7 +486,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if regularizing(regularize):
         reg = regularize
         on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
-                + (", exposure from the metadata" if reg.get("exposure") else ""))
+                + (f", needles {float(reg['needle']):g}" if reg.get("needle") else "")
+                + (", exposure from the metadata" if reg.get("exposure") else "")
+                + (", sky masks" if reg.get("sky") else ""))
     stop = threading.Event()
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
@@ -494,6 +503,10 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if callable(loss_masks):
         loss_masks = loss_masks(maps) if maps else None
     settings["loss_masks"] = loss_masks
+    skies = None
+    if (regularize or {}).get("sky"):  # the sky left out (modelforge/sky.py): masks at the training size
+        from modelforge import sky
+        skies = sky.masks(project, downscale, on_line, job=job, on_count=on_prepare)
     seeds = None
     if seed_mesh:
         from modelforge import sfm_mesh
@@ -503,7 +516,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
                              on_line=on_line)
         seeds = os.path.abspath(seeds)
     cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
-                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks)
+                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks, skies)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 
@@ -668,6 +681,10 @@ def main():
                          f"default {FLATTEN}; 0 = off)")
     ap.add_argument("--needle", type=float, default=NEEDLE, metavar="W",
                     help="weight of the loss on needles (largest scale beyond 3x the middle one; 0 = off, default)")
+    ap.add_argument("--sky-masks", action=argparse.BooleanOptionalAction, default=None,
+                    help="leave the sky out: segment it in every photo (SegFormer, modelforge/sky.py), no photometric "
+                         "loss there and the rendered opacity pulled to 0, so no Gaussians stand in for the sky "
+                         "(default: on for DJI projects; --no-sky-masks: off)")
     ap.add_argument("--seed-mesh", action="store_true",
                     help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
                          "flat in its surface")
@@ -684,7 +701,9 @@ def main():
     ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
     project = os.path.abspath(args.project)
-    reg = {"flatten": args.flatten, "needle": args.needle, "exposure": bool(args.exposure and exposure_known(project)),
+    from modelforge import sky as _sky
+    use_sky = _sky.default_on(project) if args.sky_masks is None else args.sky_masks
+    reg = {"flatten": args.flatten, "needle": args.needle, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
            "bilateral": args.bilateral_grid, "antialiased": args.antialiased}
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm

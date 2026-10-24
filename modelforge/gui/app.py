@@ -18,7 +18,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, memory, pipeline, projects, semantic, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, jobs, memory, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -685,6 +685,13 @@ class App:
                      "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. Default 0.02 (0.1 "
                      "flattened every Gaussian completely). 0 = off. On, it trains splatfacto's -lidar variant (depth loss "
                      "off without a depth weight).")
+            self.g_splat_sky = gui.add_checkbox(
+                "Sky masks (leave the sky out)", initial_value=False,  # per kind: _apply_kind
+                hint="Segment the sky in every training photo (SegFormer-B5, ADE20K; ~0.1 s per photo on the GPU, kept "
+                     "in sky/ for later runs and the tiles) and leave it out of the training: no colour loss there, "
+                     "and the opacity rendered in front of the sky is pulled to 0, so no Gaussians stand in for the "
+                     "sky (domes and haze in front of the horizon, floaters over the scene). The sky then shows the "
+                     "viewer's background. On by default for DJI projects.")
             self.g_splat_needle = gui.add_number(
                 "No needles (weight)", initial_value=splat.NEEDLE, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's largest scale beyond 3x its middle one: no long needles / ribbons (the "
@@ -963,6 +970,7 @@ class App:
         self.g_dense_lidar.visible = self.g_splat_lidar.visible = self._kind() == "rosbag"
         self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH if self._kind() == "rosbag" else 0.0
         self.g_upright.value = self._kind() == "dji"  # the kind's default: only a gimbal keeps the horizon level
+        self.g_splat_sky.value = sky.default_on(self.path)  # the kind's default: on for DJI flights
         self.g_sparse_md.content = (
             ("Incremental SfM from the images alone (" + ("ROS bag without camera poses" if self._kind() == "rosbag"
                                                           else "video without metadata")
@@ -2352,6 +2360,7 @@ class App:
     def _regularize(self):
         """Splat tab → Flatten Gaussians, No needles, exposure, anti-aliased for splat.run (None when all off)."""
         reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
+               "sky": bool(self.g_splat_sky.value),
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
                "antialiased": bool(self.g_splat_antialiased.value)}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None

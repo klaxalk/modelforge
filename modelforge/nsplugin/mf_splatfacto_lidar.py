@@ -123,6 +123,11 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     """weight of mean(relu(log(largest / middle scale) - log(needle_ratio))): no needles (0 = off). Flattening only
     shrinks the smallest axis; nothing kept the largest from running away from the middle one"""
     needle_ratio: float = 3.0
+    sky_alpha_lambda: float = 0.0
+    """weight of the mean rendered opacity over sky pixels (batch["mask"] 0: the dataparser's sky masks, already out
+    of the photometric loss), so no Gaussians stand in for the sky (0 = off)"""
+    sky_core_margin: float = 0.01
+    """the opacity loss only where the sky is this share of the width away from anything else"""
     use_exposure: bool = False
     """scale each training render by the photo's relative exposure (dataparser metadata "exposure_gains", from the
     DJI metadata), in linear light: the Gaussians hold the colours at the median exposure"""
@@ -217,15 +222,30 @@ class SplatfactoLidarModel(SplatfactoModel):
         return out
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
+        sky_loss = None
+        if self.training and self.config.sky_alpha_lambda > 0 and "mask" in batch and "accumulation" in outputs:
+            keep = self._downscale_if_required(batch["mask"].float()).to(outputs["accumulation"].device)
+            # the core of the sky: CORE px (1 % of the width) away from anything else, so Gaussians straddling the
+            # horizon (a treeline) are not thinned
+            r = max(1, round(self.config.sky_core_margin * keep.shape[1]))
+            near = F.max_pool2d(keep[..., 0][None, None], 2 * r + 1, 1, r)[0, 0]
+            sky = near < 0.5
+            if sky.shape == outputs["accumulation"].shape[:2] and sky.any():
+                sky_loss = self.config.sky_alpha_lambda * outputs["accumulation"][..., 0][sky].mean() * sky.float().mean()
         m = outputs.get("mf_mask")
         if m is not None and m.shape[:2] == batch["image"].shape[:2]:
-            batch = dict(batch, mask=m[:, :, None].float())
+            mm = m[:, :, None].float()
+            if "mask" in batch:  # the sky masks too: both leave pixels out
+                mm = mm * batch["mask"].float().to(mm.device)
+            batch = dict(batch, mask=mm)
             target = outputs.get("lidar_depth")
             if target is not None:
                 H, W = target.shape[:2]
                 mm = F.interpolate(m[None, None].float(), size=(H, W), mode="nearest")[0, 0].to(target.device) > 0.5
                 outputs = dict(outputs, lidar_depth=torch.where(mm[:, :, None], target, torch.zeros_like(target)))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
+        if sky_loss is not None:
+            loss["sky_alpha"] = sky_loss
         if self.training and self.config.flatten_lambda > 0:
             # only the smallest axis may give: with the middle one free, the optimizer shrank the ratio by
             # widening the Gaussians into huge sheets (berlin tile 1: 1.8 -> 21.7 GB of GPU memory, out of memory)
