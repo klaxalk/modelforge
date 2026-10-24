@@ -34,7 +34,11 @@ asked, 2026-10-22; a far-field mask tried alongside did not work well and was re
                   nearest points) as the width, SEED_THICKNESS of it along the normal.
   flatten_lambda  flatten_lambda x mean(smallest / middle scale) over the Gaussians, the middle scale held fixed
                   (only the smallest axis shrinks): flat discs on the surface (2DGS / PGSR style), and no needles
-                  (two small axes) along the few viewing directions. 0 = off.
+                  (two small axes) along the few viewing directions. 0 = off. It does not stop ribbons: a disc
+                  whose largest axis runs away from the middle one (kladno_dira 2026-10-24: largest / middle
+                  median 3.2, 30 % above 5).
+  needle_lambda   needle_lambda x mean(relu(log(largest / middle scale) - log(needle_ratio))): ribbons / needles
+                  longer than needle_ratio (3) x their width are pulled back (both axes may give). 0 = off.
 """
 
 from copy import deepcopy
@@ -115,6 +119,10 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     lidar_report_every: int = 500
     flatten_lambda: float = 0.0
     """weight of mean(smallest / middle scale): flat Gaussians, no needles (0 = off)"""
+    needle_lambda: float = 0.0
+    """weight of mean(relu(log(largest / middle scale) - log(needle_ratio))): no needles (0 = off). Flattening only
+    shrinks the smallest axis; nothing kept the largest from running away from the middle one"""
+    needle_ratio: float = 3.0
     use_exposure: bool = False
     """scale each training render by the photo's relative exposure (dataparser metadata "exposure_gains", from the
     DJI metadata), in linear light: the Gaussians hold the colours at the median exposure"""
@@ -223,6 +231,10 @@ class SplatfactoLidarModel(SplatfactoModel):
             # widening the Gaussians into huge sheets (berlin tile 1: 1.8 -> 21.7 GB of GPU memory, out of memory)
             s = torch.sort(torch.exp(self.scales), dim=-1).values
             loss["flatten"] = self.config.flatten_lambda * (s[:, 0] / s[:, 1].detach().clamp(min=1e-12)).mean()
+        if self.training and self.config.needle_lambda > 0:
+            ls = torch.sort(self.scales, dim=-1).values  # log scales
+            loss["needle"] = self.config.needle_lambda * torch.relu(
+                ls[:, 2] - ls[:, 1] - float(np.log(self.config.needle_ratio))).mean()
         target = outputs.get("lidar_depth")
         if target is None:
             return loss

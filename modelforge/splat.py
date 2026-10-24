@@ -201,7 +201,7 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     latest checkpoint there (a paused / stopped run; `run` trains through nsplugin/mf_train.py, which
     makes that work for splatfacto). depth_cloud: the depth loss's points from this ply instead (absolute path;
     the SfM mesh, sfm_mesh.depth_cloud). depth_maps: dense depth targets instead, a folder of per-image maps
-    (mesh_depth_maps). regularize: {"flatten": w, "exposure": bool, "bilateral": bool} (see regularizing; exposure:
+    (mesh_depth_maps). regularize: {"flatten": w, "needle": w, "exposure": bool, "bilateral": bool} (see regularizing; exposure:
     each render scaled by its photo's relative exposure, transforms.json "mf_exposure"; bilateral: splatfacto's
     bilateral grid per photo, plain splatfacto too); flatten and exposure need the -lidar
     method (lidar_depth 0 = depth loss off). seed_ply: extra starting points (sfm_mesh.seed_points), started flat;
@@ -235,6 +235,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         reg = regularize or {}
         if reg.get("flatten"):
             cmd += ["--pipeline.model.flatten-lambda", f"{float(reg['flatten']):g}"]
+        if reg.get("needle"):
+            cmd += ["--pipeline.model.needle-lambda", f"{float(reg['needle']):g}"]
         if reg.get("exposure"):
             cmd += ["--pipeline.model.use-exposure", "True"]
     if (regularize or {}).get("bilateral"):
@@ -256,6 +258,7 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
 
 
 FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
+NEEDLE = 0.0  # default weight against needles (largest > 3x middle scale): karlak 0.02 removed them, LPIPS +0.015
 EXPOSURE = True  # default: renders scaled by the photos' exposure from the metadata (karlak A/B 2026-10-24: held-out
 #                  +0.24 dB rendered with the photo's gain, +0.23 dB colour-corrected; docs/todo_splat_quality.md)
 
@@ -271,7 +274,8 @@ def exposure_known(project):
 
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
-    return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or bool(regularize.get("exposure")))
+    return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or float(regularize.get("needle") or 0) > 0
+                                 or bool(regularize.get("exposure")))
     # older records may name far_mask: gone
 
 
@@ -662,6 +666,8 @@ def main():
     ap.add_argument("--flatten", type=float, default=FLATTEN, metavar="W",
                     help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; "
                          f"default {FLATTEN}; 0 = off)")
+    ap.add_argument("--needle", type=float, default=NEEDLE, metavar="W",
+                    help="weight of the loss on needles (largest scale beyond 3x the middle one; 0 = off, default)")
     ap.add_argument("--seed-mesh", action="store_true",
                     help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
                          "flat in its surface")
@@ -678,7 +684,7 @@ def main():
     ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
     project = os.path.abspath(args.project)
-    reg = {"flatten": args.flatten, "exposure": bool(args.exposure and exposure_known(project)),
+    reg = {"flatten": args.flatten, "needle": args.needle, "exposure": bool(args.exposure and exposure_known(project)),
            "bilateral": args.bilateral_grid, "antialiased": args.antialiased}
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm

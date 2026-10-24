@@ -685,6 +685,12 @@ class App:
                      "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. Default 0.02 (0.1 "
                      "flattened every Gaussian completely). 0 = off. On, it trains splatfacto's -lidar variant (depth loss "
                      "off without a depth weight).")
+            self.g_splat_needle = gui.add_number(
+                "No needles (weight)", initial_value=splat.NEEDLE, min=0.0, step=0.01,
+                hint="Loss on each Gaussian's largest scale beyond 3x its middle one: no long needles / ribbons (the "
+                     "flattening makes discs, but nothing keeps them from stretching along the ground texture; "
+                     "kladno_dira: 30 % of the Gaussians over 5x). karlak 18k steps at 0.02: needles over 5x 30 % -> "
+                     "0.6 %, held-out PSNR the same (-0.04 dB), LPIPS 0.338 -> 0.353. 0 = off (default).")
             self.g_splat_exposure = gui.add_checkbox(
                 "Exposure from the metadata", initial_value=splat.EXPOSURE,
                 hint="Scale each training render by its photo's exposure (shutter x ISO / f-number², DJI metadata), "
@@ -2344,8 +2350,8 @@ class App:
         return stats
 
     def _regularize(self):
-        """Splat tab → Flatten Gaussians, exposure, anti-aliased for splat.run (None when all off)."""
-        reg = {"flatten": float(self.g_splat_flatten.value),
+        """Splat tab → Flatten Gaussians, No needles, exposure, anti-aliased for splat.run (None when all off)."""
+        reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
                "antialiased": bool(self.g_splat_antialiased.value)}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None

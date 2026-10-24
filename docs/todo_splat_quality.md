@@ -175,3 +175,22 @@ views / views):
 - Found on the way: a tile's loss masks only cover photos whose depth map exists. `splat.run` renders the missing
   maps only later, so the A/B script now renders them first. The real tiled run computes the masks after the maps
   (`splat_tiles.run`); not affected.
+
+## Needles (2026-10-24; the user saw long needles in kladno_dira's ground: sharp, detailed, but needle-like)
+
+Largest / middle scale of the Gaussians: kladno_dira median 3.2, p90 10.1, 30 % above 5x (10 % above 10x); karlak
+30k 2.8 / 9.4 / 25 %; berlin 50k per tile 2.6 / 7.4 / 20 %; berlin tile 0 at 10k 1.7 / 3.9 / 5 %: they grow with
+training. The flattening only shrinks the smallest axis (discs; their smallest axis collapses to ~1e-9 of the middle),
+so nothing kept the largest axis from running away along the ground texture.
+
+**Needle term** (`needle_lambda` x mean(relu(log(largest / middle) - log(needle_ratio 3))), both axes may give; Splat
+tab "No needles (weight)", CLI `--needle W`, `regularize["needle"]`; **default off**). karlak A/B (`build/quality_ab.py
+needle`, 18k steps, exposure on, vs the exposure arm):
+
+| | PSNR | SSIM | LPIPS | p10 | > 5x | > 10x | Gaussians |
+|---|---|---|---|---|---|---|---|
+| exposure | 22.59 | 0.681 | 0.338 | 16.91 | ~30 % | ~12 % | 1.90M |
+| + needle 0.02 | 22.55 | 0.678 | 0.353 | 16.83 | 0.6 % | 0.1 % | 1.82M |
+
+The needles go, held-out PSNR stays, LPIPS loses 0.015: on views from the flight path they carry some detail. Their
+cost shows off the path, which these held-out photos cannot measure; left as an option to judge visually.

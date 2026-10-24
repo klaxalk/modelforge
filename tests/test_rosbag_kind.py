@@ -314,6 +314,8 @@ def test_splat_lidar_command():
     assert seeded[seeded.index("--seed-ply") + 1] == "/x/seeds.ply" and seeded.index("--seed-ply") > \
         seeded.index("lidar-data")  # a dataparser option
     assert reg[reg.index("--pipeline.model.flatten-lambda") + 1] == "0.1"
+    nd = splat.train_command("p", "splatfacto", lidar_depth=0.0, regularize={"needle": 0.02})
+    assert nd[nd.index("--pipeline.model.needle-lambda") + 1] == "0.02" and splat.regularizing({"needle": 0.02})
     assert splat.regularizing({"flatten": 0.1}) and not splat.regularizing({"flatten": 0})
     plain = splat.train_command("p", "splatfacto")
     assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
