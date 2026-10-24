@@ -245,6 +245,23 @@ class Observations:
         return a["xy"], np.where(ok, row, -1)
 
 
+def _intrinsics(cameras, image_cams, n):
+    """Snapshot.intrinsics: the first camera's model / size / params; with several cameras also "cameras" {id: the
+    same} and "by_image" (camera id per project image, -1 unregistered)."""
+    def one(c):
+        return {"model": c.model.name, "width": int(c.width), "height": int(c.height),
+                "params": [float(v) for v in c.params]}
+    ids = sorted(cameras)
+    intr = one(cameras[ids[0]])
+    if len(ids) > 1:
+        by = np.full(n, -1)
+        for i, cid in image_cams:
+            if i is not None:
+                by[i] = cid
+        intr.update(cameras={int(c): one(cameras[c]) for c in ids}, by_image=by)
+    return intr
+
+
 class Project:
     def __init__(self, path, thumb_width=192):
         self.path = path
@@ -254,6 +271,10 @@ class Project:
         self.pts = np.array([self.priors[n].pts for n in self.names])  # per video
         self.time = np.array([self.priors[n].time for n in self.names])  # project timeline
         self.source = np.array([self.priors[n].source for n in self.names])
+        cam_of = {r["image"]: r.get("camera", 0) for r in self.meta.get("images", [])}
+        self.camera = np.array([cam_of.get(n, 0) for n in self.names])  # multi-camera DJI: index into camera_names
+        self.camera_names = [c.get("key", f"camera {k}") for k, c in enumerate(self.meta.get("cameras", []))] \
+            or ["camera"]
         self.source_names = [s.get("prefix", f"source {k}") for k, s in enumerate(self.meta.get("sources", []))] \
             or [os.path.splitext(os.path.basename(self.meta.get("source", "video")))[0]]
         self.thumb_width = thumb_width
@@ -330,9 +351,7 @@ class Project:
         vals = np.concatenate(err_vals) if err_vals else np.zeros(0)
         cnt = np.bincount(rows, minlength=len(ids))
         perr = np.bincount(rows, vals, minlength=len(ids)) / np.maximum(cnt, 1)
-        cam = next(iter(cameras.values()))
-        intr = {"model": cam.model.name, "width": int(cam.width), "height": int(cam.height),
-                "params": [float(v) for v in cam.params]}
+        intr = _intrinsics(cameras, [(i, cam_id) for i, cam_id, *_ in kept], n)
         return Snapshot(name, cams, xyz, rgb, perr, reproj, nobs, intr,
                         obs=Observations(os.path.join(d, "images.bin"), blocks, ids))
 
@@ -383,9 +402,8 @@ class Project:
         colors = np.array([p.color for p in pts.values()], np.uint8) if len(pts) else np.zeros((0, 3), np.uint8)
         rec.update_point_3d_errors()
         perr = np.array([p.error for p in pts.values()]) if len(pts) else np.zeros(0)
-        cam = next(iter(rec.cameras.values()))
-        intr = {"model": cam.model.name, "width": int(cam.width), "height": int(cam.height),
-                "params": [float(v) for v in cam.params]}
+        intr = _intrinsics(rec.cameras, [(self.index.get(rec.image(k).name), rec.image(k).camera_id)
+                                         for k in rec.reg_image_ids()], n)
         return Snapshot(name, cams, points, colors, perr, reproj, nobs, intr, rec)
 
     def thumbnail(self, i):
@@ -456,6 +474,8 @@ class Project:
         if not seen.any():
             return img, {}
         intr = snap.intrinsics
+        if "cameras" in intr:  # several cameras: this image's
+            intr = intr["cameras"].get(int(intr["by_image"][i]), intr)
         cam = pycolmap.Camera.create_from_model_name(0, intr["model"], 1.0, intr["width"], intr["height"])
         cam.params = intr["params"]
         R_cw = snap.cams.R_wc[i].T

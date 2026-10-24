@@ -135,7 +135,7 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 5. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
-   too (`export/frame_camera.py`); open: one common training resolution, semantic / evaluation per camera, GUI. Plan and decisions: `docs/todo_multicamera.md`.
+   too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; open: one common training resolution, semantic / evaluation per camera. Plan and decisions: `docs/todo_multicamera.md`.
 6. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
    under a Gaussian budget): `docs/todo_splat_lod.md`.
 7. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the

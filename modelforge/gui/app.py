@@ -113,7 +113,7 @@ NEXT_STEP = {
 }
 LOG_LINES = 200
 
-COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "source", "uniform")
+COLOR_BY = ("position deviation", "rotation deviation", "reprojection error", "time", "source", "camera", "uniform")
 SOURCE_SWATCH = ("🟦", "🟨", "🟩", "🟥", "🟢", "🟪", "🩷", "🔵")  # approximates gui.ingest.PALETTE
 UNITS = {"position deviation": "m", "rotation deviation": "deg", "reprojection error": "px", "time": "s"}
 PRIOR_COLOR = (150, 150, 150)
@@ -325,7 +325,7 @@ class App:
                 self.g_splat.on_update(lambda _: self._draw_splat())
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="time",
                                            hint="Deviation from the prior, mean reprojection error, capture "
-                                                "time or source (video piece).")
+                                                "time, source (video piece) or camera (drone model + resolution: each has its own intrinsics).")
             self.g_legend = gui.add_markdown("")
             gui.add_markdown("_Navigation: **Ctrl + click** a spot to orbit and zoom about it; **W A S D** move, "
                              "**R F** up / down, **arrow keys** turn._")
@@ -1363,6 +1363,8 @@ class App:
             return self.project.time
         if mode == "source":
             return self.project.source.astype(float)
+        if mode == "camera":
+            return self.project.camera.astype(float)
         return None
 
     # ------------------------------------------------------------- drawing
@@ -1446,8 +1448,9 @@ class App:
             lines.append(f"point error: median {np.median(s.point_error):.2f} px, "
                          f"p90 {np.percentile(s.point_error, 90):.2f} px")
         if s.intrinsics:
-            p = s.intrinsics["params"]
-            lines.append(f"camera {s.intrinsics['model']}: f = {p[0]:.1f}, {p[1]:.1f} px")
+            for c in (s.intrinsics.get("cameras") or {0: s.intrinsics}).values():
+                p = c["params"]
+                lines.append(f"camera {c['model']} {c['width']}×{c['height']}: f = {p[0]:.1f}, {p[1]:.1f} px")
         pm = self._prior_model(s.name)
         if pm:
             a, r = pm["abs_sigmas"], pm["rel_sigmas"]
@@ -1496,11 +1499,12 @@ class App:
         self.g_inspect_md.content = "  \n".join(md)
 
     def _camera_colors(self):
-        if self.g_color.value == "source":
-            names = self.project.source_names
+        if self.g_color.value in ("source", "camera"):  # one colour per source / per camera (multi-camera DJI)
+            names, idx = ((self.project.source_names, self.project.source) if self.g_color.value == "source" else
+                          (self.project.camera_names, self.project.camera))
             self.g_legend.content = "  \n".join(f"{SOURCE_SWATCH[k % len(SOURCE_SWATCH)]} {k + 1}. {n}"
                                                  for k, n in enumerate(names))
-            return np.array([source_color(k) for k in self.project.source], np.uint8)
+            return np.array([source_color(k) for k in idx], np.uint8)
         vals = self.color_values()
         n = len(self.project.names)
         if vals is None:

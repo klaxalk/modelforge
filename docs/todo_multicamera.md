@@ -1,6 +1,6 @@
 # TODO: multi-camera DJI projects
 
-Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), **4–5 done the same day** except the common training resolution, semantic features and the held-out evaluation; 6 (GUI) open. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
+Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), **4–5 done the same day** except the common training resolution, semantic features and the held-out evaluation; **6 (GUI) done the same day**. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
 prior BA). Today a project is one camera: `dji/ingest.py` refuses sources of different resolutions, features use
 `CameraMode.SINGLE`, transforms.json carries one global camera. Two drones that both record 4K pass the resolution
 check today and wrongly share one set of intrinsics.
@@ -96,3 +96,11 @@ Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (spl
   rewrote its manifest on every run (the tiles' loss masks, keyed by its time, were then always made again). Both
   fixed; existing depth maps are rendered once more.
 - Not tested yet: a splat training on per-frame intrinsics (the GPU was busy with the A/Bs).
+
+## Done 2026-10-24: step 6 (GUI)
+
+- View → Color cameras by **camera** (legend: the camera keys from poses.json `cameras`; `gui.data.Project.camera`,
+  `camera_names`); the stats list every camera ("camera OPENCV 1280×720: f = …"); Inspect projects each photo with its
+  own camera (`Snapshot.intrinsics["cameras"]` / `["by_image"]`, both snapshot readers); the refine History line has a
+  focal length per camera. On the two-camera copy Inspect gives 0.33 / 0.27 px median for a photo of each camera.
+- Not done: frustums sized per camera (they use each camera's pose only; the frustum shape is the first camera's).
