@@ -173,7 +173,19 @@ and GUI both call them, and progress events feed the GUI.
   pipeline and the GUI. Gaussian splat via nerfstudio splatfacto
   (`scripts/splat`), converted back to ENU so the splat and mesh align.
 - **M4, accuracy.** Prior-guided epipolar matching, EIS warp (`pp_target` vs.
-  `pp_current`), rolling shutter.
+  `pp_current`), rolling shutter. **Closed by measurement (2026-10-24), nothing implemented:**
+  - *Rolling shutter* (`build/rs/rs_fit.py`): per observation of a refined model, the image motion J (px/s) from the
+    camera's velocity (priors) and rotation rate (neighbouring refined poses), the row's read time (y / h - 1/2) T,
+    and a least-squares fit of the readout T to the residuals. dira2k (Mavic 4, 4K, 8 m/s median) 0.3 ms, karlak
+    (NEO2 4K) 0.1 ms, berlin's 4 flights (NEO2 1080p, 4-6 m/s, 7-16 deg/s) -0.0..0.2 ms, per-photo IQR within
+    +-0.6 ms, residual variance explained <= 0.2 %. Injecting 20 ms into the residuals gives back 19.2 ms (IQR
+    18.4-20.0, 67 % explained), so the fit would see it. Real sensors read out in 10-30 ms: DJI's video pipeline
+    (EIS) evidently removes it, or BA absorbs a constant part (fy / fx = 1.003-1.004 on dira2k, karlak, berlin).
+  - *EIS warp*: the refined rotation scatter does not correlate with the EIS correction (r = 0.05, berlin_3_1; see
+    CLAUDE.md), and a pure rotation of the virtual camera is a pose change the BA solves anyway.
+  - *Prior-guided matching*: the pairs already come from the priors (look-at overlap, terrain look-ats); where
+    matching fails (kladno_dira's high / low passes, `build/hl_match.py`) SIFT itself does not correspond (ratio 0.9:
+    a uniform ~19 inliers, chance level), so an epipolar band from the priors has nothing to keep.
 
 ## Risks
 

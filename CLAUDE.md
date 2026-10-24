@@ -131,7 +131,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    flights (`robust.CROSS_SOURCE_DRIFT`, written, off until a berlin refine validates it: 89 min, 16 GB).
 3. ~~Trim the final hover of `berlin_3_1`~~: superseded by the export's isolated-photo rule (29 photos of t ≥ 504 s
    left out on berlin).
-4. M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter.
+4. ~~M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter~~ **closed by measurement 2026-10-24**: no
+   rolling shutter in refined models (readout fit 0.0-0.3 ms on dira2k / karlak / berlin; an injected 20 ms comes
+   back as 19.2), EIS uncorrelated, SIFT has no true matches where matching fails: `docs/architecture.md` (M4).
 5. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
