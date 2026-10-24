@@ -70,10 +70,47 @@ def test_entry_waits_for_memory(tmp_path, monkeypatch):
     assert started == ["refine"] and "note" not in e
 
 
+def test_external_entry_survives_a_gui_restart(tmp_path):
+    """An entry running in its own process when the GUI goes: the restarted queue keeps it running, follows it, and
+    records its end from its status file; Stop entry writes its cancel file."""
+    import subprocess
+    from types import SimpleNamespace
+    proc = subprocess.Popen(["sleep", "30"])
+    try:
+        q = JobQueue(str(tmp_path))
+        e = q.add(str(tmp_path / "b"), "splat", "Train splat", {})
+        base = str(tmp_path / jobqueue.DIR / str(e["id"]))
+        os.makedirs(os.path.dirname(base))
+        e.update(status="running", started=time.time(), external={"pid": proc.pid, "base": base})
+        q.save()
+        json.dump({"state": "⏳ running **splat** · tile 2 / 5", "progress": 42.0}, open(base + ".status.json", "w"))
+        notices = []
+        app = SimpleNamespace(root=str(tmp_path), running=False, ingest=SimpleNamespace(running=False),
+                              path=str(tmp_path / "a"), _notice=notices.append, _on_log=lambda s: None)
+        panel = jobqueue.QueuePanel.__new__(jobqueue.QueuePanel)
+        panel.app, panel.q, panel._proc, panel.refresh = app, JobQueue(str(tmp_path)), None, lambda: None
+        r = panel.q.entries[0]
+        assert r["status"] == "running"  # not "interrupted": its process lives
+        panel.current, panel.q.running = r, True
+        panel.tick()
+        assert r["note"].startswith("42 % · ⏳ running splat") and panel.busy(str(tmp_path / "b")) is r
+        panel.stop_external()
+        assert os.path.exists(base + ".cancel")
+        json.dump({"state": "⏹ **stopped** during splat", "result": "stopped"}, open(base + ".status.json", "w"))
+        proc.kill()
+        proc.wait()
+        panel.tick()
+        assert r["status"] == "stopped" and panel.current is None and not panel.q.running  # Stop pauses the queue
+        assert notices and "Train splat stopped" in notices[-1]
+    finally:
+        proc.kill()
+
+
 @pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "database.db")), reason="needs a matched project")
 def test_queued_entries_run_with_their_settings(tmp_path, monkeypatch):
-    """Two projects queued with different Pairs settings: each entry opens its project and runs with the settings the
-    tab had when it was queued; a notice per entry and one for the queue."""
+    """Two projects queued with different Pairs settings: each entry runs with the settings the tab had when it was
+    queued; the open project's in the GUI, the other one's in its own process (gui/headless.py) while the GUI keeps
+    its project; a notice per entry and one for the queue."""
     from modelforge.gui.app import App
     from tests.test_gui_dense import free_port
     root = str(tmp_path)
@@ -100,14 +137,18 @@ def test_queued_entries_run_with_their_settings(tmp_path, monkeypatch):
         app.open_project(os.path.join(root, "a"))
         app.g_pairs.value = "exhaustive"  # a later change of the tab does not change the queued entries
         app.queue.start()
-        t0 = time.time()
+        t0, saw_busy = time.time(), False
         while (app.queue.q.running or app.running) and time.time() - t0 < 300:
+            if app.queue.busy(os.path.join(root, "b")) is not None:
+                saw_busy = True
+                assert 'data-state="running"' in app._status_html() and "queue: Pairs (b)" in app._status_html()
             time.sleep(0.2)
         assert [e["status"] for e in app.queue.q.entries] == ["done", "done"], app.queue.q.entries
+        assert saw_busy and app.queue.q.entries[1].get("external") and "external" not in app.queue.q.entries[0]
         ra = json.load(open(os.path.join(root, "a", "report.json")))["pairs"]
         rb = json.load(open(os.path.join(root, "b", "report.json")))["pairs"]
         assert ra["mode"] == "sequential" and ra["neighbors"] == 7 and rb["mode"] == "auto"
-        assert os.path.abspath(app.path) == os.path.join(root, "b")  # the last entry's project stays open
+        assert os.path.abspath(app.path) == os.path.join(root, "a")  # the GUI kept its project
         assert "queue finished" in app._notice_last and app._notice_n == 3
         assert 'data-notice="3|queue finished' in app._status_html()
         assert json.load(open(os.path.join(root, jobqueue.FILE)))["entries"][0]["status"] == "done"

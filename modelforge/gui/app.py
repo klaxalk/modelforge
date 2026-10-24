@@ -1130,6 +1130,11 @@ class App:
             what = f"{label} {pct:.0f} %" if pct else label
             if self._token is not None and self._token.cancelled:
                 what = f"stopping {label}"
+        elif getattr(getattr(self, "queue", None), "current", None) and self.queue.current.get("external"):
+            e = self.queue.current  # a queue entry of another project, in its own process
+            state, what = "running", f"queue: {e['label']}" + (
+                f" ({os.path.basename(e['project'])})" if os.path.abspath(e["project"]) != os.path.abspath(
+                    self.path or "") else "")
         elif self.g_state.content.startswith("❌"):
             state, what = "failed", "failed"
         else:
@@ -1565,6 +1570,11 @@ class App:
         if self.running or self.ingest.running:
             self.g_state.content += "  \n_busy: wait for the running job to finish_"
             return
+        q = self.queue.busy(self.path) if hasattr(self, "queue") else None
+        if q is not None:  # gui/headless.py runs a queue entry in this project
+            self.g_state.content = (f"⏳ **queue entry {q['id']}** runs **{q['label']}** in this project, in its own "
+                                    f"process: wait for it, or Queue → Stop entry")
+            return
         if self.project is None and stage != "all":  # the full pipeline extracts them itself
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
@@ -1823,6 +1833,11 @@ class App:
         a History line. Only stages that ran in a job process (features … export, SfM mesh, COLMAP dense); the rest
         of a sequence (Run full pipeline) does not continue."""
         if not self.path or self.running:
+            return
+        q = self.queue.busy(self.path) if hasattr(self, "queue") else None
+        if q is not None:  # its job process belongs to a queue entry (gui/headless.py), not to this GUI
+            self.g_state.content = (f"⏳ **queue entry {q['id']}** runs **{q['label']}** in this project, in its own "
+                                    f"process (progress in Queue)")
             return
         d = worker.detached(self.path)
         if d is None:

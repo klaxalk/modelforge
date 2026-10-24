@@ -3,20 +3,26 @@ had when they were queued, run one after the other; a browser notification when 
 
 An entry = project + stage (as App.run_stage takes it: "all", "sfm", "refine", "splat", ...) + the values of the right
 panel's inputs at queueing time (App._settings: Sparse, Sparse Mesh, Splat, Splat mesh, Dense tabs; changing a tab
-later does not change queued work). When it starts, its project is opened if another one is open, its settings are
-put back into the tabs and the stage runs as if its button was pressed; the GUI shows it as any job (state line,
-progress, Stop). Stop pauses the queue; a failure stops it, or (On failure: go on) skips that project's other entries.
+later does not change queued work). An entry of the open project runs in the GUI: its settings are put back into the
+tabs and the stage runs as if its button was pressed, shown as any job (state line, progress, Stop). An entry of
+another project runs in a process of its own (gui/headless.py: an App on that project without a browser, the same
+stages), so the GUI keeps its project and view; its line shows the progress, "Stop entry" stops it, the open project's
+own jobs are refused while it runs there, and it outlives a GUI restart (the restarted queue follows it). Stop pauses the queue; a failure stops it, or (On failure: go on) skips that project's other entries.
 An entry starts only when enough RAM is available (memory_need: MIN_FREE_GB, its project's last recorded peak of
-that stage, a forced-global BA's estimate); it waits meanwhile, with a note. Kept in ROOT/.modelforge_queue.json: after a GUI restart a running entry is marked interrupted (not rerun) and the
-queue waits to be started again.
+that stage, a forced-global BA's estimate); it waits meanwhile, with a note. Kept in ROOT/.modelforge_queue.json
+(+ ROOT/.modelforge_queue.d/: the external entries' files): after a GUI restart a running entry of the GUI is marked
+interrupted (not rerun) and the queue waits to be started again.
 """
 
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 
 FILE = ".modelforge_queue.json"
+DIR = ".modelforge_queue.d"  # an external entry's <id>.json / .status.json / .cancel / .log
 STAGES = {  # label -> App.run_stage stage
     "Run full pipeline": "all",
     "Run SfM (all)": "sfm",
@@ -50,6 +56,8 @@ class JobQueue:
         except (OSError, ValueError):
             pass
         for e in self.entries:  # a GUI restart: what was running is not rerun blindly
+            if e["status"] == "running" and external_alive(e):
+                continue  # its own process goes on: the queue follows it
             if e["status"] == "running":
                 e["status"], e["note"] = "interrupted", "the GUI restarted while it ran"
         self._next_id = max([e["id"] for e in self.entries] + [0]) + 1
@@ -125,6 +133,19 @@ class JobQueue:
         return "  \n".join(out)
 
 
+def external_alive(e):
+    from modelforge import worker
+    x = e.get("external")
+    return bool(x) and worker.alive(x["pid"])
+
+
+def external_status(e):
+    try:
+        return json.load(open(e["external"]["base"] + ".status.json"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 def memory_need(e):
     """(GB the entry needs available before it starts, why): MIN_FREE_GB, the peak its project's last such run
     recorded, or for a refine with BA mode global the estimate of pipeline.global_ba_need_gb."""
@@ -165,6 +186,10 @@ class QueuePanel:
         self.app = app
         self.q = JobQueue(app.root)
         self.current, self.current_run = None, None
+        self._proc = None  # the external entry's Popen (None after a GUI restart: followed by its pid)
+        self.current = next((e for e in self.q.entries if e["status"] == "running" and external_alive(e)), None)
+        if self.current is not None:
+            self.q.running = True  # it was running when the GUI went: go on after it
         self.g_md = gui.add_markdown(self.q.markdown())
         self.g_stage = gui.add_dropdown("Stage", options=tuple(STAGES), initial_value="Run full pipeline",
                                         hint="What the entry runs, as the button of that name does.")
@@ -174,7 +199,8 @@ class QueuePanel:
                                 "change it.")
         b.on_click(lambda _: self.add())
         self.g_start = gui.add_button("Start queue", icon=viser.Icon.PLAYER_PLAY, color="green",
-                                      hint="Run the pending entries one after the other (each opens its project). "
+                                      hint="Run the pending entries one after the other: those of the open project here, "
+                                           "the others in a process of their own (the view stays). "
                                            "A browser notification tells when an entry ends (allow notifications "
                                            "when the browser asks, after your first click in the page).")
         self.g_start.on_click(lambda _: self.start())
@@ -188,6 +214,12 @@ class QueuePanel:
         self.g_entry = gui.add_number("Entry", initial_value=1, min=1, step=1, hint="The entry the buttons below act on.")
         g = gui.add_button_group("Entry", ("Up", "Remove", "Retry", "Clear finished"))
         g.on_click(lambda e: self.edit(e.target.value))
+        self.g_stop_entry = gui.add_button("Stop entry", icon=viser.Icon.PLAYER_STOP, color="red",
+                                           disabled=self.current is None,
+                                           hint="Stop the entry running in its own process (an entry of another "
+                                                "project); the queue pauses. An entry of the open project stops with "
+                                                "the Stop button at the top.")
+        self.g_stop_entry.on_click(lambda _: self.stop_external())
         self._stop = threading.Event()
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -196,6 +228,8 @@ class QueuePanel:
         self.g_md.content = self.q.markdown()
         self.g_start.disabled = self.q.running or self.q.next_pending() is None
         self.g_pause.disabled = not self.q.running
+        if hasattr(self, "g_stop_entry"):
+            self.g_stop_entry.disabled = not (self.current is not None and self.current.get("external"))
 
     def add(self):
         if not self.app.path:
@@ -224,6 +258,59 @@ class QueuePanel:
     def stop_thread(self):
         self._stop.set()
 
+    def busy(self, project):
+        """The external entry running in this project, or None."""
+        e = self.current
+        if e is not None and e.get("external") and os.path.abspath(project or "") == e["project"]:
+            return e
+        return None
+
+    def stop_external(self):
+        e = self.current
+        if e is not None and e.get("external"):
+            open(e["external"]["base"] + ".cancel", "w").close()
+            self.app._on_log(f"--- stop requested for queue entry {e['id']} ({os.path.basename(e['project'])})")
+
+    def _start_external(self, e):
+        """Run the entry in gui/headless.py, a process of its own (its own session: it outlives the GUI)."""
+        d = os.path.join(self.app.root, DIR)
+        os.makedirs(d, exist_ok=True)
+        base = os.path.join(d, str(e["id"]))
+        for ext in (".status.json", ".cancel"):
+            if os.path.exists(base + ext):
+                os.remove(base + ext)
+        json.dump(e, open(base + ".json", "w"))
+        log = open(base + ".log", "w")
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in (repo, os.environ.get("PYTHONPATH")) if p))
+        self._proc = subprocess.Popen([sys.executable, "-u", "-m", "modelforge.gui.headless", base + ".json"],
+                                      cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        e["external"] = {"pid": self._proc.pid, "base": base}
+
+    def _follow_external(self, e):
+        """The external entry: its progress on its line while it runs; True once it ended (recorded)."""
+        alive = (self._proc.poll() is None) if self._proc is not None else external_alive(e)
+        st = external_status(e)
+        if alive:
+            line = (st.get("state") or "starting").split("\n")[0].replace("*", "").strip()
+            pct = st.get("progress")
+            note = (f"{pct:.0f} % · " if pct else "") + line[:160]
+            if e.get("note") != note:
+                e["note"] = note
+                self.refresh()
+            return False
+        self._proc = None
+        status = st.get("result") or "failed"
+        note = "" if status == "done" else (st.get("state") or "its process ended without a result (killed: out of "
+                                                                "memory?)").split("\n")[0][:200]
+        self._record_end(e, status, note)
+        app = self.app
+        if os.path.abspath(app.path or "") == e["project"] and not app.running:  # its results: into the view
+            app._after_reattached({"refine": "refine", "refine-resume": "refine", "sfm": "export",
+                                   "all": "export", "export": "export"}.get(e["stage"], e["stage"]))
+            app.g_state.content = st.get("state") or app.g_state.content
+        return True
+
     # --- running -------------------------------------------------------------------------------------
     def _loop(self):
         while not self._stop.wait(1.0):
@@ -236,6 +323,10 @@ class QueuePanel:
     def tick(self):
         """One step of the runner: notice the end of the running entry, start the next one."""
         app = self.app
+        if self.current is not None and self.current.get("external"):
+            if not self._follow_external(self.current):
+                return
+            self.current = None
         if self.current is not None:
             if app.running and app._run_id == self.current_run:
                 return
@@ -268,17 +359,25 @@ class QueuePanel:
         if (e.get("note") or "").startswith("waiting for memory"):
             e.pop("note")
         self._started_at = getattr(self, "_started_at", None) or time.time()
+        here = os.path.abspath(app.path or "") == e["project"]
         try:
-            if os.path.abspath(app.path or "") != e["project"]:
-                if not os.path.isdir(e["project"]):
-                    raise RuntimeError(f"{e['project']} is gone")
-                app.open_project(e["project"])
-            app._apply_settings(e["settings"])
+            if not os.path.isdir(e["project"]):
+                raise RuntimeError(f"{e['project']} is gone")
+            if here:
+                app._apply_settings(e["settings"])
+            else:  # another project: its own process, the GUI keeps its view
+                e["status"], e["started"], e["note"] = "running", time.time(), "starting in its own process"
+                self._start_external(e)
         except Exception as err:  # noqa: BLE001
             e["started"] = time.time()
             nxt = self.q.finish(e, "failed", f"could not start: {err}")
             if nxt != "go":
                 self.q.running = False
+            self.refresh()
+            return
+        if not here:
+            self.current = e
+            self.q.save()
             self.refresh()
             return
         e["status"], e["started"] = "running", time.time()
@@ -292,6 +391,10 @@ class QueuePanel:
         status = ("done" if content.startswith("✅") else "stopped" if content.startswith(("⏹", "⏸"))
                   else "failed")
         note = "" if status == "done" else content.split("\n")[0][:200]
+        self._record_end(e, status, note)
+
+    def _record_end(self, e, status, note):
+        self.current = None
         nxt = self.q.finish(e, status, note)
         if nxt in ("pause", "stop"):
             self.q.running = False

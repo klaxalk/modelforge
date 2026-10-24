@@ -1,7 +1,7 @@
 # TODO: job queue with completion notices
 
-Priority: **medium**. Status: **first version done 2026-10-23** (see the end); memory check per entry done 2026-10-24;
-open: entries of other projects without switching the view, a command hook per notice.
+Priority: **medium**. Status: **done**: first version 2026-10-23, memory check per entry and entries of other projects
+without switching the view 2026-10-24 (see the end); open (optional): a command hook per notice.
 
 ## Why
 
@@ -68,3 +68,24 @@ the peak its project's last such run recorded (report.json `refine.peak_rss_gb` 
 memory: 10.0 GB available, needs 16 GB (its last refine peaked at 15 GB)" on its line, one notice) and starts once the
 memory is free. Why: what holds the memory is often outside the GUI (another job, a test run), and an OOM kill once
 cost a 5 h refine. Test: `test_entry_waits_for_memory`.
+
+## Done: entries of other projects without switching the view (2026-10-24)
+
+The user asked. An entry of the open project runs in the GUI as before (live view, the top Stop). An entry of another
+project runs in a process of its own: `modelforge/gui/headless.py` builds an `App` on that project without a browser
+(viser on a free local port), puts the entry's settings into its tabs and calls `run_stage`, so every stage runs
+exactly as from its button (no second implementation of the stages); it writes
+`ROOT/.modelforge_queue.d/<id>.status.json` every second (state line, progress, at the end the result) and stops when
+`<id>.cancel` appears.
+- The queue (`QueuePanel._start_external` / `_follow_external`) shows its progress on the entry's line ("33 % · running
+  refine · …"), the browser tab title says "queue: Refine (b)", **Stop entry** writes the cancel file (the entry ends
+  "stopped" and the queue pauses, as with Stop).
+- While it runs, the GUI refuses jobs in that project (the state line names the entry) and does not re-attach its job
+  processes as its own; other projects can be opened and used. When it ends and its project is open, the view reloads
+  its results.
+- Started in a session of its own (`start_new_session`), so it outlives a GUI restart; the restarted queue keeps it
+  "running" (not "interrupted") and follows it by pid. The GUI restart routine's `pkill` pattern does not match it.
+- Still one entry at a time; the queue also waits while the GUI runs a job.
+- Checked by hand (`build/queue_check/stop.py`): a refine of another project, stopped after 25 s → "stopped" within
+  ~1 s, the queue paused. Tests: `test_queued_entries_run_with_their_settings` (the second project's entry runs in
+  its own process, the GUI keeps its project), `test_external_entry_survives_a_gui_restart`.

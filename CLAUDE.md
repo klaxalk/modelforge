@@ -122,8 +122,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    the job; `MODELFORGE_INPROCESS=1` = as before): `docs/todo_robustness.md`.
 4. **Job queue with completion notices: first version done 2026-10-23** (right panel → Queue: project + stage +
    the tabs' settings at queueing time, run one after the other, browser notification per entry; memory check
-   per entry done 2026-10-24 (waits until the RAM it needs is free); open: entries of other projects without switching
-   the view): `docs/todo_job_queue.md`.
+   per entry done 2026-10-24 (waits until the RAM it needs is free); **entries of other projects run without switching
+   the view, done 2026-10-24**: in a process of their own, `gui/headless.py` (an App on that project without a
+   browser), progress on the entry's line, "Stop entry", outlives a GUI restart): `docs/todo_job_queue.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
