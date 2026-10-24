@@ -63,7 +63,8 @@ MIN_PIXELS = 0.05  # ... or (with an SfM mesh) this share of its pixels showing 
 #                    the merge broke, +13 % photos; any pixel at all: +26 %, mostly slivers at the horizon)
 EXTRA_MAX = 0.5  # photos joining a tile by the rules above: at most this share of its own (core) photos, those
 #                  showing the most of it first (kladno_dira 5187 photos: 479-2434 per tile without, 2.5x slots)
-KEEP_SHARE = 0.5  # ... except those whose pixels (else seen points) show the tile this much: always kept
+KEEP_SHARE = 0.2  # ... except those whose pixels (else seen points) show the tile this much: always kept (0.5 cut
+#                   berlin views showing a tile in 37-49 % of their pixels, the kind the merge had broken by > 4 dB)
 SHARE_WIDTH = 240  # pixels across the mesh raycast of each camera
 SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off the balanced position (tiles of
 #                   up to ~2x the photos still train well, the user found)

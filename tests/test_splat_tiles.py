@@ -93,12 +93,12 @@ def test_extra_photos_are_capped():
     own = set(range(10))
     share = np.zeros(40)
     pixels = np.zeros(40)
-    pixels[10:40] = np.linspace(0.06, 0.45, 30)  # 30 joined photos, more of the tile the higher the index
+    pixels[10:40] = np.linspace(0.02, 0.19, 30)  # 30 joined photos, more of the tile the higher the index
     share[12] = 0.6  # by its points mostly this tile
     frames, capped = splat_tiles._cap(own, set(range(10, 40)), share, pixels, 0.5)
     assert own <= frames and len(frames) == 15 and capped == 25
     assert frames - own == {12, 36, 37, 38, 39}  # the top 5 by max(pixels, points)
-    pixels[10:40] = 0.55
+    pixels[10:40] = 0.25
     frames, capped = splat_tiles._cap(own, set(range(10, 40)), share, pixels, 0.5)
     assert len(frames) == 40 and capped == 0  # all show >= KEEP_SHARE
     assert splat_tiles._cap(own, set(), share, None, 0.5) == (own, 0)

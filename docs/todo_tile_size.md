@@ -25,7 +25,7 @@ softer (~800 photos trained well before).
    nested cuts do not compound.
 2. **Cap per tile**: the photos joining a tile beyond its own (by any of the three rules) are ranked by the share of
    the tile they show (max of pixel share and point share) and at most `EXTRA_MAX` (0.5) x its own photos stay, plus
-   every one showing >= `KEEP_SHARE` (0.5) of it (`splat_tiles._cap`, `partition(extra_max=)`; None = no cap).
+   every one showing >= `KEEP_SHARE` (0.2) of it (`splat_tiles._cap`, `partition(extra_max=)`; None = no cap).
    tiles.json records `capped` per tile; the set-up's log line says how many were left out.
 
 ## Measured: kladno_dira's set-up (`build/tile_size/exp.py`, read-only on the project; the mesh raycast included)
@@ -34,9 +34,17 @@ softer (~800 photos trained well before).
 |---|---|---|---|
 | before (slack 0.25 at every depth, no cap) = the trained set-up | 233–953 | 479–2434 | 13,021 (2.5x) |
 | slack / (1 + depth), no cap | 304–666 | 506–2105 | 12,996 |
-| **+ cap 0.5 (the default)** | 304–666 | 479–1206 | **8,593 (1.66x)** |
+| + cap 0.5, KEEP_SHARE 0.5 (first version) | 304–666 | 479–1206 | 8,593 (1.66x) |
+| + cap 0.5, KEEP_SHARE 0.3 | 304–666 | 479–1527 | 10,455 (2.0x) |
+| **+ cap 0.5, KEEP_SHARE 0.2 (the default)** | 304–666 | 479–1902 | **11,718 (2.26x)** |
 
-The largest tile, 1206, keeps 666 photos beyond its 540 own because they show >= 50 % of it.
+**Why KEEP_SHARE 0.2, not 0.5** (`build/tile_size/berlin_cap.py`, `keep_sweep.py`): most extra photos show a large part
+of the tile. On berlin the 83 views the merged splat had broken by > 4 dB (`build/tile_diag/scan.json`; the reason
+the pixel rule exists) would lose tile memberships showing up to 49 % of their pixels at 0.5 (100 dropped), up to 28 %
+at 0.3 (45), up to 20 % at 0.2 (38); berlin slots 7670 → 5076 / 6446 / 7030. A view's loss followed its pixel share in
+the tiles lacking it (> 4 dB: median 0.60, < 1 dB: 0.00), so shares under 20 % should matter little, but only a
+training A/B can tell. So the cap saves ~10 % on kladno_dira; the balanced split (own photos 233–953 → 304–666) is the
+larger part of the fix. Tiles stay larger than the user's ~800 because the photos see wide areas.
 
 ## Open
 
