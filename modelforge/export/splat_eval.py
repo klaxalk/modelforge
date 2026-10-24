@@ -12,6 +12,7 @@ is rendered there on a black background. Scores per image and averaged: PSNR, SS
 torchmetrics; skipped if it cannot load). Fully transparent pixels of the render (alpha < 0.05: no
 Gaussians there, e.g. sky the SfM never reconstructed) are reported as `empty` and left in the scores.
 The first three views are also written as OUT_view<i>.jpg (photo | render) for a visual check.
+Optional `rasterize_mode` ("antialiased" for a splat trained with it: its opacities assume the 2D filter).
 Optional `gains` (V,): each render times its photo's relative exposure in linear light (as the splat plugin trains with
 use_exposure). Also `psnr_cc`: PSNR after a least-squares colour fit of the render to the photo (3 x 3 + bias per
 image), which leaves out exposure / white-balance differences.
@@ -62,6 +63,7 @@ def main():
                 means=g["means"], quats=g["quats"], scales=g["scales"], opacities=g["opacities"], colors=g["colors"],
                 viewmats=torch.tensor(d["viewmats"][i], device=dev)[None],
                 Ks=torch.tensor(K, device=dev, dtype=torch.float32)[None], width=W, height=H,
+                rasterize_mode=str(d["rasterize_mode"]) if "rasterize_mode" in d.files else "classic",
                 sh_degree=int(round(np.sqrt(k))) - 1, near_plane=0.01, far_plane=1e10, packed=False)
             pred = colors[0, ..., :3].clamp(0, 1)  # black background: the alpha-weighted sum as is
             if "gains" in d.files:

@@ -663,6 +663,17 @@ class App:
                      "(as 2DGS / PGSR), no needles along the few viewing directions of a single pass. Default 0.02 (0.1 "
                      "flattened every Gaussian completely). 0 = off. On, it trains splatfacto's -lidar variant (depth loss "
                      "off without a depth weight).")
+            self.g_splat_exposure = gui.add_checkbox(
+                "Exposure from the metadata", initial_value=splat.EXPOSURE,
+                hint="Scale each training render by its photo's exposure (shutter x ISO / f-number², DJI metadata), "
+                     "so photos taken brighter or darker do not pull the colours apart; the splat holds the scene at "
+                     "the median exposure. karlak (2.6 EV of auto exposure): held-out +0.24 dB. Ignored without the "
+                     "metadata (transforms.json mf_exposure).")
+            self.g_splat_antialiased = gui.add_checkbox(
+                "Anti-aliased rasterization", initial_value=False,
+                hint="Mip-Splatting's 2D filter while training: karlak held-out +0.2 dB / LPIPS -0.007 when rendered "
+                     "anti-aliased too, but -1.5 dB in classic renderers (this GUI's view, most .ply viewers): its "
+                     "opacities assume the filter. Off by default.")
             self.g_splat_live = gui.add_checkbox(
                 "Live preview", initial_value=True,
                 hint="Show the splat in the View tab while it trains, refreshed at every checkpoint (base colours, "
@@ -2239,9 +2250,11 @@ class App:
         return stats
 
     def _regularize(self):
-        """Splat tab → Flatten Gaussians for splat.run (None when off)."""
-        reg = {"flatten": float(self.g_splat_flatten.value)}
-        return reg if splat.regularizing(reg) else None
+        """Splat tab → Flatten Gaussians, exposure, anti-aliased for splat.run (None when all off)."""
+        reg = {"flatten": float(self.g_splat_flatten.value),
+               "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
+               "antialiased": bool(self.g_splat_antialiased.value)}
+        return reg if splat.regularizing(reg) or reg["antialiased"] else None
 
     def _splat_survey(self, project):
         """splat_plan.survey of the project, cached by its camera files' times."""

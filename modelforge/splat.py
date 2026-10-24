@@ -256,6 +256,17 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
 
 
 FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
+EXPOSURE = True  # default: renders scaled by the photos' exposure from the metadata (karlak A/B 2026-10-24: held-out
+#                  +0.24 dB rendered with the photo's gain, +0.23 dB colour-corrected; docs/todo_splat_quality.md)
+
+
+def exposure_known(project):
+    """True when transforms.json carries the photos' exposure (mf_exposure: DJI metadata, written by the export)."""
+    try:
+        t = json.load(open(os.path.join(project, "transforms.json")))
+    except (OSError, ValueError):
+        return False
+    return any("mf_exposure" in f for f in t.get("frames", []))
 
 
 def regularizing(regularize):
@@ -660,16 +671,16 @@ def main():
     ap.add_argument("--tile-mask", action="store_true",
                     help="tiled runs: leave each photo's pixels that show other tiles out of the losses (needs "
                          "--mesh-prior dense)")
-    ap.add_argument("--exposure", action="store_true",
-                    help="scale each training render by its photo's relative exposure from the DJI metadata "
-                         "(transforms.json mf_exposure; the export writes it)")
+    ap.add_argument("--no-exposure", dest="exposure", action="store_false", default=EXPOSURE,
+                    help="do not scale each training render by its photo's relative exposure from the DJI metadata "
+                         "(transforms.json mf_exposure, written by the export; on by default when present)")
     ap.add_argument("--bilateral-grid", action="store_true", help="splatfacto's bilateral grid per photo (colour / tone)")
     ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
-    reg = {"flatten": args.flatten, "exposure": args.exposure, "bilateral": args.bilateral_grid,
-           "antialiased": args.antialiased}
-    reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     project = os.path.abspath(args.project)
+    reg = {"flatten": args.flatten, "exposure": bool(args.exposure and exposure_known(project)),
+           "bilateral": args.bilateral_grid, "antialiased": args.antialiased}
+    reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None
     if args.seed_mesh and seed is None:

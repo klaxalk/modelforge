@@ -1,6 +1,6 @@
 # TODO: cheap splat quality fixes
 
-Priority: **medium**. Status: proposed 2026-10-23, not started; the user will ask for it. Both are flags or small changes plus an A/B run;
+Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off** (see the end); the tile mask A/B is running. Both are flags or small changes plus an A/B run;
 validate on a small project first (fullrun_test, karlak; held-out scoring as in `build/splat_exp.py`), not on
 kladno_dira.
 
@@ -94,3 +94,30 @@ suggested:
    (10k steps each): held-out PSNR / LPIPS of in-region views, the depth error, and renders of the merged splat.
 2. Then the remaining wrong targets: an outlier gate after warm-up (drop a pixel's depth target when |D − z| / z >
    50 %), and a smaller patch-hole size for the prior (berlin's 50 m patched whole hall interiors).
+
+## A/B results (2026-10-24, `build/quality_ab.py`, karlak copy `build/karlak_ab`)
+
+471 keyframes, 24 held-out extracted frames between them (PnP-located), 18000 steps x2, unit 10 m, camera optimizer
+off, flatten 0.02, default densification; scores at 1920 px. `psnr_cc` = PSNR after a per-image 3 x 3 + bias colour
+fit (leaves out exposure / white balance).
+
+| arm | PSNR | PSNR cc | SSIM | LPIPS | PSNR p10 | Gaussians | train |
+|---|---|---|---|---|---|---|---|
+| base | 22.35 | 22.79 | 0.678 | 0.338 | 16.53 | 1.89M | 924 s |
+| **exposure** (rendered x the photo's gain) | **22.59** | **23.02** | **0.681** | **0.338** | **16.91** | 1.90M | 842 s |
+| exposure, rendered without the gain | 19.34 | 23.02 | 0.674 | 0.344 | 15.61 | | |
+| bilateral grid | 20.99 | 22.32 | 0.677 | 0.336 | 16.00 | 1.82M | 1279 s |
+| anti-aliased, rendered anti-aliased | 22.56 | 22.96 | 0.685 | 0.332 | 16.69 | 2.12M | 920 s |
+| anti-aliased, rendered classic | 20.88 | 21.36 | 0.642 | 0.349 | 16.57 | | |
+
+- **Exposure: default on** (`splat.EXPOSURE`; Splat tab "Exposure from the metadata", CLI `--no-exposure`; only where
+  transforms.json carries `mf_exposure`, `splat.exposure_known`). A small but consistent gain, also in the colour-
+  corrected PSNR (the splat's colours are cleaner, not just brighter). The splat holds the scene at the median
+  exposure, so a render scored against a photo at its own exposure without its gain is ~3 dB lower: expected, and
+  what a viewer shows (one normalized scene).
+- **Bilateral grid: off.** Learned per training photo, so a new view gets none: -1.4 dB raw, -0.5 dB colour-corrected,
+  38 % slower.
+- **Anti-aliased: off** (Splat tab "Anti-aliased rasterization", CLI `--antialiased`). Better on every score when
+  rendered anti-aliased (`evaluate.run(rasterize_mode=)`, splat_eval `rasterize_mode`), but its opacities assume the
+  2D filter: in classic renderers (the GUI's viewer, most .ply viewers, the splat mesh's TSDF) it loses 1.5 dB.
+  Worth it only with an anti-aliased viewer.

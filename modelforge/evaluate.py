@@ -101,7 +101,8 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     return out
 
 
-def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True, gains=None):
+def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True, gains=None,
+        rasterize_mode="classic"):
     """Pose, render and score the held-out images; stats to report.json["evaluation"] (report=True) and
     returned. splat_path: another ENU splat than splat/splat_enu.ply (e.g. a training snapshot); located:
     pose_holdout's result, to locate the images once for several splats. gains: {image name: relative exposure}
@@ -126,7 +127,7 @@ def run(project, holdout, width=1920, log=print, splat_path=None, located=None, 
     g = splat_mesh.load_splat(splat_path or os.path.join(project, "splat", "splat_enu.ply"))
     np.savez(inp, viewmats=np.array([located[n]["viewmat"] for n in names], np.float32),
              K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64), dist=np.array(dist, np.float64),
-             width=cam.width, height=cam.height, render_width=int(width),
+             width=cam.width, height=cam.height, render_width=int(width), rasterize_mode=rasterize_mode,
              paths=np.array([os.path.join(holdout["images_dir"], n) for n in names]),
              **({"gains": np.array([float(gains.get(n, 1.0)) for n in names])} if gains else {}), **g)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "splat_eval.py")
