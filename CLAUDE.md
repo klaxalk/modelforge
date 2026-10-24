@@ -147,8 +147,12 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
    too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; open: one common training resolution, semantic / evaluation per camera. Plan and decisions: `docs/todo_multicamera.md`.
-6. **TODO: level of detail for large splats** (merged coarse levels per tile / octree cell, chosen per camera
-   under a Gaussian budget): `docs/todo_splat_lod.md`.
+6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget" 2M):
+   k-d cells of <= 100k Gaussians, levels of 1/4 merged per voxel by moment matching (`modelforge/splat_lod.py`,
+   `splat/lod/`, built in the background when first shown: kladno_dira 5.77M in 48 s), a cut per camera (2 px per
+   voxel, budget) swapped ~0.4 s after the camera stops (`gui/lod.py`); merged levels beat the random subset by
+   2.5-9 dB and the full splat itself up to ~3 px. Open: Fly look-ahead, render fine-tuning, 3D Tiles:
+   `docs/todo_splat_lod.md`.
 7. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
    splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
 8. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):

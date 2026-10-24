@@ -18,7 +18,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -26,6 +26,7 @@ from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
 from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.jobqueue import QueuePanel
+from modelforge.gui.lod import SplatLod
 from modelforge.gui.videos import VideosPanel, upload_progress
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
@@ -304,10 +305,21 @@ class App:
                                                      "trains).")
                 self.g_splat_all = gui.add_checkbox(
                     "All gaussians", initial_value=True,
-                    hint=f"Show every Gaussian of the splat. Off: a random subset of at most "
+                    hint=f"Show every Gaussian of the splat (when Level of detail is off or the splat fits its "
+                         f"budget). Off: a random subset of at most "
                          f"{gdata.SPLAT_SHOWN:,} (finished splat) or {gdata.LIVE_SPLAT_SHOWN:,} (live preview while "
                          f"training), which keeps the browser responsive. Millions of Gaussians need a strong GPU "
                          f"in the browser and take a while to send.")
+                self.g_splat_lod = gui.add_checkbox(
+                    "Level of detail", initial_value=True,
+                    hint="A splat with more Gaussians than the budget is shown in cells, each at the detail the "
+                         "camera needs: fine near it, merged into fewer, larger Gaussians far away (about half a "
+                         "second after the camera stops). Built once per splat, in the background (~10 s per "
+                         "million Gaussians; splat/lod/). Off: All gaussians / a random subset as before.")
+                self.g_lod_budget = gui.add_number(
+                    "LoD budget", initial_value=splat_lod.BUDGET, min=250_000, max=20_000_000, step=250_000,
+                    hint="Gaussians sent to the browser with Level of detail. More: sharper farther out, a "
+                         "heavier load on the browser's GPU (it sorts them every frame).")
                 self.g_tiles_view = gui.add_checkbox(
                     "Tile boundaries", initial_value=False,
                     hint="Red boxes around the cells of a tiled splat (large flights; Splat tab → Tiles), from the "
@@ -317,6 +329,8 @@ class App:
                 self.g_dense_md = gui.add_markdown("")
                 self.g_tiles_view.on_update(lambda _: (self._draw_tiles(), self._sync_quickbar()))
                 self.g_splat_all.on_update(lambda _: self._splat_all_changed())
+                self.g_splat_lod.on_update(lambda _: self._draw_splat())
+                self.g_lod_budget.on_update(lambda _: self._draw_splat())
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
                 self.g_mesh_tex.on_update(lambda _: self._draw_mesh())
@@ -402,6 +416,7 @@ class App:
 
         with self.left.add_tab("Search", viser.Icon.SEARCH):  # semantic search, its own tab after View
             self.semantic = SemanticPanel(self, gui)
+        self.lod = SplatLod(self)
 
         with self.left.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
@@ -1022,6 +1037,8 @@ class App:
             self.server.scene.remove_by_name(name)
         self._drawn = {}
         self._dense_lines = {}
+        if hasattr(self, "lod"):  # its cells went with /dense
+            self.lod.forget()
 
     def _set_aspect(self):
         """Frustum aspect from the project's images (portrait phone videos are taller than wide)."""
@@ -1091,7 +1108,7 @@ class App:
     def _on_connect(self, client):
         if self._flight is None and not self.orbit_on:  # else it joins the flight / orbit
             self.recenter(client)
-        client.camera.on_update(lambda _: self._carry_pivot(client))
+        client.camera.on_update(lambda _: (self._carry_pivot(client), self.lod.on_camera(client)))
 
     def _speed_html(self):
         orbit = float(self.g_orbit_speed.value) if getattr(self, "orbit_on", False) else 0.0
@@ -2357,6 +2374,7 @@ class App:
                     self._live_splat = self._live_src = None
                     self.server.scene.remove_by_name("/dense/splat_live")
                 self.server.scene.remove_by_name("/dense/splat")
+                self.lod.hide()
                 self._unchanged("splat", None)
                 self._splat_live_on = True
                 self.g_splat.disabled, self.g_splat.value = False, True  # View tab toggle drives the live layer
@@ -2997,26 +3015,50 @@ class App:
 
     def _draw_splat(self):
         if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer
+            self.lod.hide()
             self._draw_live_splat()
             return
-        key = ((self._file_key(self.dense["splat"]), self.g_splat_all.value)
-               if self.g_splat.value and self.dense["splat"] else None)
+        key = ((self._file_key(self.dense["splat"]), self.g_splat_all.value, self.g_splat_lod.value,
+                int(self.g_lod_budget.value)) if self.g_splat.value and self.dense["splat"] else None)
         if self._unchanged("splat", key):
             return
+        self._splat_total = gdata.splat_count(self.dense["splat"]) if key is not None else 0
+        idx = None
+        if key is not None and self.lod.wanted(self._splat_total):
+            idx = self.lod.ready()
+        if idx is not None:  # level of detail: cells at the camera's levels instead of one splat
+            self._splat_shown = None
+            self.server.scene.remove_by_name("/dense/splat")
+            self.lod.cut_cam = None
+            self.lod.show(idx)
+            return
+        self.lod.hide()
         if key is not None:
             c, cov, rgb, op = gdata.load_splat(self.dense["splat"], self._splat_limit(gdata.SPLAT_SHOWN))
             total = gdata.splat_count(self.dense["splat"])
             self._splat_shown = (c, cov, rgb, op, gdata.splat_subset(total, self._splat_limit(gdata.SPLAT_SHOWN)))
             self.redraw_splat_decorated()
             self._dense_status("splat", f"splat: {total:,} gaussians" + (
-                f" ({len(c):,} shown; View → All gaussians for all)" if len(c) < total else ""))
+                f" ({len(c):,} shown; View → All gaussians for all)" if len(c) < total else "") + (
+                "; building the level of detail …" if self.lod.building else ""))
         else:
             self._splat_shown = None
             self.server.scene.remove_by_name("/dense/splat")
             self._dense_status("splat", None)
 
+    def _lod_status(self):
+        lod = self.lod
+        if lod.idx is None:
+            return
+        levels = np.bincount(list(lod.drawn.values()), minlength=len(lod.idx["levels"]))
+        self._dense_status("splat", f"splat: {lod.idx['gaussians']:,} gaussians, level of detail: {lod.total():,} "
+                                    f"shown, cells per level (fine → coarse) {' / '.join(map(str, levels))}")
+
     def redraw_splat_decorated(self):
         """Send the loaded splat again with the semantic search applied (no file reload)."""
+        if self.lod.idx is not None:
+            self.lod.redecorate()
+            return
         shown = getattr(self, "_splat_shown", None)
         if shown is None or not self.g_splat.value or getattr(self, "_splat_live_on", False):
             return

@@ -1,6 +1,52 @@
 # TODO: level of detail for large splats
 
-Priority: low. Status: proposed 2026-10-23, not started; the user will ask for it.
+Priority: low. Status: **step 1 done 2026-10-24** (the user asked): cells + merged levels + a cut per camera in the
+View tab (`modelforge/splat_lod.py`, `modelforge/gui/lod.py`). Not done: Fly look-ahead, render fine-tuning, 3D Tiles.
+
+## Done (2026-10-24)
+
+- **Hierarchy** (`splat_lod.build`, `python -m modelforge.splat_lod PROJECT`): not per tile but a k-d split of the
+  merged splat (median cuts along the box's longest axis, 1-99 % range) into cells of <= 100k Gaussians (`CELL_MAX`),
+  which works the same for untiled splats. Per cell levels of ~1/4 each (`RATIO`), down to >= 1000 Gaussians, at most
+  5: per level a cubic voxel size, found by bisection so the count comes out right; Gaussians larger than the voxel
+  stay, the rest merge per voxel by moment matching with weight opacity x sigma_1 sigma_2 (the two largest axes);
+  opacity = sum of the children's weights / the merged Gaussian's sigma_1 sigma_2, clipped to 1; colour the weighted
+  mean (band 0: the GUI draws base colours). Every level is merged from level 0, so errors do not pile up.
+  `splat/lod/`: index.json (keyed by splat_enu.ply's size + mtime) + per level npy files (float32 centres, float16
+  covariance upper triangle, uint8 RGBA: viser's 32 bytes per Gaussian) memory-mapped by the GUI; `L<k>_parent.npy`
+  maps level 0 to the original indices and each level-0 Gaussian to its merged one (the semantic search highlights a
+  merged Gaussian by its best child). Clean removes it.
+- **Measured:** karlak 2.27M Gaussians -> 32 cells, levels 2.27M / 567k / 142k / 35k, 18 s, peak 1.3 GB, 81 MB;
+  kladno_dira 5.77M -> 64 cells, 5.77M / 1.44M / 360k / 90k, 48 s, peak 3.0 GB, 205 MB.
+- **Quality** (`build/lod/render_cmp.py`, gsplat in nerfstudio's venv, 12 training cameras; the truth = level 0
+  rendered at 4x and box-filtered; each level rendered at the resolution where its voxel is P px at the median depth):
+
+  | P | | karlak L1 / L2 / L3 | kladno_dira L1 / L2 / L3 |
+  |---|---|---|---|
+  | 1.5 | merged level | 23.3 / 21.3 / 21.6 dB | |
+  | 1.5 | level 0 itself | 20.6 / 18.3 / 18.2 | |
+  | 1.5 | random subset of the same size | 20.8 / 17.8 / 16.7 | |
+  | 2 | merged / level 0 / random | | 25.0 / 21.9 / 20.5 · 24.6 / 22.5 / 21.3 · 19.9 / 14.5 / 11.7 |
+  | 3 | merged / level 0 | 24.2 / 21.6 / 20.1 · 23.5 / 20.3 / 18.1 | |
+  | 6 | merged / level 0 | 24.4 / 20.9 / 19.0 · 28.1 / 22.8 / 20.1 | |
+
+  Merged levels act as anti-aliasing: up to ~3 px per voxel they match or beat the full splat drawn at that size,
+  and beat the random subset (what the GUI showed so far) by 2.5-9 dB. -> switch at `PIXELS` = 2 px. Covariance
+  scale x0.6 / x1.6 instead of 1 gave no better worst cases (`COV_SCALE` = 1).
+- **Cut** (`splat_lod.choose`, ~1 ms for 64 cells): every cell starts coarsest; a heap refines the cell whose voxel
+  looks largest (voxel x focal / distance to its 2-98 % box; outside the view x0.25) one level at a time while the
+  budget (View "LoD budget", default 2M) holds and the voxel is over 2 px. kladno_dira from 300 m up, from a photo's
+  pose and from 10 m: ~2.0M each, 12-18 cells at full detail.
+- **GUI** (View "Level of detail", default on; used when the splat has more Gaussians than the budget): every cell
+  its own viser splat object (`/dense/splat_lod/cNNNN`; viser sorts all splat objects together, so cells blend
+  correctly; checked in its source, `GaussianSplats.tsx`); the cut follows the browser that moved last, 0.4 s after
+  its camera stops (every 2 s while it keeps moving), changed cells swapped in one `server.atomic()`. Without a
+  hierarchy it is built in a job process of its own (if the RAM is free; ~0.6 GB per million Gaussians), meanwhile
+  the random subset as before. The live training preview is unchanged.
+- Viser notes: a hidden splat object is still sorted (moved off screen), so all levels cannot be preloaded and
+  toggled; adding / replacing an object re-merges all buffers in the browser (local, not sent again).
+- Test: `tests/test_splat_lod.py`.
+
 
 ## Why
 

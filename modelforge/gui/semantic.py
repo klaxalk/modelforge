@@ -348,12 +348,17 @@ class SemanticPanel:
         if self.rel is not None:
             self.g_result.content = self._summary()
 
-    def decorate(self, centers, cov, rgb, op, idx):
-        """The splat arrays to send, with the current search applied (idx: Gaussians shown of the file)."""
+    def decorate(self, centers, cov, rgb, op, idx, parent=None):
+        """The splat arrays to send, with the current search applied (idx: Gaussians shown of the file; with parent,
+        idx are merged ones: parent[j] = the shown Gaussian idx[j] went into, which gets its best score)."""
         rel = self._rel()[0]
         if rel is None or len(rel) <= (idx.max() if len(idx) else 0):
             return centers, cov, rgb, op
         r = rel[idx]
+        if parent is not None:
+            best = np.zeros(len(centers), r.dtype)
+            np.maximum.at(best, parent, r)
+            r = best
         thr = float(self.g_thr.value)
         if self.g_mode.value == "matches only":
             keep = r >= thr

@@ -50,6 +50,7 @@ INTERMEDIATE = (
     ("tiles", "splat tiles (per-tile datasets and training runs; the merged splat is splat/splat_enu.ply)"),
     ("images_*", "downscaled frames for splat training"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
+    ("splat/lod", "splat level of detail (View; built again when shown)"),
     ("previous", "archived earlier extractions"),
     ("extracted", "all extracted frames (a subset of them is in images/)"),
     ("analysis", "overlap analysis of the extracted frames (features + matches)"),
