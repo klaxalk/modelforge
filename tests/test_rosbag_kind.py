@@ -319,6 +319,8 @@ def test_splat_lidar_command():
     assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
     assert splat.parse_lidar("[lidar] step 1500: depth error median 0.64% p90 2.57% within 5% 95.3%") == {
         "step": 1500, "median_pct": 0.64, "p90_pct": 2.57, "within_5pct": 95.3}
+    assert splat.parse_lidar("[lidar] step 2500: depth error median 0.6% p90 8.2% within 5% 87.4% gated 9.7%")[
+        "gated_pct"] == 9.7
 
 
 @pytest.mark.skipif(not os.path.exists("/opt/nerfstudio/bin/python"), reason="needs nerfstudio's venv (CUDA image)")
@@ -339,6 +341,13 @@ v = d[d > 0]
 centre = d[42:58, 42:58][d[42:58, 42:58] > 0]  # inside the near wall (u, v in 40..60)
 assert d.shape == (100, 100, 1) and torch.allclose(centre, torch.tensor(5.0)), centre.unique()
 assert (v == 10.0).any()  # the far wall outside the near one stays
+from mf_splatfacto_lidar import depth_loss
+z = torch.full((4,), 10.0)
+D = torch.tensor([10.0, 4.0, 14.0, 30.0])  # right, fog (in front), behind by 40 %, behind by 200 % (past the mesh)
+l0, rel, g0 = depth_loss(D, z)
+lg, _, g = depth_loss(D, z, gate=0.5)
+assert abs(l0.item() - (0 + 0.6 + 0.4 + 1.0) / 4) < 1e-6 and g0 == 0
+assert abs(lg.item() - (0 + 0.6 + 0.4) / 4) < 1e-6 and g == 0.25  # only the one behind by > 50 % is dropped
 print("ok")
 """
     r = subprocess.run([os.path.join(splat.NS_BIN, "python"), "-c", code], env=splat._env(),

@@ -81,6 +81,19 @@ def lidar_depth_image(xyz, viewmat, K, W, H, window=5, tol=0.05):
     return torch.where(valid, zbuf, torch.zeros_like(zbuf))[0, 0, :, :, None]
 
 
+def depth_loss(depth, z, clamp=1.0, gate=0.0):
+    """mean(min(|D - z| / z, clamp)) over the targets, a target counting 0 where the render lies more than gate
+    behind it (gate > 0; the photos see past the mesh there); a render in front of it (fog) always counts.
+    Returns (loss, |D - z| / z of all, share gated)."""
+    signed = (depth - z) / z
+    rel = signed.abs()
+    term = rel.clamp(max=clamp)
+    if gate > 0:
+        use = signed.detach() <= gate
+        return (term * use).sum() / max(len(rel), 1), rel, 1.0 - use.float().mean().item()
+    return term.mean(), rel, 0.0
+
+
 @dataclass
 class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     _target: Type = field(default_factory=lambda: SplatfactoLidarModel)
@@ -88,6 +101,11 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     """weight of the LiDAR depth loss (0: only report the depth error)"""
     lidar_depth_clamp: float = 1.0
     """relative depth errors are clamped to this in the loss"""
+    lidar_depth_gate: float = 0.5
+    """dense mesh maps only: after lidar_depth_gate_after steps, a pixel whose rendered depth lies more than this
+    fraction *behind* the mesh gets no target (the photos see past the mesh there: Poisson bubbles in halls, closures
+    above the horizon, blobs at crowns); a render in front of the mesh (fog) is always pulled back. 0 = off"""
+    lidar_depth_gate_after: int = 2000
     lidar_occlusion_window: int = 5
     """window (px, at the training resolution) for dropping returns behind a nearer one"""
     lidar_occlusion_tol: float = 0.05
@@ -137,7 +155,7 @@ class SplatfactoLidarModel(SplatfactoModel):
                              persistent=False)
         if self.has_lidar:
             self.config.output_depth_during_training = True
-        self._lidar_errors = []
+        self._lidar_errors, self._lidar_gated = [], []
         print(f"[lidar] dense depth maps for {sum(f is not None for f in self.depth_files)} of "
               f"{len(self.depth_files)} training images (nerfstudio holds out every 10th photo for evaluation), "
               f"depth loss weight {self.config.lidar_depth_lambda}"
@@ -211,23 +229,27 @@ class SplatfactoLidarModel(SplatfactoModel):
         m = target > 0
         if m.any():
             z = target[m]
-            rel = (outputs["depth"][m] - z).abs() / z
+            gate = self.config.lidar_depth_gate if (
+                self.depth_files and self.step >= self.config.lidar_depth_gate_after) else 0.0
+            term, rel, gated = depth_loss(outputs["depth"][m], z, self.config.lidar_depth_clamp, gate)
             if self.config.lidar_depth_lambda > 0:
-                loss["lidar_depth_loss"] = self.config.lidar_depth_lambda * rel.clamp(
-                    max=self.config.lidar_depth_clamp).mean()
-            self._report(rel.detach())
+                loss["lidar_depth_loss"] = self.config.lidar_depth_lambda * term
+            self._report(rel.detach(), gated)
         return loss
 
-    def _report(self, rel):
+    def _report(self, rel, gated=0.0):
         if len(rel) > 4000:
             rel = rel[torch.randint(len(rel), (4000,), device=rel.device)]
         self._lidar_errors.append(rel.float().cpu())
+        self._lidar_gated.append(gated)
         every = self.config.lidar_report_every
         if every and (self.step + 1) % every == 0:
             e = torch.cat(self._lidar_errors).numpy()
-            self._lidar_errors = []
+            g = float(np.mean(self._lidar_gated))
+            self._lidar_errors, self._lidar_gated = [], []
             print(f"[lidar] step {self.step + 1}: depth error median {100 * np.median(e):.2f}% "
-                  f"p90 {100 * np.percentile(e, 90):.2f}% within 5% {100 * np.mean(e < 0.05):.1f}%", flush=True)
+                  f"p90 {100 * np.percentile(e, 90):.2f}% within 5% {100 * np.mean(e < 0.05):.1f}%"
+                  + (f" gated {100 * g:.1f}%" if g > 0 else ""), flush=True)
 
 
 def _method(base, name, description):

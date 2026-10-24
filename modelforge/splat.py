@@ -52,7 +52,7 @@ NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
 PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nsplugin")
 DEFAULT_LIDAR_DEPTH = 0.2  # weight of the LiDAR depth loss (relative depth error, see the plugin)
-_LIDAR = re.compile(r"\[lidar\] step (\d+): depth error median ([\d.]+)% p90 ([\d.]+)% within 5% ([\d.]+)%")
+_LIDAR = re.compile(r"\[lidar\] step (\d+): depth error median ([\d.]+)% p90 ([\d.]+)% within 5% ([\d.]+)%(?: gated ([\d.]+)%)?")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
 CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps memory use flat
 
@@ -341,7 +341,7 @@ def parse_lidar(line):
     if not m:
         return None
     return {"step": int(m.group(1)), "median_pct": float(m.group(2)), "p90_pct": float(m.group(3)),
-            "within_5pct": float(m.group(4))}
+            "within_5pct": float(m.group(4)), **({"gated_pct": float(m.group(5))} if m.group(5) else {})}
 
 
 def parse_progress(line):

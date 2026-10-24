@@ -1,6 +1,6 @@
 # TODO: cheap splat quality fixes
 
-Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off; tile masks on by default (berlin A/B)** (see the end). Both are flags or small changes plus an A/B run;
+Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off; tile masks on by default (berlin A/B); depth outlier gate on by default and the seams of masked tiles checked (2026-10-24)** (see the end). Still open: the "Also open" list below (SH degree 1, 4K with a lower split threshold, Difix3D+). Both are flags or small changes plus an A/B run;
 validate on a small project first (fullrun_test, karlak; held-out scoring as in `build/splat_exp.py`), not on
 kladno_dira.
 
@@ -138,3 +138,40 @@ error's tail), and training is a third faster. "All pixels" drops because the ot
 the merge cuts them anyway. → **On by default** for tiled runs (Splat tab "Tiles: train only the tile's pixels",
 `splat_tiles.TILE_MASK`; CLI `--no-tile-mask`; needs the dense mesh prior, else ignored). Not yet checked: the seams
 of a merged masked run (the masks keep each tile's margin).
+
+## Depth outlier gate and the seams of masked tiles (2026-10-24)
+
+**Gate** (`nsplugin/mf_splatfacto_lidar.py` `depth_loss`, config `lidar_depth_gate` 0.5, `lidar_depth_gate_after`
+2000; dense mesh maps only, LiDAR untouched): after warm-up, a pixel whose rendered depth lies more than 50 % *behind*
+the mesh loses its target: the photos see past the mesh there (Poisson bubbles in halls, closures above the horizon,
+blobs at crowns). One-sided on purpose: a render in front of the mesh is fog, and its target stays. The loss stays
+normalized by all target pixels; the report line adds "gated x %" (`splat.parse_lidar` `gated_pct`). Off:
+`--pipeline.model.lidar-depth-gate 0` (extra ns-train args). The smaller patch-hole size for the prior was not done:
+the gate drops those targets wherever they disagree, without a second mesh.
+
+berlin tile 0, 10000 steps, masks on (`build/tilemask_ab.py maskgate`): ~10 % of the targets gated from step 2000 on
+(more than the "small share" the CPU check suggested), depth error p90 19.6 → 17.4 %, in-tile PSNR 22.17 → **22.32**,
+p10 19.02 → **19.71** dB, Gaussians 635k → 631k. → on by default.
+
+**Seams** (`build/seam_ab.py`, `seam_eval.py`, `seam_view.py`): tile 2 (the longest seam with tile 0, 338 m) trained
+10000 steps without and with masks, each arm's tiles 0 + 2 cleaned as a tiled run cleans them and merged; scored on the
+101 photos neither tile trained on, per pixel by its mesh surface's distance to the 0|2 seam (pooled PSNR / mean of
+views / views):
+
+| merge | < 5 m | 5–15 m | 15–40 m | > 40 m |
+|---|---|---|---|---|
+| no masks | 26.35 / 25.67 / 6 | 24.23 / 24.17 / 15 | 21.68 / 23.33 / 38 | 22.39 / 21.66 / 82 |
+| masks | 26.10 / 25.51 / 6 | 24.12 / 23.96 / 15 | 21.90 / 23.48 / 38 | 22.52 / 21.82 / 82 |
+| masks + gate (tile 0) | **26.42 / 25.85** / 6 | **24.27 / 24.18** / 15 | **21.97 / 23.55** / 38 | **22.55** / 21.81 / 82 |
+
+- Masks alone cost ~0.1–0.25 dB at the seam (few views) and gain ~0.15–0.2 dB away from it; with the gate the seam
+  band is as good as without masks. Per view, 11 of the 15 seam views are equal or better masked. The worst one
+  (berlin_3_4_02875, −2 to −3 dB in the band) is a low view past a tree crown. Its seam ground looks the same in
+  all arms (`build/berlin_ab/seam_02875.jpg`); the visible difference is the far ground of tiles outside this
+  two-tile merge, which masked tiles leave empty instead of fogging over. No seam line shows.
+- Tile 2 alone: the mask removed its fog (depth p90 46.7 → 5.5 %, 1.27M → 0.97M Gaussians), but in-tile PSNR was
+  22.32 → 22.16 (p10 19.34 → 18.99) and it was not faster (735 / 763 s). Tile 0 had gained 0.8 dB at p10, a third
+  faster. The merged scores above favour the masks, so they stay on.
+- Found on the way: a tile's loss masks only cover photos whose depth map exists. `splat.run` renders the missing
+  maps only later, so the A/B script now renders them first. The real tiled run computes the masks after the maps
+  (`splat_tiles.run`); not affected.
