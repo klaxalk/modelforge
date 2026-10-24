@@ -30,3 +30,22 @@ def die(project):
 
 def fail(project):
     raise ValueError("no images")
+
+
+def long_job(project, token=None, seconds=3.0):
+    """Logs, runs `seconds`, writes a result file; stops when cancelled."""
+    from modelforge import pipeline
+    pipeline.log("long job started")
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        token.check()
+        time.sleep(0.05)
+    open(os.path.join(project, "long_job.done"), "w").close()
+    pipeline.log("long job done")
+
+
+def gui_that_dies(project, seconds):
+    """A stand-in GUI: starts long_job in a job process (worker.run) and blocks on it (the test kills this one)."""
+    from modelforge import worker
+    worker.run("tests.worker_targets:long_job", {"project": project, "token": worker.TOKEN, "seconds": seconds},
+               label="long job")

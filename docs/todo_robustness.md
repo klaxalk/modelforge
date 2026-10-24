@@ -1,7 +1,7 @@
 # TODO: robustness of long jobs
 
-Priority: **medium**. Status: §2 (resume refine) and §1 (job processes) **done 2026-10-23**, except re-attaching
-after a GUI restart; §3 open. Why: on 2026-10-23 the kernel OOM-killed the GUI
+Priority: **medium**. Status: §2 (resume refine) and §1 (job processes) **done 2026-10-23**, re-attaching after a
+GUI restart **done 2026-10-24**; §3 deferred. Why: on 2026-10-23 the kernel OOM-killed the GUI
 twice (07:26 next to a test run of mine, 09:53 alone at 30 GB in round 1 of kladno_dira's global refine, 5681
 images). Each time the GUI and the job inside it died together and the refine was lost (round 0 alone took 52 min),
 although `sparse/round_0` was on disk.
@@ -77,3 +77,21 @@ With heavy stages in job processes an out-of-memory kill no longer takes the GUI
 last step, and BA mode auto already chooses chunked when a global refine would not fit. A per-stage estimate would
 mostly add warnings of unproven accuracy; revisit when a stage other than refine runs out of memory again (measure
 its peak first, as `auto_ba_mode` did).
+
+## Done: re-attaching after a GUI restart (2026-10-24)
+
+A job process already outlived its GUI: killed by a signal (a restart's SIGTERM), Python skips the exit handlers that
+would terminate daemonic children, so the child finishes as an orphan (docker-init reaps it); only its pipes to the
+GUI break, which the child now tolerates. What was missing was the GUI knowing about it:
+- the child writes `PROJECT/job.json` (pid, target, label, start; at the end the result: done / cancelled / error +
+  message), `PROJECT/job.log` (its log lines) and watches `PROJECT/job.cancel` (`worker.detached`, `alive` (not a
+  zombie), `FileToken`, `clear`). The GUI that saw a job to its end removes job.json.
+- `App._reattach` (on start and on opening a project): a running job shows as running "<stage> (re-attached)" with its
+  log lines (no live progress or 3D updates), Stop through job.cancel, its end in the state line and History, then the
+  snapshots / layers are reloaded; a job that finished (or died) while no GUI watched gets a History line.
+- Only the stages run through `worker.run` (features … export, SfM mesh, COLMAP dense); splat training, splat mesh and
+  colouring are subprocesses of the GUI's own thread (the trainer would go on, its tile rounds and export would not:
+  Resume training covers that). The rest of a sequence (Run full pipeline) does not continue.
+- Tests: `test_worker.py` (`test_job_outlives_the_gui`: a stand-in GUI killed with SIGTERM, the job finishes, job.json
+  / job.log tell; Stop by file; a finished job leaves no job file; `test_gui_reattaches_after_a_restart`: a real App
+  follows the job to its end and stops another).

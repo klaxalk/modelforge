@@ -987,6 +987,7 @@ class App:
         self._remember_project()
         for client in self.server.get_clients().values():
             self._on_connect(client)
+        self._reattach()  # a job of this project that outlived a GUI restart
 
     def _watch_uploads(self):
         """Progress of browser uploads still arriving (viser delivers them only when complete)."""
@@ -1748,20 +1749,24 @@ class App:
                      "details in the Log folder and the server console")
         finally:
             pipeline.LISTENERS.remove(self._on_log)
-            with self.lock:  # the ticker writes under the same lock and checks `running`
-                self.running = False
-                self.g_state.content = final or "❌ **stopped**"
-            unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
-                           "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
-                           "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
-                           "splatmesh": splat_mesh.available() is not None,
-                           "refine-resume": not self._refine_checkpoint()}
-            for name, b in self.g_buttons.items():
-                b.disabled = unavailable.get(name, False)
-            self.g_progress.visible = False
-            self.g_stop.disabled = not self.ingest.running
-            self.g_splat_pause.disabled = True
-            self._sync_resume()
+            self._end_job(final, project)
+
+    def _end_job(self, final, project):
+        """A job ended (run here or re-attached): the state line, the buttons, Stop, the progress bar."""
+        with self.lock:  # the ticker writes under the same lock and checks `running`
+            self.running = False
+            self.g_state.content = final or "❌ **stopped**"
+        unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
+                       "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
+                       "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
+                       "splatmesh": splat_mesh.available() is not None,
+                       "refine-resume": not self._refine_checkpoint()}
+        for name, b in self.g_buttons.items():
+            b.disabled = unavailable.get(name, False)
+        self.g_progress.visible = False
+        self.g_stop.disabled = not self.ingest.running
+        self.g_splat_pause.disabled = True
+        self._sync_resume()
 
     def _in_job(self, target, callbacks=None, events=None, report=worker.REPORT, **kwargs):
         """One stage: target(project=, report=, **kwargs) in a job process of its own (modelforge.worker: an
@@ -1775,7 +1780,85 @@ class App:
             kw = {k: real[v]() if isinstance(v, str) and v in real else v for k, v in kwargs.items()}
             module, fn = target.split(":")
             return getattr(importlib.import_module(module), fn)(**kw, **(callbacks or {}), **(events or {}))
-        worker.run(target, kwargs, callbacks, token=self._token, events=events, on_log=self._on_log)
+        worker.run(target, kwargs, callbacks, token=self._token, events=events, on_log=self._on_log,
+                   label=(getattr(self, "_job", None) or {}).get("label"))
+
+    def _reattach(self):
+        """A job process the previous GUI started for this project (modelforge.worker: it outlives a GUI restart):
+        still running → shown as running (its log lines; no live progress) with Stop; finished or killed meanwhile →
+        a History line. Only stages that ran in a job process (features … export, SfM mesh, COLMAP dense); the rest
+        of a sequence (Run full pipeline) does not continue."""
+        if not self.path or self.running:
+            return
+        d = worker.detached(self.path)
+        if d is None:
+            return
+        label = d.get("label") or "job"
+        if d["state"] != "running":
+            when = time.strftime("%H:%M", time.localtime(d.get("ended") or d.get("started") or time.time()))
+            if d["state"] == "finished":
+                icon = {"done": "✅", "cancelled": "⏹"}.get(d["result"], "❌")
+                self._history(f"{icon} **{label}** {d['result']} at {when}, while the GUI was restarting"
+                              + (f": `{d['error']}`" if d.get("error") else ""))
+            else:
+                self._history(f"❌ **{label}** ended without a result while the GUI was restarting (killed: out of "
+                              "memory?)")
+            worker.clear(self.path)
+            self._after_reattached(label)
+            return
+        self.running = True
+        self._token = worker.FileToken(self.path)
+        self.g_stop.disabled = False
+        self._run_id = getattr(self, "_run_id", 0) + 1
+        for b in self.g_buttons.values():
+            b.disabled = True
+        self._job = {"name": label, "t0": d["started"], "label": f"{label} (re-attached)", "stage_t0": d["started"],
+                     "detail": "running in its job process from before the GUI restarted: its log lines show, its "
+                               "live progress does not"}
+        threading.Thread(target=self._follow_detached, args=(d, self._run_id), daemon=True).start()
+
+    def _follow_detached(self, d, run_id):
+        project, label = self.path, d.get("label") or "job"
+        threading.Thread(target=self._ticker, args=(run_id,), daemon=True).start()
+        self._on_log(f"--- re-attached to {label} (pid {d['pid']}, started "
+                     f"{time.strftime('%H:%M:%S', time.localtime(d['started']))})")
+        log_path, pos = os.path.join(project, d.get("log") or worker.LOG), 0
+        while True:
+            try:
+                with open(log_path) as f:
+                    f.seek(pos)
+                    new = f.read()
+                    pos = f.tell()
+                for line in new.splitlines():
+                    self._on_log(line)
+            except OSError:
+                pass
+            if not worker.alive(d["pid"]):
+                break
+            time.sleep(1.0)
+        end = worker.detached(project) or {}
+        res, took = end.get("result"), _fmt_s(time.time() - d["started"])
+        if res == "done":
+            final = f"✅ **{label} finished** in {took} · {time.strftime('%H:%M:%S')}  \n{NEXT_STEP.get(label, '')}"
+            self._history(f"✅ **{label}** · {took} (re-attached after a GUI restart)")
+        elif res == "cancelled":
+            final = f"⏹ **stopped** during {label} after {took} · {time.strftime('%H:%M:%S')}"
+            self._history(f"⏹ **{label}** stopped")
+        else:
+            why = end.get("error") or "the job process ended without a result (killed: out of memory?)"
+            final = f"❌ **{label} failed** after {took}: `{why}`"
+            self._history(f"❌ **{label}** failed: `{why}`")
+        worker.clear(project)
+        self._end_job(final, project)
+        self._after_reattached(label)
+
+    def _after_reattached(self, label):
+        """What a finished job changed: snapshots, dense / splat layers."""
+        try:
+            self.refresh_snapshot_list(select="main" if label in ("refine", "reconstruct", "export") else None)
+            self._refresh_dense()
+        except Exception:  # noqa: BLE001 - a view refresh never breaks the GUI
+            traceback.print_exc()
 
     def pause_splat(self):
         """Pause button: like Stop (the trainer saves a checkpoint and ends), but splat.run skips the
@@ -2960,6 +3043,7 @@ def main():
         path = last_project(root)
     app = App(path, args.port, root=root)
     app._remember_project()  # here, not in App(): tests open projects too
+    app._reattach()  # a job process the previous GUI started (it outlives a restart)
     app.semantic.preload()  # the text model loads in the background, ready for the first search
     print(f"modelforge GUI on http://localhost:{args.port}", flush=True)
     if args.run:

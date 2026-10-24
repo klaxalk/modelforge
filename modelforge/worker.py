@@ -15,9 +15,17 @@ The GUI side calls `run(target, kwargs, callbacks, token, events)`:
   events     {argument name: threading.Event} (Skip, Skip this BA round): set in the GUI, set in the child
 The child's log lines (pipeline.LISTENERS) arrive through the GUI's on_log. Cancelling the token cancels the child's
 (a BA aborts within an iteration); a child that has not ended STOP_GRACE s later is terminated.
+
+A job outlives the GUI (2026-10-24): killed by a signal, Python skips its exit handlers, so the child is not
+terminated and finishes as an orphan (only its pipes to the GUI break). With a project the child keeps
+PROJECT/job.json (JOB: pid, target, label, start, then the result) and PROJECT/job.log (its log lines), and watches
+PROJECT/job.cancel (Stop without the GUI that started it). `detached(project)` tells a restarted GUI about it
+(running, or finished meanwhile); `FileToken` stops it; `clear` forgets a finished one.
 """
 
+import json
 import multiprocessing as mp
+import os
 import queue
 import signal
 import threading
@@ -28,6 +36,55 @@ REPORT, PRIORS, META, TOKEN = "<report>", "<priors>", "<meta>", "<token>"
 LIVE_EVERY = 0.25  # s between forwarded live BA events
 ONE_SHOT = {"skip_round"}  # events the job clears itself after use: cleared in the GUI once forwarded
 STOP_GRACE = 60.0  # s a cancelled job may take to stop by itself before it is terminated
+
+
+JOB, LOG, CANCEL = "job.json", "job.log", "job.cancel"  # in the project folder
+
+
+def _write_job(project, d):
+    path = os.path.join(project, JOB)
+    with open(path + ".part", "w") as f:
+        json.dump(d, f, indent=1)
+    os.replace(path + ".part", path)
+
+
+def alive(pid):
+    """The process exists and is not a zombie."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def detached(project):
+    """PROJECT/job.json as a dict with "state": "running" (its process lives), "finished" (a result is recorded) or
+    "lost" (the process is gone without one: killed); None without a job file."""
+    try:
+        d = json.load(open(os.path.join(project, JOB)))
+    except (OSError, ValueError, TypeError):
+        return None
+    d["state"] = "finished" if d.get("result") else "running" if alive(d.get("pid", -1)) else "lost"
+    return d
+
+
+def clear(project):
+    for name in (JOB, CANCEL):
+        try:
+            os.remove(os.path.join(project, name))
+        except OSError:
+            pass
+
+
+class FileToken:
+    """A jobs.Token-like stop for a job the GUI did not start (re-attached): cancel() asks it through job.cancel."""
+
+    def __init__(self, project):
+        self.project, self.cancelled = project, False
+
+    def cancel(self):
+        self.cancelled = True
+        open(os.path.join(self.project, CANCEL), "w").close()
 
 
 class Killed(RuntimeError):
@@ -46,22 +103,48 @@ def _sanitize(x):
     return x
 
 
-def _child(target, kwargs, callbacks, events, out, inbox):
+def _child(target, kwargs, callbacks, events, out, inbox, label=None):
     from modelforge import jobs, pipeline
     token = jobs.Token()
     flags = {name: threading.Event() for name in events}
+    project = kwargs.get("project")
+    job, logf = None, None
+    if project and os.path.isdir(project):  # survives the GUI: job.json + job.log, Stop through job.cancel
+        clear(project)
+        job = {"pid": os.getpid(), "target": target, "label": label or target.split(":")[1], "started": time.time(),
+               "log": LOG}
+        _write_job(project, job)
+        logf = open(os.path.join(project, LOG), "w", buffering=1)
 
     def listen():
         while True:
-            msg = inbox.get()
+            try:
+                msg = inbox.get()
+            except (EOFError, OSError):  # the GUI is gone: the job goes on
+                return
             if msg == "cancel":
                 token.cancel()
             elif msg in flags:
                 flags[msg].set()
 
+    def watch_cancel():
+        while not token.cancelled:
+            if os.path.exists(os.path.join(project, CANCEL)):
+                token.cancel()
+            time.sleep(1.0)
+
     threading.Thread(target=listen, daemon=True).start()
-    pipeline.LISTENERS.append(lambda line: out.put(("log", line)))
-    project = kwargs.get("project")
+    if job is not None:
+        threading.Thread(target=watch_cancel, daemon=True).start()
+
+    def on_line(line):
+        out.put(("log", line))
+        if logf is not None:
+            try:
+                logf.write(line.rstrip("\n") + "\n")
+            except (OSError, ValueError):
+                pass
+    pipeline.LISTENERS.append(on_line)
     pri = meta = None
     if PRIORS in kwargs.values() or META in kwargs.values():
         from modelforge.sfm import priors as priors_mod
@@ -86,26 +169,32 @@ def _child(target, kwargs, callbacks, events, out, inbox):
     for name in events:
         kw[name] = flags[name]
     module, fn = target.split(":")
+    result = ("error", "ended without a result", "")
     try:
         import importlib
         getattr(importlib.import_module(module), fn)(**kw)
-        out.put(("done",))
+        result = ("done",)
     except jobs.Cancelled:
-        out.put(("cancelled",))
+        result = ("cancelled",)
     except BaseException as e:  # noqa: BLE001 - everything goes back to the GUI
-        out.put(("error", f"{type(e).__name__}: {e}", traceback.format_exc()))
+        result = ("error", f"{type(e).__name__}: {e}", traceback.format_exc())
     finally:
+        if job is not None:  # for a GUI that restarted meanwhile
+            _write_job(project, {**job, "result": result[0], "error": result[1] if len(result) > 1 else "",
+                                 "ended": time.time()})
+        out.put(result)
         out.put(("exit",))
 
 
-def run(target, kwargs, callbacks=None, token=None, events=None, on_log=None):
+def run(target, kwargs, callbacks=None, token=None, events=None, on_log=None, label=None):
     """Run target(**kwargs) in a job process (see the module doc); returns when it ended. Raises jobs.Cancelled when
     stopped, Killed when the process died (signal), RuntimeError with the child's message when it failed."""
     from modelforge import jobs
     callbacks, events = dict(callbacks or {}), dict(events or {})
     ctx = mp.get_context("spawn")
     out, inbox = ctx.Queue(), ctx.Queue()
-    p = ctx.Process(target=_child, args=(target, kwargs, list(callbacks), list(events), out, inbox), daemon=True)
+    p = ctx.Process(target=_child, args=(target, kwargs, list(callbacks), list(events), out, inbox, label),
+                    daemon=True)
     p.start()
     sent, cancel_at, result = set(), None, None
     try:
@@ -158,6 +247,10 @@ def run(target, kwargs, callbacks=None, token=None, events=None, on_log=None):
         p.join(10)
         if p.is_alive():
             p.kill()
+        if kwargs.get("project"):  # the GUI that started it saw the end: nothing to re-attach to
+            d = detached(kwargs["project"])
+            if d is not None and d.get("pid") == p.pid:
+                clear(kwargs["project"])
     if result is None:
         code = p.exitcode
         if cancel_at is not None:
