@@ -1,5 +1,6 @@
-"""Intrinsics of a transforms.json frame: its own keys over the file's top-level ones (nerfstudio's rule). Several
-cameras (multi-camera DJI projects) carry them per frame; one camera only at the top.
+"""Intrinsics of a transforms.json frame: a frame's own keys, else the file's top-level ones. (nerfstudio takes a
+top-level key over the frames', so the export writes each key in one place only: several cameras (multi-camera DJI
+projects) per frame, with only camera_model at the top; one camera at the top.)
 
 No imports at all: the scripts run in nerfstudio's venv load it by its file path (importlib), since putting
 this folder on sys.path would shadow nerfstudio with export/nerfstudio.py.

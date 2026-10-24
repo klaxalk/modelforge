@@ -76,8 +76,9 @@ Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (spl
 ## Done 2026-10-24: steps 4–5 (per-frame intrinsics)
 
 - **Export** (`export/nerfstudio.py`): with several COLMAP cameras every frame carries its own `camera_model, fl_x,
-  fl_y, cx, cy, k1, k2, p1, p2, w, h` (nerfstudio's dataparser reads them per frame); the top level keeps the first
-  camera's (old readers) and `mf_cameras` = the count. One camera: unchanged.
+  fl_y, cx, cy, k1, k2, p1, p2, w, h`; the top level keeps only `camera_model` (shared) and `mf_cameras` = the count:
+  nerfstudio's dataparser takes a top-level key over the frames' own (a first version kept the first camera's at the
+  top, and nerfstudio trained every photo as 1920 x 1080: "size of image (1280, 720) does not match"). One camera: unchanged.
 - **Readers** go through `export/frame_camera.py` (`camera(t, frame)`, `cameras(t)`, `largest(t)`; standard library
   only, loaded by path from the nerfstudio-venv scripts): `splat_plan._cameras` / `survey` (per-camera fx / w / h;
   the widest camera's size for the resolution rules), `splat_tiles._seen`, the tiles' downscale and loss masks,
@@ -95,7 +96,8 @@ Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (spl
 - **Found on the way:** `mesh_depth.py`'s cache key had lost the mesh's mtime and the downscale to a comment, and it
   rewrote its manifest on every run (the tiles' loss masks, keyed by its time, were then always made again). Both
   fixed; existing depth maps are rendered once more.
-- Not tested yet: a splat training on per-frame intrinsics (the GPU was busy with the A/Bs).
+- **Splat on per-frame intrinsics** (two-camera copy, 3000 steps, 192k Gaussians, 58 s): training views rendered with each
+  camera's own K score PSNR 20.8 (1920 px) / 21.3 (1280 px) median (`build/multicam/render_check.py`).
 
 ## Done 2026-10-24: step 6 (GUI)
 
