@@ -140,8 +140,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
 8. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
    `docs/todo_splat_editing.md`.
-9. **TODO: covisibility tiles too large** (kladno_dira 5187 photos: 479–2434 per tile, 2.5x slots; cap the extra
-   photos per tile, balance the split): `docs/todo_tile_size.md`.
+9. ~~Covisibility tiles too large~~ **done 2026-10-24** (kladno_dira 5187 photos: 479–2434 per tile, 2.5x slots →
+   479–1206, 1.66x): the split's slack shrinks with depth, joined photos capped at 0.5x a tile's own (those showing
+   >= 50 % of it always stay); a training A/B on one tile is open: `docs/todo_tile_size.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").

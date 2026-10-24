@@ -76,8 +76,8 @@ def test_photos_join_the_tiles_they_show(tmp_path):
                    for i in range(n)])
     i = int(np.argmin(np.abs(xs + 100 / 7)))
     assert abs(share[i, 1] - 35.7 / 100) < 0.01
-    old, _ = splat_tiles.partition(project, photos=16)
-    new, _ = splat_tiles.partition(project, photos=16, mesh=mesh, on_line=lambda m: None)
+    old, _ = splat_tiles.partition(project, photos=16, extra_max=None)
+    new, _ = splat_tiles.partition(project, photos=16, mesh=mesh, on_line=lambda m: None, extra_max=None)
     cells = splat_tiles._cell_labels([(t["cell"], None) for t in new], np.array([[-200.0, -200], [200, 200]]))
     pixels = splat_tiles.mesh_shares(project, mesh, cells, on_line=lambda m: None)
     for k, (a, b) in enumerate(zip(old, new)):
@@ -85,6 +85,23 @@ def test_photos_join_the_tiles_they_show(tmp_path):
         assert set(np.flatnonzero(pixels[:, k] >= splat_tiles.MIN_PIXELS)) <= set(b["frames"])
         assert b["by_pixels"] == len(b["frames"]) - len(a["frames"])
     assert sum(t["by_pixels"] for t in new) > 0
+
+
+def test_extra_photos_are_capped():
+    """Joined photos beyond EXTRA_MAX x the tile's own: those showing the tile most stay, and any showing it at
+    least KEEP_SHARE."""
+    own = set(range(10))
+    share = np.zeros(40)
+    pixels = np.zeros(40)
+    pixels[10:40] = np.linspace(0.06, 0.45, 30)  # 30 joined photos, more of the tile the higher the index
+    share[12] = 0.6  # by its points mostly this tile
+    frames, capped = splat_tiles._cap(own, set(range(10, 40)), share, pixels, 0.5)
+    assert own <= frames and len(frames) == 15 and capped == 25
+    assert frames - own == {12, 36, 37, 38, 39}  # the top 5 by max(pixels, points)
+    pixels[10:40] = 0.55
+    frames, capped = splat_tiles._cap(own, set(range(10, 40)), share, pixels, 0.5)
+    assert len(frames) == 40 and capped == 0  # all show >= KEEP_SHARE
+    assert splat_tiles._cap(own, set(), share, None, 0.5) == (own, 0)
 
 
 def test_cut_avoids_an_orbited_object():

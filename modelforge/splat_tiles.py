@@ -61,6 +61,9 @@ MIN_VISIBLE = 0.25  # a photo joins a tile when this share of its seen sparse po
 MIN_IN_CELL = 0.10  # ... this share in the cell when looking at most half the margin beyond its edge
 MIN_PIXELS = 0.05  # ... or (with an SfM mesh) this share of its pixels showing the cell (berlin: covers every view
 #                    the merge broke, +13 % photos; any pixel at all: +26 %, mostly slivers at the horizon)
+EXTRA_MAX = 0.5  # photos joining a tile by the rules above: at most this share of its own (core) photos, those
+#                  showing the most of it first (kladno_dira 5187 photos: 479-2434 per tile without, 2.5x slots)
+KEEP_SHARE = 0.5  # ... except those whose pixels (else seen points) show the tile this much: always kept
 SHARE_WIDTH = 240  # pixels across the mesh raycast of each camera
 SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off the balanced position (tiles of
 #                   up to ~2x the photos still train well, the user found)
@@ -189,12 +192,14 @@ def _cell_labels(leaves, xy):
 
 
 def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="rectangles", mesh=None,
-              on_line=print, job=None):
+              on_line=print, job=None, extra_max=EXTRA_MAX):
     """Cells and their photos: [{"cell": [x0, y0, x1, y1] (±inf outside), "margin": m, "frames": [frame indices],
     "core": cameras looking into it}], plus the scene box [x0, y0, x1, y1] (sampled points 1-99 % + margin) and,
     for layout "covisibility", the Regions (each tile then has "region": its label; "cell" is the region's box).
     mesh (the SfM mesh's path): photos also join the cells that fill >= MIN_PIXELS of their image (mesh_shares);
-    the tiles then record "by_pixels", the photos only that rule added."""
+    the tiles then record "by_pixels", the photos only that rule added. extra_max (None: no cap): the photos joining a
+    tile beyond its own, ranked by the share they show (pixels, else seen points), at most this x its own ones, plus
+    those showing >= KEEP_SHARE of it; the tiles record "capped", how many were left out."""
     C, R, fx, w, h, _ = splat_plan._cameras(project)
     xyz = splat_plan._points(project, max_points)
     if xyz is None or len(xyz) < 10:
@@ -236,16 +241,32 @@ def partition(project, photos=PHOTOS_PER_TILE, max_points=MAX_POINTS, layout="re
         # looking just across the edge: far-side views of edge objects
         near = regions.inside(looks, k, margin / 2) if regions is not None else _inside(looks, cell, margin / 2)
         joins = (share[:, k] >= MIN_VISIBLE) | ((share[:, k] >= MIN_IN_CELL) & near)
-        frames = set(ids.tolist()) | set(np.flatnonzero(joins).tolist())
+        own = set(ids.tolist())
+        frames = own | set(np.flatnonzero(joins).tolist())
         extra = {}
         if pixels is not None:
             more = set(np.flatnonzero(pixels[:, k] >= MIN_PIXELS).tolist()) - frames
             frames |= more
             extra["by_pixels"] = len(more)
+        if extra_max is not None:
+            frames, extra["capped"] = _cap(own, frames - own, share[:, k], None if pixels is None else pixels[:, k],
+                                           extra_max)
         tiles.append({"cell": [float(v) for v in cell], "margin": margin, "frames": sorted(frames), "core": len(ids)}
                      | ({"region": k} if regions is not None else {}) | extra)
     box = [float(lo[0] - pad), float(lo[1] - pad), float(hi[0] + pad), float(hi[1] + pad)]
     return (tiles, box, regions) if layout == "covisibility" else (tiles, box)
+
+
+def _cap(own, joined, share, pixels, extra_max):
+    """own + the joined photos that show the tile most (pixel share, else point share): at most extra_max x len(own),
+    plus every one showing >= KEEP_SHARE. Returns (frames, how many were left out)."""
+    joined = np.array(sorted(joined), int)
+    if not len(joined):
+        return own, 0
+    score = share[joined] if pixels is None else np.maximum(pixels[joined], share[joined])
+    order = joined[np.argsort(-score, kind="stable")]
+    n = max(int(round(extra_max * len(own))), int((score >= KEEP_SHARE).sum()))
+    return own | set(order[:n].tolist()), max(0, len(joined) - n)
 
 
 _REGIONS = {}
@@ -567,7 +588,9 @@ def setup(project, photos=PHOTOS_PER_TILE, on_line=print, layout="rectangles", j
             f"(~{round(sum(t['core'] for t in tiles) / len(tiles))} looking into each cell, at most {photos}, "
             f"+ views from the neighbours"
             + (f"; {', '.join(str(t['by_pixels']) for t in tiles)} of them because they show the tile in "
-               f">= {MIN_PIXELS:.0%} of the image (SfM mesh)" if mesh else "") + ")")
+               f">= {MIN_PIXELS:.0%} of the image (SfM mesh)" if mesh else "")
+            + (f"; {sum(t.get('capped', 0) for t in tiles)} neighbour views left out, at most "
+               f"{EXTRA_MAX:.0%} more than each tile's own" if any(t.get("capped") for t in tiles) else "") + ")")
     return state
 
 

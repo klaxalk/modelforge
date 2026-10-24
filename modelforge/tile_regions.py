@@ -127,18 +127,20 @@ def _bisect(A, ids, frac, slack):
 
 
 def split_photos(A, parts, slack):
-    """Part index per photo: recursive bisection into `parts` (k -> floor(k/2) + ceil(k/2))."""
+    """Part index per photo: recursive bisection into `parts` (k -> floor(k/2) + ceil(k/2)); the slack shrinks with
+    the depth (slack / (1 + depth)), so the deviations of nested cuts do not compound (kladno_dira, 11 parts at 0.25
+    everywhere: 233-953 own photos for a target of 471)."""
     lab = np.zeros(len(A), int)
     out = []
 
-    def rec(ids, k):
+    def rec(ids, k, depth):
         if k <= 1 or len(ids) < 2:
             out.append(ids)
             return
-        a, b = _bisect(A, ids, (k // 2) / k, slack)
-        rec(a, k // 2)
-        rec(b, k - k // 2)
-    rec(np.arange(len(A)), parts)
+        a, b = _bisect(A, ids, (k // 2) / k, slack / (1 + depth))
+        rec(a, k // 2, depth + 1)
+        rec(b, k - k // 2, depth + 1)
+    rec(np.arange(len(A)), parts, 0)
     for t, ids in enumerate(out):
         lab[ids] = t
     return lab, len(out)
