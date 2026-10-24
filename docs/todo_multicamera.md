@@ -1,6 +1,6 @@
 # TODO: multi-camera DJI projects
 
-Priority: low. Status: planned 2026-10-23, not started. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
+Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), 4–6 open. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
 prior BA). Today a project is one camera: `dji/ingest.py` refuses sources of different resolutions, features use
 `CameraMode.SINGLE`, transforms.json carries one global camera. Two drones that both record 4K pass the resolution
 check today and wrongly share one set of intrinsics.
@@ -48,3 +48,29 @@ check today and wrongly share one set of intrinsics.
 - Then a real mixed-drone project (the user is building a mixed-lighting one, which may also mix drones).
 
 Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (splat / meshes), then 6.
+
+## Done 2026-10-24: steps 1–3
+
+- **Camera key** (`ingest.Clip.camera`): drone model + resolution + zoom ratio, e.g. "DJI Mavic4 Pro L3A 3840x2160"
+  (" zoom 3" when not 1). poses.json `cameras` (list of {key, model, width, height, zoom}), `camera` per image and
+  per source. The plan warns "N cameras (...): each gets its own intrinsics"; the one-resolution refusal is gone.
+- **Zoom**: djmd `FrameMeta.zoom` = the Mavic 4 camera record's `.23.1` (1.0 on every clip here: dira, spodek_1,
+  spodek_2; the NEO2 has no zoom and gets 1.0). `.37.1` varies 23–30 at zoom 1, so it is no plain focal length.
+  A source whose zoom changes > 1 % within its range is refused by `ingest.run` (warning in the plan). **Unverified:
+  no zooming or tele clip exists to check that `.23.1` is the zoom / tells the lenses apart**; detecting zoom from the
+  optical flow is the fallback if it is not.
+- **Features**: one `extract_features` call per camera group (`features.camera_groups`), each `CameraMode.SINGLE`, so
+  one COLMAP camera per camera. Projects without `camera` per image: one group, as before. The starting focal length
+  per model was **not** added (COLMAP's default start, as before, converges in round 0; it keeps today's projects
+  unchanged).
+- **Refine**: pycolmap's BA already refines every camera; `calibration_subset(cameras=)` adds a run of its own for a
+  camera none of the 5 runs covers; **boresight per COLMAP camera** (`PriorModel.boresight_by_camera`, image →
+  camera in `image_camera`; with one camera nothing changes). The time offset δt and the prior sigmas stay one per
+  project. `refine.evaluate` lists `cameras` (model, size, params) when there are several; the History line shows a
+  focal length per camera.
+- **Measured** (`build/multicam/two_cams.py`: fullrun_test, every other photo resized to 1280 x 720 as camera 1):
+  global refine 80/80, f = 1084.59 / 723.10 px (ratio 0.66670, truth 2/3), distortion equal, 0.40 / 1.01 px;
+  chunked (30 / 10) 1084.81 / 723.25 px, boresights per camera within 0.05° of each other (one drone).
+  Test: `tests/test_multicamera.py` (camera key + zoom, calibration subset, the 40-photo two-camera refine).
+- **Still single-camera** (step 4–5): `export/nerfstudio.py` refuses more than one camera, so export / splat /
+  meshes do not run on such a project yet.

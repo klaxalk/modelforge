@@ -89,6 +89,9 @@ class PriorModel:
     drift_knot_s: float = 30.0
     drift: dict = field(default_factory=dict)  # source -> (knot times [s], K x 3 offsets [m])
     boresight: np.ndarray = field(default_factory=lambda: np.zeros(3))  # rad, camera frame
+    # several cameras (multi-camera DJI projects): a boresight per COLMAP camera id, and each image's camera id
+    boresight_by_camera: dict = field(default_factory=dict)
+    image_camera: dict = field(default_factory=dict)
     dt: float = 0.0  # s
     abs_rejected: set = field(default_factory=set)  # image names
     rel_rejected: set = field(default_factory=set)  # (name_i, name_j)
@@ -108,6 +111,9 @@ class PriorModel:
                 "rel_sigmas": {"rot_deg": round(r.rot_deg, 3), "rot_per_deg": round(r.rot_per_deg, 4), "pos_m": round(r.pos_m, 4), "pos_per_m": round(r.pos_per_m, 5)},
                 "boresight_deg": np.round(np.degrees(self.boresight), 3).tolist(),
                 "boresight_norm_deg": round(float(np.degrees(np.linalg.norm(self.boresight))), 3),
+                **({"boresight_by_camera_deg": {str(k): np.round(np.degrees(v), 3).tolist()
+                                                for k, v in sorted(self.boresight_by_camera.items())}}
+                   if self.boresight_by_camera else {}),
                 "dt_ms": round(self.dt * 1000, 1),
                 "source_offsets_m": {str(k): np.round(v, 3).tolist() for k, v in sorted(self.source_offsets.items())},
                 "drift_m": {str(k): {"knots": len(t), "max": round(float(np.abs(o).max()), 3) if len(o) else 0.0,
@@ -119,9 +125,10 @@ class PriorModel:
 def corrected_priors(priors, model):
     """Priors with the systematic corrections (boresight, time offset, source offsets) applied."""
     B = exp_so3(model.boresight)
+    Bc = {c: exp_so3(v) for c, v in model.boresight_by_camera.items()}
     out = {}
     for name, p in priors.items():
-        R = B @ p.R_cw
+        R = Bc.get(model.image_camera.get(name), B) @ p.R_cw
         C = p.center + (p.velocity if p.velocity is not None else 0.0) * model.dt
         C = C + model.source_offsets.get(p.source, 0.0) + drift_at(model, p.source, p.time)
         out[name] = Prior.from_pose(p.name, p.frame, p.pts, R, C, p.velocity, p.source, p.order, p.time)
@@ -197,7 +204,14 @@ def _estimate_systematic(model, rec, priors_raw):
     names = list(raw_abs)
     if len(names) < 10:
         return
-    model.boresight = np.median(np.array([raw_abs[n][0] for n in names]), axis=0)
+    rot = np.array([raw_abs[n][0] for n in names])
+    model.boresight = np.median(rot, axis=0)
+    cams = np.array([rec.find_image_with_name(n).camera_id for n in names])
+    model.boresight_by_camera, model.image_camera = {}, {}
+    if len(set(cams.tolist())) > 1:  # each camera its own mount (several drones / lenses)
+        model.image_camera = dict(zip(names, cams.tolist()))
+        model.boresight_by_camera = {int(c): (np.median(rot[cams == c], axis=0) if (cams == c).sum() >= 10
+                                              else model.boresight) for c in set(cams.tolist())}
     V = np.array([priors_raw[n].velocity for n in names])
     # world-frame position error C_param - C_prior = -R^T r_pos
     D = np.array([-_pose(rec, rec.find_image_with_name(n))[0].T @ raw_abs[n][1] for n in names])

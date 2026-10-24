@@ -18,7 +18,7 @@ sources into PROJECT/images and one poses.json, in one ENU frame:
   into poses.json["sources"]). Relative priors and time-neighbour pairs never cross
   sources; refinement estimates a per-source position offset (GNSS bias per flight).
 
-All sources must share one resolution, because they share one COLMAP camera.
+Sources of one camera (model + resolution + zoom ratio) share a COLMAP camera; zooming clips are refused.
 
 Usage: python -m modelforge.dji.extract A.MP4 [B.MP4 ...] -o PROJECT, or the GUI Ingest tab.
 """
@@ -140,6 +140,7 @@ class Clip:
         self.fps = (self.n - 1) / (self.pts[-1] - self.pts[0]) if self.n > 1 else 29.97
         self.duration = float(self.pts[-1]) if self.n else 0.0
         self.width, self.height = ex.video_size(video)
+        self.zoom = np.array([m.zoom for m in meta]) if meta else np.ones(1)
         self.aircraft, self.gimbal = ex.build_streams(meta)
         self.srt_path = srt_path or find_srt(video)
         srt = parse_srt(self.srt_path) if self.srt_path else None
@@ -156,6 +157,22 @@ class Clip:
         # constant within a flight when abs_alt is present; otherwise unusable
         self.takeoff_abs_alt = float(np.median(d)) if len(d) and np.ptp(np.percentile(d, [5, 95])) < 1.0 else None
         self._tel = {}
+
+    def camera(self, start=0.0, end=None):
+        """The camera of the frames in [start, end] s: {"key", "model", "width", "height", "zoom"}. A camera = drone
+        model + resolution + zoom ratio (the Mavic 4's lenses: probably told apart by it; untested). Sources of one
+        camera share its intrinsics."""
+        z = self.zoom_range(start, end)[0]
+        model = self.model or "unknown model"
+        return {"key": f"{model} {self.width}x{self.height}" + (f" zoom {z:g}" if abs(z - 1.0) > 1e-3 else ""),
+                "model": self.model, "width": self.width, "height": self.height, "zoom": round(float(z), 4)}
+
+    def zoom_range(self, start=0.0, end=None):
+        """(min, max) zoom ratio of the frames in [start, end] s."""
+        t = self.pts if len(self.pts) == len(self.zoom) else np.zeros(len(self.zoom))
+        m = (t >= start - 1e-6) & (t <= (np.inf if end is None else end) + 1e-6)
+        z = self.zoom[m] if m.any() else self.zoom
+        return float(np.min(z)), float(np.max(z))
 
     def yaw_source(self, setting="auto"):
         """The camera heading source for this clip, "aircraft" or "gimbal". "auto" decides by the model
@@ -312,6 +329,15 @@ def _prefixes(videos):
     return out
 
 
+ZOOM_TOL = 0.01  # zoom ratio change within a source's range that counts as zooming
+
+
+def zooms(clip, source):
+    """'x1 to x2' when the zoom ratio changes over the source's range, else ""."""
+    lo, hi = clip.zoom_range(source.start, source.end)
+    return f"x{lo:g} to x{hi:g}" if hi - lo > ZOOM_TOL * max(lo, 1e-6) else ""
+
+
 def make_plan(sources, settings):
     enabled = [(i, s) for i, s in enumerate(sources) if s.enabled]
     clips = {i: load_clip(s.video, s.lead, s.srt) for i, s in enabled}
@@ -320,9 +346,12 @@ def make_plan(sources, settings):
     warnings = []
     if not enabled:
         return Plan([], {}, ["no enabled sources"])
-    sizes = {(clips[i].width, clips[i].height) for i, _ in enabled}
-    if len(sizes) > 1:
-        warnings.append(f"sources differ in resolution {sorted(sizes)}: they must share one camera")
+    for i, s in enabled:
+        if zooms(clips[i], s):
+            warnings.append(f"{os.path.basename(s.video)} zooms ({zooms(clips[i], s)}): a zooming clip cannot be used")
+    cams = sorted({clips[i].camera(s.start, s.end)["key"] for i, s in enabled})
+    if len(cams) > 1:
+        warnings.append(f"{len(cams)} cameras ({'; '.join(cams)}): each gets its own intrinsics")
     prefixes = _prefixes([os.path.abspath(s.video) for _, s in enabled])
 
     valids = {}
@@ -441,9 +470,10 @@ def archive_outputs(project, names=OUTPUTS):
 def run(project, sources, settings, progress=None, overwrite=False, log=print):
     """Extract every source of the plan into PROJECT. progress(done, total, message)."""
     plan = make_plan(sources, settings)
-    sizes = {(sp.clip.width, sp.clip.height) for sp in plan.sources}
-    if len(sizes) > 1:
-        raise ValueError(f"sources differ in resolution {sorted(sizes)}; one project = one camera")
+    zooming = [f"{os.path.basename(sp.source.video)} ({zooms(sp.clip, sp.source)})" for sp in plan.sources
+               if zooms(sp.clip, sp.source)]
+    if zooming:
+        raise ValueError(f"zooming clips cannot be used (the focal length changes per frame): {', '.join(zooming)}")
     if not plan.num_images:
         raise ValueError("the plan selects no images: " + "; ".join(plan.warnings))
     if has_outputs(project):
@@ -461,8 +491,13 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
     total = plan.num_images
     progress = progress or (lambda done, total, msg: None)
     origin, records, seen = None, [], set()
+    cameras = []  # one per camera key, in order of first use
     for sp in plan.sources:
         c = sp.clip
+        cam = c.camera(sp.source.start, sp.source.end)
+        if cam["key"] not in [x["key"] for x in cameras]:
+            cameras.append(cam)
+        sp.camera = [x["key"] for x in cameras].index(cam["key"])
         yaw_src = c.yaw_source(settings.yaw_source)
         log(f"{sp.prefix}: lead {c.lead} frames via {c.align['method']}, {len(sp.windows)} images, "
             f"alt offset {sp.alt_offset:+.2f} m, camera heading from the {yaw_src} yaw")
@@ -484,7 +519,7 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
             Image.fromarray(rgb).save(os.path.join(project, "images", name), quality=settings.quality,
                                       exif=ex.make_exif(a["lat"], a["lon"], alt))
             records.append({
-                "image": name, "source": sp.index, "video": sp.prefix, "frame": k, "pts": float(c.pts[k]),
+                "image": name, "source": sp.index, "camera": sp.camera, "video": sp.prefix, "frame": k, "pts": float(c.pts[k]),
                 "time_s": float(sp.time_base + c.pts[k]), "s": float(sp.s[k]), "sharpness": round(sharp, 2),
                 **{col: float(a[col]) for col in ex.AIRCRAFT_COLS}, **{col: float(g[col]) for col in ex.GIMBAL_COLS},
                 "alt_m": float(alt), "cam_yaw_deg": float(yaw), "cam_pitch_deg": float(pitch),
@@ -499,7 +534,8 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
                 log(f"{len(records)}/{total} frames written ({sp.prefix} t = {c.pts[k]:.1f} s)")
 
     out = {
-        "sources": [sp.describe() for sp in plan.sources],
+        "sources": [{**sp.describe(), "camera": sp.camera} for sp in plan.sources],
+        "cameras": cameras,  # images' "camera" indexes it
         "source": os.path.abspath(plan.sources[0].source.video),  # reference video (single-video readers)
         "srt": plan.sources[0].clip.srt_path,
         "alignment": plan.sources[0].clip.align,

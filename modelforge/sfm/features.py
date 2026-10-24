@@ -1,5 +1,5 @@
-"""SIFT feature extraction into a COLMAP database (one shared camera; OPENCV for DJI, RADIAL for videos
-without metadata). Options: EXTRACTORS, max features, upright."""
+"""SIFT feature extraction into a COLMAP database (one camera per poses.json camera, else one shared; OPENCV for DJI,
+RADIAL for videos without metadata). Options: EXTRACTORS, max features, upright."""
 
 import json
 import os
@@ -49,6 +49,15 @@ def open_database(path, tries=30):
             time.sleep(1.0)
 
 
+def camera_groups(poses):
+    """Image names per camera (poses.json "camera" per image, from multi-camera DJI ingest), in order of first use;
+    images without one form a single group."""
+    out = {}
+    for r in poses["images"]:
+        out.setdefault(r.get("camera", 0), []).append(r["image"])
+    return list(out.values())
+
+
 def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True, extractor="sift", camera_params=None,
             progress=None):
     """Write PROJECT/features.db (keypoints/descriptors only) for the images in poses.json.
@@ -61,6 +70,7 @@ def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True,
         raise ValueError(f"extractor must be one of {tuple(EXTRACTORS)}")
     poses = json.load(open(os.path.join(project, "poses.json")))
     names = [r["image"] for r in poses["images"]]
+    groups = camera_groups(poses)
     db_path = os.path.join(project, "features.db")
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -84,9 +94,10 @@ def extract(project, max_num_features=8192, camera_model="OPENCV", upright=True,
         watcher = threading.Thread(target=_watch, args=(db_path, len(names), progress, done), daemon=True)
         watcher.start()
     try:
-        pycolmap.extract_features(db_path, os.path.join(project, "images"), image_names=names,
-                                  camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
-                                  extraction_options=extraction)
+        for group in groups:  # one call per camera: CameraMode.SINGLE makes one COLMAP camera per call
+            pycolmap.extract_features(db_path, os.path.join(project, "images"), image_names=group,
+                                      camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
+                                      extraction_options=extraction)
     finally:
         done.set()
         if watcher is not None:  # its read of the database must end before the database is opened again

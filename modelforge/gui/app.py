@@ -2456,6 +2456,9 @@ class App:
                     mode += (f" · global BA ×{len(r['chunked']['global'])}: revisits split "
                              f"{r['chunked']['global'][0]['split_median_m']} → {gs['split_median_m']} m median "
                              f"(p90 {gs['split_p90_m']} m)")
+                if f.get("cameras"):  # several cameras (multi-camera DJI): a focal length each
+                    mode += " · " + ", ".join(f"f = {c['params'][0]:.0f} px at {c['size'][0]} px"
+                                              for c in f["cameras"].values())
                 drifts = [v["drift"] for k, v in sorted(r.items()) if isinstance(v, dict) and v.get("drift")]
                 drifts += r.get("chunked", {}).get("drift") or []
                 if drifts:  # the last estimate: revisits of a long flight brought together

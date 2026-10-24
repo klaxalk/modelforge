@@ -103,6 +103,7 @@ class FrameMeta:
     gimbal_roll_deg: float
     gimbal_yaw_deg: float  # NEO2 gimbal cannot yaw: this is ac_yaw - ~36.5 deg (offset heading reference)
     gimbal_timestamp_ms: int  # separate clock, not aligned with timestamp_us
+    zoom: float = 1.0  # Mavic 4 camera `.23.1` (1.0 on every clip seen; probably the zoom ratio); NEO2: none
 
 
 CAMERA, AIRCRAFT, GIMBAL = 1, 2, 3  # record types (header field .1.3)
@@ -166,6 +167,7 @@ def decode_packet(frame, pts, pkt):
         gimbal_roll_deg=gatt.get(2, 0) / 10.0,
         gimbal_yaw_deg=gatt.get(3, 0) / 10.0,
         gimbal_timestamp_ms=_sub(gim, 1).get(6, 0),
+        zoom=float(_sub(cam, 23).get(1, 1.0)) if f_iso == 9 else 1.0,
     )
 
 

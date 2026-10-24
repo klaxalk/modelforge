@@ -329,16 +329,24 @@ def thin_points(rec, per_image, seed=0):
     return deleted
 
 
-def calibration_subset(priors, names, blocks=5, size=60):
+def calibration_subset(priors, names, blocks=5, size=60, cameras=None):
     """Image names for calibrating the intrinsics and the prior model before a local BA: `blocks`
     runs of `size` consecutive images spread evenly over the capture order (consecutive, so they
-    share matches; spread, so they see different parts and attitudes of the flight)."""
+    share matches; spread, so they see different parts and attitudes of the flight). cameras ({name: camera id},
+    several cameras): a camera none of the runs covers gets a run of its own, from the middle of its images."""
     from modelforge.sfm.priors import by_order
     order = by_order(priors, names)
     if len(order) <= blocks * size:
         return order
     starts = np.linspace(0, len(order) - size, blocks).round().astype(int)
-    return [order[s + k] for s in starts for k in range(size)]
+    out = [order[s + k] for s in starts for k in range(size)]
+    if cameras:
+        have = {cameras.get(n) for n in out}
+        for c in sorted({cameras.get(n) for n in order} - have, key=str):
+            own = [n for n in order if cameras.get(n) == c]
+            a = max(0, (len(own) - size) // 2)
+            out += own[a:a + size]
+    return out
 
 
 def windows(order, local):
@@ -450,6 +458,10 @@ def evaluate(rec, priors):
         "mean_reproj_error_px": round(rec.compute_mean_reprojection_error(), 3),
         "point_error_px": {**q(err), "frac_over_4px": round(float(np.mean(err > 4.0)), 4)} if len(err) else {},
         "camera": {"model": cam.model.name, "params": [round(float(v), 4) for v in cam.params]},
+        **({"cameras": {str(c): {"model": rec.cameras[c].model.name, "size": [rec.cameras[c].width,
+                                                                              rec.cameras[c].height],
+                                 "params": [round(float(v), 4) for v in rec.cameras[c].params]}
+                        for c in sorted(rec.cameras)}} if len(rec.cameras) > 1 else {}),
         "prior_deviation": {"position_m": q(dpos), "horizontal_m": q(dhoriz), "vertical_m": q(dvert),
                             "rotation_deg": q(drot)},
     }

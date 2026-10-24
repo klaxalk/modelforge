@@ -621,7 +621,9 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
     main = list(enumerate(rounds))
     subset, last = None, rounds[0]  # last: threshold of the last round that ran (the final triangulation uses it)
     if use_chunks and max_iterations and len(rounds) > 1:
-        subset = refine.calibration_subset(pri, [rec.image(i).name for i in rec.reg_image_ids()])
+        subset = refine.calibration_subset(pri, [rec.image(i).name for i in rec.reg_image_ids()],
+                                           cameras={rec.image(i).name: rec.image(i).camera_id
+                                                    for i in rec.reg_image_ids()})
         log(f"refine: chunked ({n_images} images); calibrating on {len(subset)} images first")
         crec = refine.init_from_database(db_path, pri, names=subset)
         # rounds 0-1: round 0 converges the focal length, round 1 the prior model at a tight threshold
