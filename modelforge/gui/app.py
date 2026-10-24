@@ -18,7 +18,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, pipeline, projects, semantic, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, jobs, memory, pipeline, projects, semantic, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -417,6 +417,7 @@ class App:
         with self.left.add_tab("Search", viser.Icon.SEARCH):  # semantic search, its own tab after View
             self.semantic = SemanticPanel(self, gui)
         self.lod = SplatLod(self)
+        self._mem = memory.Sampler()  # peaks of the running job's stages (memory.record)
 
         with self.left.add_tab("Inspect", viser.Icon.PHOTO):
             self.g_inspect_md = gui.add_markdown("Click a camera to inspect it.")
@@ -1566,7 +1567,13 @@ class App:
         self.cam_handles[j].color = c
 
     # ------------------------------------------------------------- running
-    def run_stage(self, stage):
+    def mem_settings(self):
+        """The settings the memory estimate reads, from the tabs."""
+        return {k: getattr(self, w).value for k, w in memory.WIDGETS.items() if hasattr(self, w)}
+
+    def run_stage(self, stage, check_memory=True):
+        """Start a job. check_memory: estimate what it needs (modelforge.memory) and, when that is more than the
+        RAM available, ask the browsers first (Start anyway / Cancel); without a browser it starts with a note."""
         if self.running or self.ingest.running:
             self.g_state.content += "  \n_busy: wait for the running job to finish_"
             return
@@ -1578,6 +1585,16 @@ class App:
         if self.project is None and stage != "all":  # the full pipeline extracts them itself
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
+        if check_memory and self.project is not None:
+            try:
+                need, why = memory.estimate(self.path, stage, self.mem_settings())
+                avail = memory.available_gb()
+            except Exception as e:  # noqa: BLE001 - an estimate never blocks a job
+                need, why, avail = 0.0, f"no estimate ({e})", None
+            self._mem_note = (f"memory: needs ~{need:.1f} GB ({why}), {avail:.1f} GB available"
+                              if avail is not None and need else "")
+            if avail is not None and need > avail and self._ask_memory(stage, need, why, avail):
+                return
         self._refine_resume = stage == "refine-resume"
         stage = "refine" if self._refine_resume else stage
         self.running = True
@@ -1590,6 +1607,44 @@ class App:
         self.g_progress.visible = True
         self.g_progress.value = 0.0
         threading.Thread(target=self._run, args=(stage, self._run_id), daemon=True).start()
+
+    def _ask_memory(self, stage, need, why, avail):
+        """Not enough RAM for the estimate: True = asked the browsers (they start it or not), False = no browser."""
+        clients = list(self.server.get_clients().values())
+        label = stage if isinstance(stage, str) else " + ".join(stage)
+        msg = (f"**{label}** needs ~{need:.1f} GB of RAM ({why}), but only {avail:.1f} GB are available now. "
+               "It may be killed for lack of memory (an OOM kill takes the job, not the GUI). Free memory first "
+               "(another job, a large splat shown, other programs), or start it anyway.")
+        self._on_log(f"memory: {label} needs ~{need:.1f} GB ({why}), {avail:.1f} GB available")
+        if not clients:
+            return False
+        modals = []
+
+        def answer(ev):
+            for m in modals:
+                try:
+                    m.close()
+                except Exception:  # noqa: BLE001 - that browser went away
+                    pass
+            if ev.target.value == "Start anyway" and not self.running:
+                self.run_stage(stage, check_memory=False)
+        for c in clients:
+            with c.gui.add_modal("Not enough memory?") as m:
+                c.gui.add_markdown(msg)
+                row = c.gui.add_button_group("", options=("Start anyway", "Cancel"))
+            row.on_click(answer)
+            modals.append(m)
+        self.g_state.content = f"⚠️ {msg}"
+        return True
+
+    def _mem_record(self, st):
+        """A stage finished: its measured peak into report.json / the machine's records (modelforge.memory)."""
+        try:
+            peak = self._mem.peak()
+            memory.record(self.path, "refine" if st == "refine" else st, peak, self.mem_settings())
+            self._on_log(f"memory: {st} peaked at {peak:.1f} GB")
+        except Exception as e:  # noqa: BLE001 - a measurement never breaks a job
+            self._on_log(f"memory: not recorded ({e})")
 
     def _run(self, stage, run_id):
         project, t0 = self.path, time.time()
@@ -1758,6 +1813,7 @@ class App:
                               lidar=bool(self.g_dense_lidar.value), callbacks={"on_progress": self._on_stereo_progress})
                     if st in ("fusion", "mesh", "texture"):
                         self._refresh_dense()  # points / mesh appear as soon as they exist
+                self._mem_record(st)
                 report = pipeline.Report(project)  # what the stage (in its job process) wrote
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "splatmesh", "splatmesh-fill", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
@@ -2523,6 +2579,7 @@ class App:
         j = self._job
         j["label"] = f"{st} ({k + 1}/{n})" if n > 1 else st
         j["stage_t0"], j["detail"] = time.time(), ""
+        self._mem.begin()
         if n > 1:
             self.g_progress.value = 100.0 * k / n
         self._on_log(f"--- {st} started")
@@ -2538,7 +2595,8 @@ class App:
                 verb = "⏹ **stopping**" if self._token is not None and self._token.cancelled else "⏳ **running**"
                 self.g_state.content = (
                     f"{verb} **{j['label']}** · stage {_fmt_s(now - j['stage_t0'])} · "
-                    f"total {_fmt_s(now - j['t0'])}" + (f"  \n{j['detail']}" if j["detail"] else ""))
+                    f"total {_fmt_s(now - j['t0'])}" + (f"  \n{j['detail']}" if j["detail"] else "") +
+                    (f"  \n_{self._mem_note}_" if getattr(self, "_mem_note", "") else ""))
             time.sleep(1.0)
 
     def _on_log(self, msg):

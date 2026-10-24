@@ -33,7 +33,7 @@ although `sparse/round_0` was on disk.
 - Chunked: save per finished chunk (its pose-graph edges, rejections, init poses: small) and resume at the next
   chunk; after the chunks, resume at the pose graph / revisit / drift / global / polish step from `posegraph_tri`.
 
-## 3. Memory estimate before heavy stages
+## 3. Memory estimate before heavy stages (done 2026-10-24, see below)
 
 - Like `pipeline.auto_ba_mode` (0.7 GB per million inlier matches for a global refine): an estimate per stage from
   the project's sizes, compared with MemAvailable, shown before the start and refused / warned when it does not fit
@@ -44,6 +44,36 @@ although `sparse/round_0` was on disk.
 - Measured values to start from are in CLAUDE.md (refine peaks, splat mesh 9–13 GB on berlin fine, cpu cache 2×).
 
 Order: 2 first (small, saves hours at once), then 1 (the real fix), then 3.
+
+## Done: memory estimates before heavy stages (2026-10-24)
+
+`modelforge/memory.py`. `estimate(project, stage, settings)` -> (GB, why), per stage key (refine split into
+`refine:global` / `refine:chunked`, auto resolved as `pipeline.auto_ba_mode`; a group such as `all` / `sfm` / `dense`
+takes its largest stage):
+1. this project's last measured peak of that stage (report.json `memory.<key>`: peak + its driver) x 1.1, its part
+   above the model's base scaled up when the driver grew (an older refine's `refine.peak_rss_gb` counts as a floor);
+2. else the largest GB per driver unit any project measured on this machine (`ROOT/.modelforge_memory.json`, last 20
+   per stage);
+3. else the model `MODELS`: base + GB per driver unit. Drivers: inlier matches (refine, export), SfM points (SfM
+   mesh), mesh faces / vertices (patching, colouring), decoded photos of a cpu image cache (splat, as
+   `splat.auto_cache` picks it), splat-mesh faces (the last splat mesh's, x (voxel px ratio)^2 for another
+   quality), Gaussians (semantic), depth + normal maps (fusion).
+
+**Measured** (`build/memcal.py`: each stage in a child process on a copy of karlak, `memory.job_gb` every 0.5 s):
+export 1.93 GB at 6.9M inlier matches (212 s), SfM mesh 1.50 GB at 0.65M points, patching 1.03 GB at 1.4M faces,
+colouring 0.97 GB at 0.74M vertices, splat mesh coarse 2.94 GB at 1.4M faces, semantic 4.55 GB at 2.3M Gaussians.
+The models' bases follow these; their slopes are kept above what one project can show (the records take over).
+
+**GUI:** `App.run_stage` estimates before a job; more than MemAvailable -> every browser gets "Not enough memory?"
+(Start anyway / Cancel; no browser: it starts, with a log line); the state line shows "memory: needs ~X GB (why), Y GB
+available" while it runs. `memory.Sampler`: PSS of every process below the GUI (job processes, ns-train and its data
+workers, COLMAP; not queue entries in their own process, which measure themselves: gui/headless.py is an App too)
+plus the GUI's own growth since the stage began, once a second; each finished stage is recorded
+(`App._mem_record`). **Queue:** `memory_need` = max(MIN_FREE_GB, the estimate); its entries skip the dialog
+(`run_stage(check_memory=False)`: the queue waited already). Tests: `tests/test_memory.py`, `tests/test_jobqueue.py`.
+
+Not covered: GPU memory (the splat plan and the splat mesh's block budget handle it), re-attached jobs after a GUI
+restart are not sampled, and stages run from the CLI record nothing.
 
 ## Done: resume refine (2026-10-23)
 

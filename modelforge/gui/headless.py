@@ -45,7 +45,7 @@ def main(entry_path):
         app.queue.stop_thread()  # this process runs one entry, never the queue ...
         app.queue.current = None  # ... and is not refused as busy with itself
         app._apply_settings(e.get("settings") or {})
-        app.run_stage(e["stage"])
+        app.run_stage(e["stage"], check_memory=False)  # the queue waited for its memory
         stop_sent = False
         while app.running:
             if not stop_sent and os.path.exists(cancel_path):

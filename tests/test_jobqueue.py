@@ -40,8 +40,8 @@ def test_queue_file_and_policies(tmp_path):
 
 
 def test_entry_waits_for_memory(tmp_path, monkeypatch):
-    """An entry starts only when the RAM it needs is available: MIN_FREE_GB, its project's last recorded peak, a
-    forced-global BA's estimate; meanwhile it waits with a note (one notice)."""
+    """An entry starts only when the RAM it needs is available: MIN_FREE_GB or modelforge.memory's estimate (its
+    project's last recorded peak, a forced-global BA's model); meanwhile it waits with a note (one notice)."""
     from types import SimpleNamespace
     proj = tmp_path / "p"
     proj.mkdir()
@@ -49,13 +49,13 @@ def test_entry_waits_for_memory(tmp_path, monkeypatch):
     q = JobQueue(str(tmp_path))
     e = q.add(str(proj), "refine", "Refine", {"g_ba_mode": "chunked"})
     need, why = jobqueue.memory_need(e)
-    assert abs(need - 16.06) < 0.01 and "peaked at 15 GB" in why
+    assert abs(need - 16.06) < 0.01 and "peaked at 14.6 GB" in why
     g = q.add(str(proj), "refine", "Refine", {"g_ba_mode": "global"})
     assert jobqueue.memory_need(g)[0] > 50  # 82.7M inlier matches
     assert jobqueue.memory_need(q.add(str(proj), "splat", "Train splat", {}))[0] == jobqueue.MIN_FREE_GB
     started, notices = [], []
     app = SimpleNamespace(running=False, ingest=SimpleNamespace(running=False), path=str(proj), _run_id=0,
-                          run_stage=started.append, _notice=notices.append, _apply_settings=lambda s: None,
+                          run_stage=lambda st, **kw: started.append(st), _notice=notices.append, _apply_settings=lambda s: None,
                           open_project=lambda p: None)
     panel = jobqueue.QueuePanel.__new__(jobqueue.QueuePanel)
     panel.app, panel.q, panel.current, panel.current_run, panel.refresh = app, q, None, None, lambda: None

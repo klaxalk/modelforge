@@ -8,8 +8,8 @@ tabs and the stage runs as if its button was pressed, shown as any job (state li
 another project runs in a process of its own (gui/headless.py: an App on that project without a browser, the same
 stages), so the GUI keeps its project and view; its line shows the progress, "Stop entry" stops it, the open project's
 own jobs are refused while it runs there, and it outlives a GUI restart (the restarted queue follows it). Stop pauses the queue; a failure stops it, or (On failure: go on) skips that project's other entries.
-An entry starts only when enough RAM is available (memory_need: MIN_FREE_GB, its project's last recorded peak of
-that stage, a forced-global BA's estimate); it waits meanwhile, with a note. Kept in ROOT/.modelforge_queue.json
+An entry starts only when enough RAM is available (memory_need: MIN_FREE_GB or modelforge.memory's estimate for its
+stage); it waits meanwhile, with a note. Kept in ROOT/.modelforge_queue.json
 (+ ROOT/.modelforge_queue.d/: the external entries' files): after a GUI restart a running entry of the GUI is marked
 interrupted (not rerun) and the queue waits to be started again.
 """
@@ -37,9 +37,8 @@ STAGES = {  # label -> App.run_stage stage
     "Semantic features": "semantic",
     "COLMAP dense (all)": "dense",
 }
-MIN_FREE_GB = 6.0  # an entry starts only with this much RAM available (an OOM kill once took a 5 h refine) ...
-PEAK_OF = {"refine": "refine", "refine-resume": "refine", "sfm": "refine", "all": "refine"}  # ... or the peak its
-#        project's last run of that kind recorded (report.json <key>.peak_rss_gb), or a forced-global BA's estimate
+MIN_FREE_GB = 6.0  # an entry starts only with this much RAM available (an OOM kill once took a 5 h refine), or what
+#                   modelforge.memory estimates for it
 ICONS = {"pending": "⚪", "running": "⏳", "done": "✅", "failed": "❌", "stopped": "⏹", "interrupted": "⚠️",
          "skipped": "⏭"}
 
@@ -147,25 +146,15 @@ def external_status(e):
 
 
 def memory_need(e):
-    """(GB the entry needs available before it starts, why): MIN_FREE_GB, the peak its project's last such run
-    recorded, or for a refine with BA mode global the estimate of pipeline.global_ba_need_gb."""
+    """(GB the entry needs available before it starts, why): MIN_FREE_GB, or modelforge.memory's estimate for its
+    stage with its settings (its project's last measured peak, the machine's records, else a model)."""
     need, why = MIN_FREE_GB, f"at least {MIN_FREE_GB:.0f} GB"
     try:
-        rep = json.load(open(os.path.join(e["project"], "report.json")))
-    except (OSError, ValueError):
-        rep = {}
-    key = PEAK_OF.get(e["stage"])
-    peak = (rep.get(key) or {}).get("peak_rss_gb") if key else None
-    if peak and peak * 1.1 > need:
-        need, why = peak * 1.1, f"its last {key} peaked at {peak:.0f} GB"
-    if key == "refine" and (e.get("settings") or {}).get("g_ba_mode") == "global":
-        inl = (rep.get("match") or {}).get("inlier_matches")
-        if inl:
-            from modelforge import pipeline
-            g = pipeline.global_ba_need_gb(inl)
-            if g > need:
-                need, why = g, f"a global BA of {inl / 1e6:.0f}M inlier matches needs ~{g:.0f} GB"
-    return need, why
+        from modelforge import memory
+        g, gwhy = memory.estimate(e["project"], e["stage"], memory.settings_from(e.get("settings") or {}))
+    except Exception:  # noqa: BLE001 - no estimate: the floor
+        return need, why
+    return (g, gwhy) if g > need else (need, why)
 
 
 def _available_gb():
@@ -383,7 +372,7 @@ class QueuePanel:
         e["status"], e["started"] = "running", time.time()
         self.q.save()
         self.refresh()
-        app.run_stage(e["stage"])
+        app.run_stage(e["stage"], check_memory=False)  # waited for its memory already
         self.current, self.current_run = e, app._run_id
 
     def _ended(self, e):

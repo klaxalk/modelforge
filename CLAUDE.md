@@ -114,7 +114,7 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    the cameras, the priors keep ~all their redundancy), also with 60 points per scene; median rule vs VCE on seeds
    1–4: 0.67–1.07 vs 0.79–1.00 of the true σ, each within the draw's own scatter. Not implemented (an extra BA
    solve per round for nothing measurable).
-3. **TODO: robustness of long jobs** (left: memory estimates before heavy stages, deferred). **Done 2026-10-24:**
+3. **Robustness of long jobs: done.** **Memory estimates before heavy stages, done 2026-10-24** (`modelforge/memory.py`: per stage from the project's last measured peak, the machine's records or a model calibrated on karlak; the GUI asks before a job that does not fit in the available RAM, the queue waits for it; every finished stage's peak is recorded). **Done 2026-10-24:**
    re-attaching a job after a GUI restart (job processes outlive the GUI; `PROJECT/job.json` / `job.log` /
    `job.cancel`, `App._reattach`). **Done 2026-10-23:** resume refine (Sparse tab "Resume refine", CLI `--resume-refine`, a checkpoint
    after every round / chunk / pass in `sparse/refine_resume.pkl`); the GUI's in-process stages (features … refine,
