@@ -70,6 +70,7 @@ SIZE_SLACK = 0.5  # a cut may move this share of the smaller side's photos off t
 #                   up to ~2x the photos still train well, the user found)
 BALANCE = 0.3  # weight of being off balance (1 at the slack's end) against the cut's cost in median costs
 GAP_WIDTH = 0.02  # of the look-ats' extent: half the band of sparse points a candidate cut is charged for
+TILE_MASK = True  # loss masks per tile by default (berlin tile 0 A/B 2026-10-24: docs/todo_splat_quality.md)
 ROUND_STEPS = 10000  # steps every tile advances per round, merged after each (0: one tile after the other; the
 #                      user's default since 2026-10-23, 4000 before)
 FAR = 2.0  # of the scene box's longer side beyond it: the clean's outlier limit (outer tiles keep their background)

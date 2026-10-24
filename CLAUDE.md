@@ -106,7 +106,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 1. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
    anti-aliased rasterization, the depth prior outliers): **karlak A/B 2026-10-24**: exposure +0.24 dB held-out, now
    on by default (Splat tab "Exposure from the metadata"); bilateral grid worse on new views; anti-aliased +0.2 dB but
-   -1.5 dB in classic viewers (opt-in); tile mask A/B pending: `docs/todo_splat_quality.md`.
+   -1.5 dB in classic viewers (opt-in); tile masks (berlin tile 0) same mean PSNR, worst views +0.8 dB, depth-fog p90 1287 % → 20 %, 33 % faster:
+   now on by default for tiled runs: `docs/todo_splat_quality.md`.
 2. ~~Calibration biased low (~0.7×)~~ **closed 2026-10-23, by measurement**: the 0.7× was one synthetic draw
    (seed 1: its prior noise itself came out 0.81× nominal). A redundancy-aware estimate (Helmert VCE, tr(H) of the
    prior blocks by one perturbed re-solve, Hutchinson; `build/vce_proto.py`) found tr(H) 1–13 of 120 (images pin

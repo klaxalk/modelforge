@@ -644,6 +644,12 @@ class App:
                      "Ticked by itself once the project has an SfM mesh; ticking it sets Depth weight to 0.2 when it "
                      "is 0.")
             self.g_splat_mesh_prior.on_update(lambda _: self._mesh_prior_weight())
+            self.g_splat_tile_mask = gui.add_checkbox(
+                "Tiles: train only the tile's pixels", initial_value=splat_tiles.TILE_MASK,
+                hint="Tiled runs with the dense mesh prior: each photo's pixels whose SfM-mesh surface lies in another "
+                     "tile (beyond the margin) are left out of the losses. Unmasked, a tile grows fog in front of "
+                     "views that mostly show other tiles. berlin tile 0 (10k steps): in-tile PSNR the same (22.2), "
+                     "worst 10 % of views +0.8 dB, depth error p90 1287 % → 20 %, 33 % faster.")
             self.g_splat_mesh_dense = gui.add_checkbox(
                 "Mesh prior: dense (rendered depth)", initial_value=True,
                 hint="With the SfM mesh prior: render the mesh into every training camera (undistorted and cropped "
@@ -2369,7 +2375,7 @@ class App:
                                      camera_opt=self.g_splat_camopt.value),
                                 cache=self.g_splat_cache.value, lidar_depth=lidar_depth, depth_cloud=mesh,
                                 depth_dense=bool(self.g_splat_mesh_dense.value), regularize=self._regularize(),
-                                seed_mesh=seed,
+                                seed_mesh=seed, tile_mask=bool(self.g_splat_tile_mask.value),
                                 on_tile=on_tile,
                                 photos=int(self.g_splat_tile_photos.value), layout=self.g_splat_tile_layout.value,
                                 round_steps=int(self.g_splat_rounds.value), only=only, **common)

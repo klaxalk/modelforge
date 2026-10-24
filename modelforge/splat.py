@@ -668,9 +668,9 @@ def main():
     ap.add_argument("--mesh-prior", choices=("off", "vertices", "dense"), default="off",
                     help="depth targets from the SfM mesh (sfmmesh/mesh.ply): its vertices, or rendered into every "
                          "training camera (dense); needs --lidar-depth W")
-    ap.add_argument("--tile-mask", action="store_true",
-                    help="tiled runs: leave each photo's pixels that show other tiles out of the losses (needs "
-                         "--mesh-prior dense)")
+    ap.add_argument("--no-tile-mask", dest="tile_mask", action="store_false", default=True,
+                    help="tiled runs: train every photo's whole image (default: its pixels showing other tiles are left "
+                         "out of the losses; needs --mesh-prior dense)")
     ap.add_argument("--no-exposure", dest="exposure", action="store_false", default=EXPOSURE,
                     help="do not scale each training render by its photo's relative exposure from the DJI metadata "
                          "(transforms.json mf_exposure, written by the export; on by default when present)")

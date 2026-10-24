@@ -1,6 +1,6 @@
 # TODO: cheap splat quality fixes
 
-Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off** (see the end); the tile mask A/B is running. Both are flags or small changes plus an A/B run;
+Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off; tile masks on by default (berlin A/B)** (see the end). Both are flags or small changes plus an A/B run;
 validate on a small project first (fullrun_test, karlak; held-out scoring as in `build/splat_exp.py`), not on
 kladno_dira.
 
@@ -121,3 +121,20 @@ fit (leaves out exposure / white balance).
   rendered anti-aliased (`evaluate.run(rasterize_mode=)`, splat_eval `rasterize_mode`), but its opacities assume the
   2D filter: in classic renderers (the GUI's viewer, most .ply viewers, the splat mesh's TSDF) it loses 1.5 dB.
   Worth it only with an anti-aliased viewer.
+
+## Tile mask A/B (2026-10-24, `build/tilemask_ab.py`, berlin tile 0 copied to `build/berlin_ab`)
+
+10000 steps x1, mesh prior dense 0.2, seeds, flatten 0.02; scored on nerfstudio's eval photos of the tile (never
+trained on), over the pixels whose mesh surface lies in the tile (`build/tilemask_eval.py`; 65 of 104 views have such
+pixels):
+
+| arm | in-tile PSNR | p10 | all pixels | depth error median / p90 | within 5 % | Gaussians | train |
+|---|---|---|---|---|---|---|---|
+| no mask | 22.22 | 18.21 | 19.02 | 7.4 % / 1287 % | 47.5 % | 879k | 802 s |
+| **mask** | 22.17 | **19.02** | 15.99 | **0.6 % / 19.6 %** | **84.6 %** | 635k | **537 s** |
+
+The mean is the same, the worst views gain 0.8 dB, the fog in front of mostly-other-tile views is gone (the depth
+error's tail), and training is a third faster. "All pixels" drops because the other tiles' parts are no longer trained;
+the merge cuts them anyway. → **On by default** for tiled runs (Splat tab "Tiles: train only the tile's pixels",
+`splat_tiles.TILE_MASK`; CLI `--no-tile-mask`; needs the dense mesh prior, else ignored). Not yet checked: the seams
+of a merged masked run (the masks keep each tile's margin).
