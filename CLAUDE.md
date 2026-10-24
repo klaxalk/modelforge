@@ -98,7 +98,8 @@ Tested only partially:
 Open items by priority (high / medium / low; the user sets them; the TODO docs follow this list):
 
 **High**
-- (none open) Done 2026-10-23: **the loop-closure pose graph** (~37 min per revisit pass on kladno_dira 5681): the
+- **TODO: mitigate Gaussians that represent the sky** (the user asked, 2026-10-24): sky Gaussians as floaters / a dome in front of the horizon: `docs/todo_sky.md`.
+- Done 2026-10-23: **the loop-closure pose graph** (~37 min per revisit pass on kladno_dira 5681): the
   reference BLAS (now OpenBLAS) + CGNR instead of sparse Cholesky, dira2k loop graphs 368 s → 1–3 s with the same
   revisit split: `docs/todo_posegraph_speed.md`.
 
@@ -162,6 +163,7 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    479–1902, 2.26x): the split's slack shrinks with depth (own photos 233–953 → 304–666), joined photos capped at 0.5x
    a tile's own, those showing >= 20 % of it always stay (a higher bar dropped berlin views of the kind the merge broke);
    a training A/B on one tile is open: `docs/todo_tile_size.md`.
+10. **TODO: saved camera views** (the user asked, 2026-10-24): a left-panel tab to save the current camera pose under a name and jump back to it from a list, per project: `docs/todo_saved_views.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
