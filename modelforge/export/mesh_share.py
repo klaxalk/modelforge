@@ -18,8 +18,19 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import frame_camera  # noqa: E402
+
+
+def _load_frame_camera():
+    """export/frame_camera.py by its path: this folder on sys.path would shadow nerfstudio (export/nerfstudio.py)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "mf_frame_camera", os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_camera.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+frame_camera = _load_frame_camera()
 
 
 def main():

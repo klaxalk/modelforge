@@ -1,8 +1,8 @@
 """Intrinsics of a transforms.json frame: its own keys over the file's top-level ones (nerfstudio's rule). Several
 cameras (multi-camera DJI projects) carry them per frame; one camera only at the top.
 
-No imports beyond the standard library: the scripts run in nerfstudio's venv load it by path
-(sys.path.insert(0, os.path.dirname(__file__)); import frame_camera).
+No imports at all: the scripts run in nerfstudio's venv load it by its file path (importlib), since putting
+this folder on sys.path would shadow nerfstudio with export/nerfstudio.py.
 """
 
 KEYS = ("camera_model", "fl_x", "fl_y", "cx", "cy", "w", "h", "k1", "k2", "k3", "k4", "p1", "p2")
