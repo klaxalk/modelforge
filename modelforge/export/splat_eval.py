@@ -12,6 +12,9 @@ is rendered there on a black background. Scores per image and averaged: PSNR, SS
 torchmetrics; skipped if it cannot load). Fully transparent pixels of the render (alpha < 0.05: no
 Gaussians there, e.g. sky the SfM never reconstructed) are reported as `empty` and left in the scores.
 The first three views are also written as OUT_view<i>.jpg (photo | render) for a visual check.
+Optional `gains` (V,): each render times its photo's relative exposure in linear light (as the splat plugin trains with
+use_exposure). Also `psnr_cc`: PSNR after a least-squares colour fit of the render to the photo (3 x 3 + bias per
+image), which leaves out exposure / white-balance differences.
 """
 
 import json
@@ -61,10 +64,16 @@ def main():
                 Ks=torch.tensor(K, device=dev, dtype=torch.float32)[None], width=W, height=H,
                 sh_degree=int(round(np.sqrt(k))) - 1, near_plane=0.01, far_plane=1e10, packed=False)
             pred = colors[0, ..., :3].clamp(0, 1)  # black background: the alpha-weighted sum as is
+            if "gains" in d.files:
+                pred = ((pred.clamp(1e-6, 1) ** 2.2) * float(d["gains"][i])).clamp(1e-6, 1) ** (1 / 2.2)
+            X = torch.cat([pred.reshape(-1, 3), torch.ones(H * W, 1, device=dev)], 1)
+            M = torch.linalg.lstsq(X, gt.reshape(-1, 3)).solution
+            cc = (X @ M).clamp(0, 1).reshape(H, W, 3)
             a = gt.permute(2, 0, 1)[None]
             b = pred.permute(2, 0, 1)[None]
             m = {"psnr": float(peak_signal_noise_ratio(b, a, data_range=1.0)),
                  "ssim": float(structural_similarity_index_measure(b, a, data_range=1.0)),
+                 "psnr_cc": float(peak_signal_noise_ratio(cc.permute(2, 0, 1)[None], a, data_range=1.0)),
                  "empty": float((alphas[0, ..., 0] < 0.05).float().mean())}
             if lpips is not None:
                 m["lpips"] = float(lpips(b, a))

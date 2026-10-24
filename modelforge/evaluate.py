@@ -99,10 +99,11 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     return out
 
 
-def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True):
+def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True, gains=None):
     """Pose, render and score the held-out images; stats to report.json["evaluation"] (report=True) and
     returned. splat_path: another ENU splat than splat/splat_enu.ply (e.g. a training snapshot); located:
-    pose_holdout's result, to locate the images once for several splats."""
+    pose_holdout's result, to locate the images once for several splats. gains: {image name: relative exposure}
+    (modelforge.exposure): each render scaled by it (a splat trained with use_exposure)."""
     import pycolmap
     from modelforge import splat, splat_mesh
     from modelforge.pipeline import Report
@@ -124,7 +125,8 @@ def run(project, holdout, width=1920, log=print, splat_path=None, located=None, 
     np.savez(inp, viewmats=np.array([located[n]["viewmat"] for n in names], np.float32),
              K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64), dist=np.array(dist, np.float64),
              width=cam.width, height=cam.height, render_width=int(width),
-             paths=np.array([os.path.join(holdout["images_dir"], n) for n in names]), **g)
+             paths=np.array([os.path.join(holdout["images_dir"], n) for n in names]),
+             **({"gains": np.array([float(gains.get(n, 1.0)) for n in names])} if gains else {}), **g)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "splat_eval.py")
     out_json = os.path.join(ws, "metrics.json")
     lines = []
