@@ -132,8 +132,12 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    heights 1.8 / 0.3 m apart): 3142/3142, 0.478 px, per-flight offsets up to 3.5 m; but flights are not all merged
    (`build/cross_source_split.py`, split / merged per flight pair): 3_1–3_4 0.29 m (80 %), 3_3–3_4 0.17 m (79 %),
    3_1–3_2 0.60 m (48 %), 3_1–3_3 0.85 m (73 %), **3_2–3_4 4.14 m (0 % merged)**: one constant offset per flight
-   cannot fit a flight that drifts within itself. Next: the revisits across flights in the drift, one solve over all
-   flights (`robust.CROSS_SOURCE_DRIFT`, written, off until a berlin refine validates it: 89 min, 16 GB).
+   cannot fit a flight that drifts within itself. **Joint cross-flight drift on by default since 2026-10-24**
+   (`robust.CROSS_SOURCE_DRIFT`; the revisits across flights in one drift solve over all flights; berlin global refine,
+   `build/berlin_xdrift`): merged 48 / 73 / 80 / 79 % → 93 / 87 / 90 / 91 %, split medians 0.60 / 0.85 / 0.29 / 0.17 →
+   0.13 / 0.30 / 0.11 / 0.04 m (3_1–3_2 / 3_1–3_3 / 3_1–3_4 / 3_3–3_4); 3_2–3_4 (~600 matches) still apart, 4.14 → 3.39 m;
+   error 0.478 → 0.496 px, prior deviation median 1.36 → 2.32 m (the GPS is not the truth), 89 → 43 min, peak 12 GB.
+   The berlin project itself keeps its old refine until the user refines again.
 3. ~~Trim the final hover of `berlin_3_1`~~: superseded by the export's isolated-photo rule (29 photos of t ≥ 504 s
    left out on berlin).
 4. ~~M4 (accuracy): prior-guided matching, the EIS warp, rolling shutter~~ **closed by measurement 2026-10-24**: no

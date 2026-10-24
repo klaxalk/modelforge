@@ -447,9 +447,10 @@ def _solve_drift(ti, tj, diff, n, knots, times):
 
 
 MIN_CROSS = 5  # cross-source pairs a source needs before they, not its priors' mean, place its drift
-# revisits across sources (flights) in the drift, one solve over all sources (berlin: flight 3_2 sits 4.1 m off flight 3_4,
-# 0 % merged, with a constant offset per flight); off until validated on berlin (the synthetic scene merges either way)
-CROSS_SOURCE_DRIFT = False
+# revisits across sources (flights) in the drift, one solve over all sources. berlin (4 flights, global refine,
+# 2026-10-24): merged matches between flights 48-80 % -> 87-93 %, split medians 0.17-0.85 -> 0.04-0.30 m, error
+# 0.478 -> 0.496 px, 89 -> 43 min; only flights 3_2-3_4 (~600 matches) stay apart (4.1 -> 3.4 m)
+CROSS_SOURCE_DRIFT = True
 
 
 def _solve_drift_joint(blocks, eqs, anchored):
