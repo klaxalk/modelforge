@@ -1,7 +1,7 @@
 # TODO: job queue with completion notices
 
-Priority: **medium**. Status: **first version done 2026-10-23** (see the end); open: entries of other projects
-without switching the view, a memory check per entry, a command hook per notice.
+Priority: **medium**. Status: **first version done 2026-10-23** (see the end); memory check per entry done 2026-10-24;
+open: entries of other projects without switching the view, a command hook per notice.
 
 ## Why
 
@@ -58,3 +58,13 @@ finished.
   after the first click; needs https or localhost).
 - Tests: `tests/test_jobqueue.py` (file, restart, policies, editing; two projects queued with different Pairs settings
   run with their own).
+
+## Done: memory check per entry (2026-10-24)
+
+Before an entry starts, `jobqueue.memory_need` gives the RAM it needs available: at least `MIN_FREE_GB` (6), or 1.1 x
+the peak its project's last such run recorded (report.json `refine.peak_rss_gb` for refine, Resume refine, Run SfM
+(all), Run full pipeline; no other stage records one yet), or for a refine with BA mode **global** the estimate of
+`pipeline.global_ba_need_gb` (BA mode auto picks chunked itself). With less available the entry waits ("waiting for
+memory: 10.0 GB available, needs 16 GB (its last refine peaked at 15 GB)" on its line, one notice) and starts once the
+memory is free. Why: what holds the memory is often outside the GUI (another job, a test run), and an OOM kill once
+cost a 5 h refine. Test: `test_entry_waits_for_memory`.

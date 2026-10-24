@@ -39,6 +39,37 @@ def test_queue_file_and_policies(tmp_path):
     assert q.entries == []
 
 
+def test_entry_waits_for_memory(tmp_path, monkeypatch):
+    """An entry starts only when the RAM it needs is available: MIN_FREE_GB, its project's last recorded peak, a
+    forced-global BA's estimate; meanwhile it waits with a note (one notice)."""
+    from types import SimpleNamespace
+    proj = tmp_path / "p"
+    proj.mkdir()
+    json.dump({"refine": {"peak_rss_gb": 14.6}, "match": {"inlier_matches": 82.7e6}}, open(proj / "report.json", "w"))
+    q = JobQueue(str(tmp_path))
+    e = q.add(str(proj), "refine", "Refine", {"g_ba_mode": "chunked"})
+    need, why = jobqueue.memory_need(e)
+    assert abs(need - 16.06) < 0.01 and "peaked at 15 GB" in why
+    g = q.add(str(proj), "refine", "Refine", {"g_ba_mode": "global"})
+    assert jobqueue.memory_need(g)[0] > 50  # 82.7M inlier matches
+    assert jobqueue.memory_need(q.add(str(proj), "splat", "Train splat", {}))[0] == jobqueue.MIN_FREE_GB
+    started, notices = [], []
+    app = SimpleNamespace(running=False, ingest=SimpleNamespace(running=False), path=str(proj), _run_id=0,
+                          run_stage=started.append, _notice=notices.append, _apply_settings=lambda s: None,
+                          open_project=lambda p: None)
+    panel = jobqueue.QueuePanel.__new__(jobqueue.QueuePanel)
+    panel.app, panel.q, panel.current, panel.current_run, panel.refresh = app, q, None, None, lambda: None
+    q.entries = [e]
+    q.running = True
+    monkeypatch.setattr(jobqueue, "_available_gb", lambda: 10.0)
+    panel.tick()
+    panel.tick()
+    assert started == [] and e["note"].startswith("waiting for memory: 10.0 GB") and len(notices) == 1
+    monkeypatch.setattr(jobqueue, "_available_gb", lambda: 20.0)
+    panel.tick()
+    assert started == ["refine"] and "note" not in e
+
+
 @pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "database.db")), reason="needs a matched project")
 def test_queued_entries_run_with_their_settings(tmp_path, monkeypatch):
     """Two projects queued with different Pairs settings: each entry opens its project and runs with the settings the

@@ -117,8 +117,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    export, SfM mesh, COLMAP dense) run in a job process of their own (`modelforge/worker.py`: an OOM kill takes only
    the job; `MODELFORGE_INPROCESS=1` = as before): `docs/todo_robustness.md`.
 4. **Job queue with completion notices: first version done 2026-10-23** (right panel → Queue: project + stage +
-   the tabs' settings at queueing time, run one after the other, browser notification per entry; open: entries
-   of other projects without switching the view, memory check per entry): `docs/todo_job_queue.md`.
+   the tabs' settings at queueing time, run one after the other, browser notification per entry; memory check
+   per entry done 2026-10-24 (waits until the RAM it needs is free); open: entries of other projects without switching
+   the view): `docs/todo_job_queue.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142

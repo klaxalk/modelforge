@@ -6,7 +6,8 @@ panel's inputs at queueing time (App._settings: Sparse, Sparse Mesh, Splat, Spla
 later does not change queued work). When it starts, its project is opened if another one is open, its settings are
 put back into the tabs and the stage runs as if its button was pressed; the GUI shows it as any job (state line,
 progress, Stop). Stop pauses the queue; a failure stops it, or (On failure: go on) skips that project's other entries.
-Kept in ROOT/.modelforge_queue.json: after a GUI restart a running entry is marked interrupted (not rerun) and the
+An entry starts only when enough RAM is available (memory_need: MIN_FREE_GB, its project's last recorded peak of
+that stage, a forced-global BA's estimate); it waits meanwhile, with a note. Kept in ROOT/.modelforge_queue.json: after a GUI restart a running entry is marked interrupted (not rerun) and the
 queue waits to be started again.
 """
 
@@ -30,6 +31,9 @@ STAGES = {  # label -> App.run_stage stage
     "Semantic features": "semantic",
     "COLMAP dense (all)": "dense",
 }
+MIN_FREE_GB = 6.0  # an entry starts only with this much RAM available (an OOM kill once took a 5 h refine) ...
+PEAK_OF = {"refine": "refine", "refine-resume": "refine", "sfm": "refine", "all": "refine"}  # ... or the peak its
+#        project's last run of that kind recorded (report.json <key>.peak_rss_gb), or a forced-global BA's estimate
 ICONS = {"pending": "⚪", "running": "⏳", "done": "✅", "failed": "❌", "stopped": "⏹", "interrupted": "⚠️",
          "skipped": "⏭"}
 
@@ -119,6 +123,33 @@ class JobQueue:
             out.append(f"{k}. {ICONS.get(e['status'], '')} **{os.path.basename(e['project'])}** · {e['label']}"
                        f" · {e['status']}{took}{note}")
         return "  \n".join(out)
+
+
+def memory_need(e):
+    """(GB the entry needs available before it starts, why): MIN_FREE_GB, the peak its project's last such run
+    recorded, or for a refine with BA mode global the estimate of pipeline.global_ba_need_gb."""
+    need, why = MIN_FREE_GB, f"at least {MIN_FREE_GB:.0f} GB"
+    try:
+        rep = json.load(open(os.path.join(e["project"], "report.json")))
+    except (OSError, ValueError):
+        rep = {}
+    key = PEAK_OF.get(e["stage"])
+    peak = (rep.get(key) or {}).get("peak_rss_gb") if key else None
+    if peak and peak * 1.1 > need:
+        need, why = peak * 1.1, f"its last {key} peaked at {peak:.0f} GB"
+    if key == "refine" and (e.get("settings") or {}).get("g_ba_mode") == "global":
+        inl = (rep.get("match") or {}).get("inlier_matches")
+        if inl:
+            from modelforge import pipeline
+            g = pipeline.global_ba_need_gb(inl)
+            if g > need:
+                need, why = g, f"a global BA of {inl / 1e6:.0f}M inlier matches needs ~{g:.0f} GB"
+    return need, why
+
+
+def _available_gb():
+    from modelforge import pipeline
+    return pipeline.ram_available_gb()
 
 
 def _fmt(s):
@@ -223,6 +254,19 @@ class QueuePanel:
                 if x.get("ended", 0) >= (getattr(self, "_started_at", None) or 0)))
             self._started_at = None
             return
+        need, why = memory_need(e)
+        avail = _available_gb()
+        if avail is not None and avail < need:  # wait: something else holds the memory (another job, a test run)
+            note = f"waiting for memory: {avail:.1f} GB available, needs {need:.0f} GB ({why})"
+            if e.get("note") != note:
+                if not (e.get("note") or "").startswith("waiting for memory"):
+                    app._notice(f"{os.path.basename(e['project'])}: {e['label']} waits for memory ({why})")
+                e["note"] = note
+                self.q.save()
+                self.refresh()
+            return
+        if (e.get("note") or "").startswith("waiting for memory"):
+            e.pop("note")
         self._started_at = getattr(self, "_started_at", None) or time.time()
         try:
             if os.path.abspath(app.path or "") != e["project"]:
