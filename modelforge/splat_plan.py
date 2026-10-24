@@ -65,12 +65,18 @@ def vram_gb():
 
 
 def _cameras(project):
-    """(centres n x 3, R_wc n x 3 x 3 OpenCV, fx, w, h, source)."""
+    """(centres n x 3, R_wc n x 3 x 3 OpenCV, fx, w, h, source); fx, w, h are numbers, or arrays (n,) when the frames
+    have cameras of their own (multi-camera projects)."""
     path = os.path.join(project, "transforms.json")
     if os.path.exists(path):
+        from modelforge.export import frame_camera
         t = json.load(open(path))
         c2w = np.array([f["transform_matrix"] for f in t["frames"]], float)
         R = c2w[:, :3, :3] * np.array([1.0, -1.0, -1.0])  # OpenGL -> OpenCV camera axes
+        cams, index = frame_camera.cameras(t)
+        if len(cams) > 1:
+            fx, w, h = (np.array([float(cams[i][k]) for i in index]) for k in ("fl_x", "w", "h"))
+            return c2w[:, :3, 3], R, fx, w.astype(int), h.astype(int), "refined cameras"
         return c2w[:, :3, 3], R, float(t["fl_x"]), int(t["w"]), int(t["h"]), "refined cameras"
     poses = json.load(open(os.path.join(project, "poses.json")))
     imgs = [i for i in poses["images"] if "q_world_from_cam" in i]
@@ -124,6 +130,10 @@ def survey(project, max_points=MAX_POINTS):
     """Image count, overlap (cameras per sparse point), surface seen (m², sum of footprints / overlap),
     GSD (m / px at full resolution, median over cameras), initial points and the camera source."""
     C, R, fx, w, h, source = _cameras(project)
+    fxs, ws, hs = (np.broadcast_to(np.asarray(x), (len(C),)) for x in (fx, w, h))  # per camera
+    if np.ndim(w):  # several cameras: the widest decides the resolution rules
+        k = int(np.argmax(ws))
+        w, h = int(ws[k]), int(hs[k])
     out = {"images": len(C), "train_images": math.ceil(TRAIN_FRACTION * len(C)), "source": source,
            "width": w, "height": h, "initial_points": ply_count(os.path.join(project, "sparse_pc.ply")),
            "area_m2": 0.0, "overlap": 0.0, "gsd_m": None}
@@ -131,25 +141,26 @@ def survey(project, max_points=MAX_POINTS):
     if xyz is None or len(xyz) < 10:
         return out
     seen = np.zeros(len(xyz), np.int64)
-    depths = []
-    for c, r in zip(C, R):
+    depths, used = [], []
+    for i, (c, r) in enumerate(zip(C, R)):
         p = (xyz - c) @ r  # camera coordinates (OpenCV)
         z = p[:, 2]
         front = np.flatnonzero(z > 1e-9)
-        u = fx * p[front, 0] / z[front] + w / 2
-        v = fx * p[front, 1] / z[front] + h / 2
-        idx = front[(u >= 0) & (u < w) & (v >= 0) & (v < h)]
+        u = fxs[i] * p[front, 0] / z[front] + ws[i] / 2
+        v = fxs[i] * p[front, 1] / z[front] + hs[i] / 2
+        idx = front[(u >= 0) & (u < ws[i]) & (v >= 0) & (v < hs[i])]
         if len(idx) < 5:
             continue
         d = float(np.median(z[idx]))
         depths.append(d)
+        used.append(i)
         seen[idx[z[idx] < FAR_X_MEDIAN * d]] += 1
     if not depths or not seen.any():
         return out
     overlap = float(seen[seen > 0].mean())
-    depths = np.asarray(depths)
-    footprints = float(np.sum(w * h * (depths / fx) ** 2))
-    out.update(area_m2=footprints / overlap, overlap=overlap, gsd_m=float(np.median(depths) / fx),
+    depths, used = np.asarray(depths), np.asarray(used)
+    footprints = float(np.sum(ws[used] * hs[used] * (depths / fxs[used]) ** 2))
+    out.update(area_m2=footprints / overlap, overlap=overlap, gsd_m=float(np.median(depths / fxs[used])),
                cameras_seeing=len(depths))
     return out
 

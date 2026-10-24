@@ -51,6 +51,8 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     import cv2
     import pycolmap
     rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
+    if len(rec.cameras) > 1:
+        raise RuntimeError("the held-out evaluation supports one camera per project for now (docs/todo_multicamera.md)")
     cam = next(iter(rec.cameras.values()))
     report = json.load(open(os.path.join(project, "report.json")))
     upright = bool(report.get("features", {}).get("upright", True))

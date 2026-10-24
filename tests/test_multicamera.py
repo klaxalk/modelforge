@@ -74,3 +74,25 @@ def test_two_cameras_get_their_own_intrinsics(tmp_path):
     assert f["reg_images"] == 40 and f["point_error_px"]["median"] < 1.0
     (a, b) = sorted(f["cameras"].values(), key=lambda c: -c["size"][0])
     assert abs(b["params"][0] / a["params"][0] - 2 / 3) < 0.005, (a, b)
+    # the export: intrinsics per frame; the readers take each frame's camera
+    from modelforge import splat_plan
+    from modelforge.export import frame_camera
+    pipeline.stage_export(ws, rep, drop_isolated=False)
+    t = json.load(open(os.path.join(ws, "transforms.json")))
+    cams, index = frame_camera.cameras(t)
+    assert t["mf_cameras"] == 2 and len(cams) == 2 and sorted(c["w"] for c in cams) == [1280, 1920]
+    names = [r["image"] for r in p["images"]]
+    for f, i in zip(t["frames"], index):
+        assert cams[i]["w"] == (1280 if names.index(os.path.basename(f["file_path"])) % 2 else 1920)
+    s = splat_plan.survey(ws)
+    assert s["width"] == 1920 and s["overlap"] > 2 and s["gsd_m"] > 0
+    assert frame_camera.largest(t)["w"] == 1920
+
+
+def test_frame_camera():
+    from modelforge.export import frame_camera
+    t = {"fl_x": 100.0, "w": 200, "h": 100, "frames": [{"file_path": "a"}, {"file_path": "b", "fl_x": 50.0, "w": 100},
+                                                        {"file_path": "c"}]}
+    cams, index = frame_camera.cameras(t)
+    assert index == [0, 1, 0] and cams[1] == {"fl_x": 50.0, "w": 100, "h": 100}
+    assert frame_camera.largest(t)["w"] == 200

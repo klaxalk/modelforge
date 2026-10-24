@@ -15,10 +15,14 @@ python export/mesh_color.py PROJECT MESH OUT [--width 1920] [--live PATH --every
 import argparse
 import json
 import os
+import sys
 import time
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import frame_camera  # noqa: E402
 
 POWER = 4  # weight (cos / distance) ** POWER
 
@@ -57,8 +61,9 @@ def main():
     ap.add_argument("--every", type=int, default=100)
     a = ap.parse_args()
     t = json.load(open(os.path.join(a.project, "transforms.json")))
-    if t.get("camera_model", "OPENCV") != "OPENCV":
-        raise SystemExit(f"mesh colour: camera model {t.get('camera_model')} not supported (OPENCV only)")
+    cams, index = frame_camera.cameras(t)
+    if any(c.get("camera_model", "OPENCV") != "OPENCV" for c in cams):
+        raise SystemExit("mesh colour: only OPENCV cameras are supported")
     t0 = time.time()
     mesh = o3d.io.read_triangle_mesh(a.mesh)
     mesh.compute_vertex_normals()
@@ -68,14 +73,17 @@ def main():
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
     print(f"mesh colour: {len(V):,} vertices, {len(mesh.triangles):,} triangles loaded in {time.time() - t0:.0f} s",
           flush=True)
-    reduce = 1
-    while t["w"] / (reduce * 2) >= a.width and reduce < 8:  # JPEG decoding at 1/2, 1/4, 1/8 (DCT scaling)
-        reduce *= 2
-    flag = {1: cv2.IMREAD_COLOR, 2: cv2.IMREAD_REDUCED_COLOR_2, 4: cv2.IMREAD_REDUCED_COLOR_4,
-            8: cv2.IMREAD_REDUCED_COLOR_8}[reduce]
-    K = np.array([[t["fl_x"], 0, t["cx"]], [0, t["fl_y"], t["cy"]], [0, 0, 1.0]]) / reduce
-    K[2, 2] = 1.0
-    dist = (t.get("k1", 0.0), t.get("k2", 0.0), t.get("p1", 0.0), t.get("p2", 0.0))
+    def decoding(c):
+        """(imread flag, K, dist) of a camera: JPEG decoding at 1/2, 1/4, 1/8 (DCT scaling) down to --width."""
+        reduce = 1
+        while c["w"] / (reduce * 2) >= a.width and reduce < 8:
+            reduce *= 2
+        flag = {1: cv2.IMREAD_COLOR, 2: cv2.IMREAD_REDUCED_COLOR_2, 4: cv2.IMREAD_REDUCED_COLOR_4,
+                8: cv2.IMREAD_REDUCED_COLOR_8}[reduce]
+        K = np.array([[c["fl_x"], 0, c["cx"]], [0, c["fl_y"], c["cy"]], [0, 0, 1.0]]) / reduce
+        K[2, 2] = 1.0
+        return flag, K, (c.get("k1", 0.0), c.get("k2", 0.0), c.get("p1", 0.0), c.get("p2", 0.0))
+    per_cam = [decoding(c) for c in cams]
     acc, wsum = np.zeros((len(V), 3)), np.zeros(len(V))
     old = (np.asarray(mesh.vertex_colors) * 255.0) if mesh.has_vertex_colors() else np.full((len(V), 3), 128.0)
 
@@ -93,6 +101,7 @@ def main():
             np.save(a.live + ".part.npy", np.round(current()[0]).astype(np.uint8))
             os.replace(a.live + ".part.npy", a.live)
             print(f"mesh colour: live {k} / {len(frames)}", flush=True)
+        flag, K, dist = per_cam[index[k]]
         img = cv2.imread(os.path.join(a.project, f["file_path"]), flag)
         if img is None:
             continue

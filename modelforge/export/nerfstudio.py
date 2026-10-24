@@ -25,21 +25,26 @@ def opencv_params(cam):
     raise ValueError(f"camera model {m} has no OPENCV equivalent for nerfstudio")
 
 
+def intrinsics(cam):
+    """transforms.json intrinsics of a COLMAP camera (camera_model, fl_x ... distortion)."""
+    if cam.model.name == "OPENCV_FISHEYE":  # nerfstudio's fisheye: k1..k4
+        fx, fy, cx, cy, k1, k2, k3, k4 = (float(v) for v in cam.params)
+        return {"camera_model": "OPENCV_FISHEYE", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
+                "k1": k1, "k2": k2, "k3": k3, "k4": k4}
+    fx, fy, cx, cy, k1, k2, p1, p2 = opencv_params(cam)
+    return {"camera_model": "OPENCV", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy, "k1": k1, "k2": k2, "p1": p1,
+            "p2": p2}
+
+
 def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=None, lidar=True, exclude=()):
     """lidar: add the project's coloured LiDAR points (lidar/cloud.ply, kind rosbag) to the initial cloud.
     exclude: image names left out of the frames (sfm.isolated)."""
-    cams = list(rec.cameras.values())
-    if len(cams) != 1:
-        raise ValueError(f"expected one shared camera, got {len(cams)}")
-    cam = cams[0]
-    if cam.model.name == "OPENCV_FISHEYE":  # nerfstudio's fisheye: k1..k4
-        fx, fy, cx, cy, k1, k2, k3, k4 = (float(v) for v in cam.params)
-        intr = {"camera_model": "OPENCV_FISHEYE", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
-                "k1": k1, "k2": k2, "k3": k3, "k4": k4}
-    else:
-        fx, fy, cx, cy, k1, k2, p1, p2 = opencv_params(cam)
-        intr = {"camera_model": "OPENCV", "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
-                "k1": k1, "k2": k2, "p1": p1, "p2": p2}
+    ids = sorted(rec.cameras)
+    if not ids:
+        raise ValueError("the model has no camera")
+    cam = rec.cameras[ids[0]]
+    intr = intrinsics(cam)
+    per_frame = len(ids) > 1  # several cameras: each frame carries its own (nerfstudio reads them per frame)
 
     from modelforge import exposure
     try:
@@ -55,8 +60,11 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
         w2c[:3] = img.cam_from_world().matrix()
         c2w = np.linalg.inv(w2c)
         c2w[0:3, 1:3] *= -1  # OpenCV -> OpenGL camera axes
+        c = rec.cameras[img.camera_id]
         frames.append({"file_path": f"{image_dir}/{img.name}", "transform_matrix": c2w.tolist(),
-                       "colmap_im_id": int(image_id)} | ({"mf_exposure": gains[img.name]} if img.name in gains else {}))
+                       "colmap_im_id": int(image_id)}
+                      | ({**intrinsics(c), "w": int(c.width), "h": int(c.height)} if per_frame else {})
+                      | ({"mf_exposure": gains[img.name]} if img.name in gains else {}))
 
     n_lidar = 0
     from modelforge.export import lidar as lidar_mod
@@ -66,6 +74,8 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
     else:
         rec.export_PLY(os.path.join(project, ply_name))
     out = {**intr, "w": int(cam.width), "h": int(cam.height), "frames": frames, "ply_file_path": ply_name}
+    if per_frame:  # the top level keeps the first camera for old readers; modelforge reads export/frame_camera.py
+        out["mf_cameras"] = len(ids)
     if os.path.exists(os.path.join(project, lidar_mod.CLOUD)):  # for splatfacto-lidar's depth loss (modelforge/nsplugin)
         out["lidar_ply_file_path"] = lidar_mod.CLOUD.replace(os.sep, "/")
     extra = {**(extra or {}), **({"lidar_points_in_ply": n_lidar} if n_lidar else {})}

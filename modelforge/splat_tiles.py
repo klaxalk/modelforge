@@ -97,13 +97,14 @@ def _seen(C, R, fx, w, h, xyz):
     """Per camera the indices of the sampled points it sees (in front, in frame, nearer than
     splat_plan.FAR_X_MEDIAN x its median depth), as in splat_plan.survey."""
     out = []
-    for c, r in zip(C, R):
+    fxs, ws, hs = (np.broadcast_to(np.asarray(x), (len(C),)) for x in (fx, w, h))  # per camera
+    for i, (c, r) in enumerate(zip(C, R)):
         p = (xyz - c) @ r
         z = p[:, 2]
         front = np.flatnonzero(z > 1e-9)
-        u = fx * p[front, 0] / z[front] + w / 2
-        v = fx * p[front, 1] / z[front] + h / 2
-        idx = front[(u >= 0) & (u < w) & (v >= 0) & (v < h)]
+        u = fxs[i] * p[front, 0] / z[front] + ws[i] / 2
+        v = fxs[i] * p[front, 1] / z[front] + hs[i] / 2
+        idx = front[(u >= 0) & (u < ws[i]) & (v >= 0) & (v < hs[i])]
         if len(idx) >= 5:
             idx = idx[z[idx] < splat_plan.FAR_X_MEDIAN * np.median(z[idx])]
         out.append(idx.astype(np.int32))
@@ -329,12 +330,19 @@ def loss_masks(project, k, tile, maps, on_line=print, job=None):
     if os.path.exists(man) and json.load(open(man)) != key:
         for f in os.listdir(out):
             os.remove(os.path.join(out, f))
-    K, W, H = undistorted_camera(t, n_down)
-    vs, us = np.mgrid[0:H:MASK_STRIDE, 0:W:MASK_STRIDE]
-    rays = np.stack([(us + 0.5 - K[0, 2]) / K[0, 0], (vs + 0.5 - K[1, 2]) / K[1, 1], np.ones(us.shape)], -1)
+    from modelforge.export import frame_camera
+    rays_of = {}  # per camera: (rays, W, H)
     kept, made = [], 0
     for f in t["frames"]:
         jobs.check(job)
+        cam = frame_camera.camera(t, f)
+        ck = tuple(sorted(cam.items()))
+        if ck not in rays_of:
+            K, W, H = undistorted_camera(cam, n_down)
+            vs, us = np.mgrid[0:H:MASK_STRIDE, 0:W:MASK_STRIDE]
+            rays_of[ck] = (np.stack([(us + 0.5 - K[0, 2]) / K[0, 0], (vs + 0.5 - K[1, 2]) / K[1, 1],
+                                     np.ones(us.shape)], -1), W, H)
+        rays, W, H = rays_of[ck]
         name = os.path.basename(f["file_path"])
         dst = os.path.join(out, name + ".png")
         src = os.path.join(maps, name + ".npy")
@@ -646,7 +654,9 @@ def run(project, method="splatfacto", plan_args=None, extra=(), on_line=print, o
     else:
         splat._remove(os.path.join(project, splat.RESUME))
         down = plan_args.get("downscale")
-        down = splat_plan.auto_downscale(json.load(open(os.path.join(project, "transforms.json")))["w"]) \
+        from modelforge.export import frame_camera
+        down = splat_plan.auto_downscale(frame_camera.largest(json.load(open(os.path.join(project,
+                                                                                       "transforms.json"))))["w"]) \
             if down in (None, 0, "", "auto") else int(down)
         state = load(project)
         fits = current(project, state)

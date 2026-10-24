@@ -67,8 +67,10 @@ def auto_cache(project, downscale=1):
     nerfstudio decodes in parallel workers). Returns (mode, decoded GB)."""
     import json
     from modelforge import splat_plan
+    from modelforge.export import frame_camera
     t = json.load(open(os.path.join(project, "transforms.json")))
-    gb = len(t["frames"]) * (t["w"] // downscale) * (t["h"] // downscale) * 3 / 1e9
+    gb = sum((c["w"] // downscale) * (c["h"] // downscale) * 3 for c in map(lambda f: frame_camera.camera(t, f),
+                                                                          t["frames"])) / 1e9
     vram = splat_plan.vram_gb() or splat_plan.DEFAULT_VRAM_GB
     try:
         avail = next(int(line.split()[1]) for line in open("/proc/meminfo")

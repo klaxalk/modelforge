@@ -77,6 +77,9 @@ def status(project):
 def _cameras(project):
     """World -> OpenCV view matrices of the transforms.json frames, K, distortion, size, image paths."""
     t = json.load(open(os.path.join(project, "transforms.json")))
+    if t.get("mf_cameras", 1) > 1:
+        raise ValueError("semantic features support one camera per project for now (this one has "
+                         f"{t['mf_cameras']}: docs/todo_multicamera.md)")
     if t.get("camera_model", "OPENCV") != "OPENCV":
         raise ValueError(f"semantic features support OPENCV cameras, not {t.get('camera_model')}")
     K = np.array([[t["fl_x"], 0, t["cx"]], [0, t["fl_y"], t["cy"]], [0, 0, 1]], float)

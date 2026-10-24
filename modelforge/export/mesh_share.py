@@ -13,9 +13,13 @@ OUT.npz: share (frames x tiles, float32), hit (frames).
 import argparse
 import json
 import os
+import sys
 import time
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import frame_camera  # noqa: E402
 
 
 def main():
@@ -34,15 +38,20 @@ def main():
     mesh = o3d.io.read_triangle_mesh(a.mesh)
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-    s = a.width / float(t["w"])
-    W, H = a.width, max(1, int(round(t["h"] * s)))
-    fx, fy, cx, cy = t["fl_x"] * s, t["fl_y"] * s, t["cx"] * s, t["cy"] * s
-    u, v = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
-    dirs = np.stack([(u - cx) / fx, (v - cy) / fy, np.ones_like(u)], -1).reshape(-1, 3)
+    cams, index = frame_camera.cameras(t)
+
+    def pixel_dirs(c):
+        s = a.width / float(c["w"])
+        W, H = a.width, max(1, int(round(c["h"] * s)))
+        fx, fy, cx, cy = c["fl_x"] * s, c["fl_y"] * s, c["cx"] * s, c["cy"] * s
+        u, v = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
+        return np.stack([(u - cx) / fx, (v - cy) / fy, np.ones_like(u)], -1).reshape(-1, 3)
+    per_cam = [pixel_dirs(c) for c in cams]
     n = len(t["frames"])
     share, hit = np.zeros((n, tiles), np.float32), np.zeros(n, np.float32)
     t0 = time.time()
     for i, f in enumerate(t["frames"]):
+        dirs = per_cam[index[i]]
         c2w = np.array(f["transform_matrix"], float)
         c2w[:3, 1:3] *= -1  # OpenGL -> OpenCV camera axes
         rays = np.concatenate([np.repeat(c2w[None, :3, 3], len(dirs), 0), dirs @ c2w[:3, :3].T], 1).astype(np.float32)

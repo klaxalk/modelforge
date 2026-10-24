@@ -70,17 +70,23 @@ def load_splat(path):
 
 
 def cameras(project, width=960):
-    """World -> OpenCV camera matrices and pinhole intrinsics of the transforms.json frames, scaled to width."""
+    """World -> OpenCV camera matrices and pinhole intrinsics of the transforms.json frames, scaled to width. Several
+    cameras: one render size (the widest camera's at width), each camera scaled to that width (a render of the splat
+    needs no photo; a camera of another aspect ratio is cut at the bottom or extends past it)."""
+    from modelforge.export import frame_camera
     t = json.load(open(os.path.join(project, "transforms.json")))
-    s = min(1.0, width / float(t["w"]))
-    W, H = int(round(t["w"] * s)), int(round(t["h"] * s))
-    K = np.array([[t["fl_x"] * s, 0, t["cx"] * s], [0, t["fl_y"] * s, t["cy"] * s], [0, 0, 1]], np.float32)
-    views = []
+    big = frame_camera.largest(t)
+    s = min(1.0, width / float(big["w"]))
+    W, H = int(round(big["w"] * s)), int(round(big["h"] * s))
+    views, Ks = [], []
     for f in t["frames"]:
+        c = frame_camera.camera(t, f)
+        sc = W / float(c["w"])
+        Ks.append([[c["fl_x"] * sc, 0, c["cx"] * sc], [0, c["fl_y"] * sc, c["cy"] * sc], [0, 0, 1]])
         c2w = np.array(f["transform_matrix"], np.float64)
         c2w[:3, 1:3] *= -1  # OpenGL -> OpenCV camera axes (the export did the reverse)
         views.append(np.linalg.inv(c2w))
-    return np.array(views, np.float32), np.repeat(K[None], len(views), 0), W, H
+    return np.array(views, np.float32), np.array(Ks, np.float32), W, H
 
 
 def parse_progress(line):

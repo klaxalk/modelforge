@@ -1,6 +1,6 @@
 # TODO: multi-camera DJI projects
 
-Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), 4–6 open. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
+Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), **4–5 done the same day** except the common training resolution, semantic features and the held-out evaluation; 6 (GUI) open. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
 prior BA). Today a project is one camera: `dji/ingest.py` refuses sources of different resolutions, features use
 `CameraMode.SINGLE`, transforms.json carries one global camera. Two drones that both record 4K pass the resolution
 check today and wrongly share one set of intrinsics.
@@ -72,5 +72,27 @@ Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (spl
   global refine 80/80, f = 1084.59 / 723.10 px (ratio 0.66670, truth 2/3), distortion equal, 0.40 / 1.01 px;
   chunked (30 / 10) 1084.81 / 723.25 px, boresights per camera within 0.05° of each other (one drone).
   Test: `tests/test_multicamera.py` (camera key + zoom, calibration subset, the 40-photo two-camera refine).
-- **Still single-camera** (step 4–5): `export/nerfstudio.py` refuses more than one camera, so export / splat /
-  meshes do not run on such a project yet.
+
+## Done 2026-10-24: steps 4–5 (per-frame intrinsics)
+
+- **Export** (`export/nerfstudio.py`): with several COLMAP cameras every frame carries its own `camera_model, fl_x,
+  fl_y, cx, cy, k1, k2, p1, p2, w, h` (nerfstudio's dataparser reads them per frame); the top level keeps the first
+  camera's (old readers) and `mf_cameras` = the count. One camera: unchanged.
+- **Readers** go through `export/frame_camera.py` (`camera(t, frame)`, `cameras(t)`, `largest(t)`; standard library
+  only, loaded by path from the nerfstudio-venv scripts): `splat_plan._cameras` / `survey` (per-camera fx / w / h;
+  the widest camera's size for the resolution rules), `splat_tiles._seen`, the tiles' downscale and loss masks,
+  `splat.auto_cache`, `splat_mesh.cameras` (one render size, each camera scaled to its width), `export/mesh_depth.py`
+  (an undistorted camera each; manifest lists them), `export/mesh_color.py`, `export/mesh_share.py`.
+- **Not yet, refused with a message:** semantic features (the worker undistorts every photo with one camera) and the
+  held-out evaluation (`evaluate.run`).
+- **Training resolution: still one integer downscale for all photos** (auto from the widest camera): a 4K + 1080p mix
+  at x2 trains the 1080p photos at 960 px. The common target long side (decision above) changes how every project
+  trains; left for a session where the splat runs can be compared.
+- **Measured** on the two-camera fullrun_test copy: depth maps vs each photo's own SfM points |dz| / z median 0.27 %
+  (1920 px camera) / 0.28 % (1280 px), so each camera's undistortion lines up; colouring 96 % of the vertices; survey
+  overlap 49.2 / area 2700 m² vs the one-camera original's 49.9 / 2580 m². Test: `test_multicamera.py` (export per
+  frame, survey, `frame_camera`).
+- **Found on the way:** `mesh_depth.py`'s cache key had lost the mesh's mtime and the downscale to a comment, and it
+  rewrote its manifest on every run (the tiles' loss masks, keyed by its time, were then always made again). Both
+  fixed; existing depth maps are rendered once more.
+- Not tested yet: a splat training on per-frame intrinsics (the GPU was busy with the A/Bs).

@@ -12,14 +12,19 @@ python export/mesh_depth.py DATASET MESH OUT --downscale N
 import argparse
 import json
 import os
+import sys
 import time
 
 import cv2
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import frame_camera  # noqa: E402
+
 
 def undistorted_camera(t, downscale):
-    """(K, width, height) of the undistorted, cropped training image (nerfstudio's datamanager)."""
+    """(K, width, height) of the undistorted, cropped training image (nerfstudio's datamanager); t = a camera's
+    intrinsics (frame_camera.camera, or a transforms.json with one camera)."""
     s = 1.0 / downscale
     w, h = int(t["w"] * s), int(t["h"] * s)
     K = np.array([[t["fl_x"] * s, 0, t["cx"] * s], [0, t["fl_y"] * s, t["cy"] * s], [0, 0, 1.0]])
@@ -45,23 +50,29 @@ def main():
     ap.add_argument("--downscale", type=int, default=1)
     a = ap.parse_args()
     t = json.load(open(os.path.join(a.dataset, "transforms.json")))
-    if t.get("camera_model", "OPENCV") != "OPENCV":
-        raise SystemExit(f"mesh depth: camera model {t.get('camera_model')} not supported (OPENCV only)")
-    K, w, h = undistorted_camera(t, a.downscale)
+    cams, index = frame_camera.cameras(t)
+    if any(c.get("camera_model", "OPENCV") != "OPENCV" for c in cams):
+        raise SystemExit("mesh depth: only OPENCV cameras are supported")
+    und = [undistorted_camera(c, a.downscale) for c in cams]  # (K, w, h) per camera
     st = os.stat(a.mesh)
-    key = {"mesh": os.path.realpath(a.mesh), "size": st.st_size,  # one cache whatever path reaches the mesh "mtime": st.st_mtime, "downscale": a.downscale,
-           "K": np.round(K, 6).tolist(), "w": w, "h": h}
+    key = {"mesh": os.path.realpath(a.mesh), "size": st.st_size,  # one cache whatever path reaches the mesh
+           "mtime": st.st_mtime, "downscale": a.downscale,
+           **({"K": np.round(und[0][0], 6).tolist(), "w": und[0][1], "h": und[0][2]} if len(und) == 1 else
+              {"cameras": [{"K": np.round(K, 6).tolist(), "w": w, "h": h} for K, w, h in und]})}
     os.makedirs(a.out, exist_ok=True)
     man = os.path.join(a.out, "manifest.json")
-    if os.path.exists(man) and json.load(open(man)) != key:  # another mesh or camera: start over
+    old = json.load(open(man)) if os.path.exists(man) else None
+    if old is not None and old != key:  # another mesh or camera: start over
         for f in os.listdir(a.out):
             if f.endswith(".npy"):
                 os.remove(os.path.join(a.out, f))
-    json.dump(key, open(man, "w"), indent=1)
+    if old != key:  # rewritten only when it changes: the tiles' loss masks are keyed by its time
+        json.dump(key, open(man, "w"), indent=1)
+    cam_of = {os.path.basename(f["file_path"]): i for f, i in zip(t["frames"], index)}
     todo = [f for f in t["frames"]
             if not os.path.exists(os.path.join(a.out, os.path.basename(f["file_path"]) + ".npy"))]
     print(f"mesh depth: {len(t['frames'])} photos: {len(t['frames']) - len(todo)} maps exist already (from other "
-          f"tiles or runs), {len(todo)} to render, {w} x {h} px", flush=True)
+          f"tiles or runs), {len(todo)} to render, " + ", ".join(f"{w} x {h}" for _, w, h in und) + " px", flush=True)
     if not todo:
         return
     t0 = time.time()
@@ -70,9 +81,15 @@ def main():
     scene.add_triangles(o3d.t.geometry.TriangleMesh(mesh.vertex.positions.to(o3d.core.float32),
                                                     mesh.triangle.indices.to(o3d.core.int32)))
     print(f"mesh depth: {len(mesh.triangle.indices):,} triangles loaded in {time.time() - t0:.0f} s", flush=True)
-    u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
-    d_cam = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u)], -1).reshape(-1, 3)
+    rays_cam = {}
     for k, f in enumerate(todo):
+        ci = cam_of[os.path.basename(f["file_path"])]
+        K, w, h = und[ci]
+        if ci not in rays_cam:
+            u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5)
+            rays_cam[ci] = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u)],
+                                    -1).reshape(-1, 3)
+        d_cam = rays_cam[ci]
         c2w = np.array(f["transform_matrix"], float)
         R = c2w[:3, :3] @ np.diag([1.0, -1.0, -1.0])  # OpenGL -> OpenCV camera axes
         d = d_cam @ R.T  # unnormalized: t_hit is then the z-depth
