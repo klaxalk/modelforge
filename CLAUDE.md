@@ -98,7 +98,7 @@ Tested only partially:
 Open items by priority (high / medium / low; the user sets them; the TODO docs follow this list):
 
 **High**
-- **TODO: mitigate Gaussians that represent the sky** (the user asked, 2026-10-24). **Sky masks done, on by default for DJI projects** (`modelforge/sky.py`: SegFormer per photo, out of the colour loss, opacity pulled to 0 over the sky's core; berlin tile 0: sky opacity 0.99 -> 0.16, ground the same, 15 % faster; Splat tab "Sky masks", `--no-sky-masks`); open: a sky model for viewers, spikes on crowns: `docs/todo_sky.md`.
+- **TODO: mitigate Gaussians that represent the sky** (the user asked, 2026-10-24). **Sky masks done, on by default for DJI projects** (`modelforge/sky.py`: SegFormer per photo, out of the colour loss, opacity pulled to 0 over the sky's core; berlin tile 0: sky opacity 0.99 -> 0.16, ground the same, 15 % faster; Splat tab "Sky masks", `--no-sky-masks`); **sky box in the GUI done 2026-10-25** (View → Sky box: sunny / cloudy / overcast, procedural, the sun where it stood during the flight; `modelforge/gui/skybox.py`); the spikes on crowns are fine for the user: `docs/todo_sky.md`.
 - Done 2026-10-23: **the loop-closure pose graph** (~37 min per revisit pass on kladno_dira 5681): the
   reference BLAS (now OpenBLAS) + CGNR instead of sparse Cholesky, dira2k loop graphs 368 s → 1–3 s with the same
   revisit split: `docs/todo_posegraph_speed.md`.

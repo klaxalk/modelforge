@@ -24,6 +24,7 @@ from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
+from modelforge.gui import skybox
 from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.jobqueue import QueuePanel
 from modelforge.gui.lod import SplatLod
@@ -217,6 +218,7 @@ class App:
         self.server.on_client_disconnect(self._on_disconnect)
         self.server.scene.on_click(modifier="cmd/ctrl")(self._pivot_click)  # Ctrl + click: orbit / zoom about there
         threading.Thread(target=self._watch_uploads, daemon=True).start()
+        self._apply_sky()
         threading.Thread(target=self._watch_status, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
@@ -341,6 +343,22 @@ class App:
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time, source (video piece) or camera (drone model + resolution: each has its own intrinsics).")
             self.g_legend = gui.add_markdown("")
+            with gui.add_folder("Sky box", expand_by_default=False):
+                sky_set = self._load_settings()
+                self.g_sky = gui.add_dropdown(
+                    "Sky box", options=skybox.KINDS,
+                    initial_value=sky_set.get("sky_box") if sky_set.get("sky_box") in skybox.KINDS else "off",
+                    hint="A sky behind the scene, for every open browser: sunny (clear, the sun), cloudy (scattered "
+                         "clouds), overcast (grey). Splats trained with sky masks leave the sky empty; this fills "
+                         "it. The sun stands where it was during the flight when the video's time is known. Off: "
+                         "the theme's plain background. Remembered across restarts.")
+                self.g_sky_turn = gui.add_slider(
+                    "Turn the sky (°)", min=-180, max=180, step=5, initial_value=float(sky_set.get("sky_turn", 0)),
+                    hint="Turns the sky about the vertical, e.g. to put the sun elsewhere (0 = as during the "
+                         "flight).")
+                self.g_sky_md = gui.add_markdown("")
+                self.g_sky.on_update(lambda _: self._apply_sky())
+                self.g_sky_turn.on_update(lambda _: self._apply_sky())
             gui.add_markdown("_Navigation: **Ctrl + click** a spot to orbit and zoom about it; **W A S D** move, "
                              "**R F** up / down, **arrow keys** turn._")
             self.g_move_speed = gui.add_number(
@@ -1035,6 +1053,36 @@ class App:
         for client in self.server.get_clients().values():
             self._on_connect(client)
         self._reattach()  # a job of this project that outlived a GUI restart
+        if self.g_sky.value != "off":
+            self._apply_sky()  # the sun of this project's flight
+
+    def _apply_sky(self):
+        """View → Sky box: the background of every browser (viser keeps it for those connecting later); the sun of
+        the open project's flight. In a thread: the panorama takes ~1 s, the sun an ffprobe."""
+        kind, turn, path = self.g_sky.value, float(self.g_sky_turn.value), self.path
+        self._save_setting("sky_box", kind)
+        self._save_setting("sky_turn", turn)
+        self._sky_seq = getattr(self, "_sky_seq", 0) + 1
+        seq = self._sky_seq
+
+        def work():
+            try:
+                if kind == "off":
+                    note = ""
+                    skybox.show(self.server, "off")
+                else:
+                    if getattr(self, "_sky_sun", (None,))[0] != path:
+                        self._sky_sun = (path, skybox.project_sun(path) if path else (*skybox.DEFAULT_SUN, ""))
+                    az, el, note = self._sky_sun[1]
+                    self.g_sky_md.content = "⏳ drawing the sky …"
+                    skybox.jpeg(kind, round(az, 1) % 360, round(el, 1))  # drawn here, outside the lock-free show()
+                    if seq != self._sky_seq:
+                        return  # a newer choice came meanwhile
+                    skybox.show(self.server, kind, az, el, turn)
+                self.g_sky_md.content = f"_{note}_" if note else ""
+            except Exception as e:  # noqa: BLE001 - the view without a sky, not a broken GUI
+                self.g_sky_md.content = f"❌ sky box: {e}"
+        threading.Thread(target=work, daemon=True).start()
 
     def _watch_uploads(self):
         """Progress of browser uploads still arriving (viser delivers them only when complete)."""

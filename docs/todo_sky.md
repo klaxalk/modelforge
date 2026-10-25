@@ -1,6 +1,6 @@
 # TODO: mitigate Gaussians that represent the sky
 
-Priority: **high** (the user asked, 2026-10-24). Status: **sky masks done 2026-10-24, on by default for DJI projects** (see the end); open: a sky model for viewers, the spikes on crowns.
+Priority: **high** (the user asked, 2026-10-24). Status: **sky masks done 2026-10-24, on by default for DJI projects** (see the end); **sky box in the GUI done 2026-10-25** (see the end); the spikes on crowns are fine for the user (seen in front of a sky box).
 
 Splatfacto explains the sky in the photos with Gaussians: a dome or haze at some finite distance, often in front of
 the horizon or hanging over the scene, which shows as floaters / fog from other viewpoints, bloats the splat and
@@ -52,3 +52,20 @@ photos; ground = the tile's mesh pixels that are not sky; sky opacity = mean ren
   supervises; the needle term (`--needle`) may take them.
 - In a viewer the sky now shows the viewer's background (black in renders). Open: a sky model (an environment colour
   per direction, e.g. SH) for nicer renders without Gaussians.
+
+## Sky box in the GUI (done 2026-10-25)
+
+The user: the bands around the trees are fine, the splat will be seen in front of a sky box anyway; asked for sky box
+options (sunny, overcast, cloudy). View tab → **Sky box** folder: off / sunny / cloudy / overcast, **Turn the sky (°)**;
+remembered in ROOT/.modelforge_gui.json (`sky_box`, `sky_turn`).
+- `modelforge/gui/skybox.py`: procedural equirectangular panoramas (2048 x 1024, numpy, ~0.2-1.3 s, cached): sunny
+  (blue gradient, sun disc + glow), cloudy (fBm clouds on a flat layer, so they shrink towards the horizon, darker
+  cores, silver lining near the sun), overcast (CIE overcast gradient, soft darker patches); a hazy ground below the
+  horizon.
+- The sun stands as during the flight: ENU origin lat / lon + the first video's MP4 creation time (UTC) + the middle
+  photo's time, NOAA formulas; drawn at >= 6° (berlin's evening flight: 5°). Unknown time: south at 40°.
+- Shown as viser's environment map background (an `EnvironmentMapMessage` with our JPEG: viser's gain-map loader falls
+  back to the plain JPEG), so it reaches every browser and later ones; off restores viser's default lighting map.
+  Column u = azimuth u x 360° clockwise from north (viser's z-up root maps world (x, y, z) to three.js (-y, z, -x)).
+  Not yet checked by eye in a browser that the sun's side matches the photos' shadows.
+- Not in the exports (a splat viewer brings its own background).
