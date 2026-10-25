@@ -194,7 +194,8 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
-                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None, data=None):
+                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None, data=None,
+                  sun_maps=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
     (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
@@ -208,7 +209,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     lidar-data only. loss_masks: a folder of per-image masks at the undistorted training camera (splat_tiles.loss_masks:
     a tile's pixels outside it are left out of the losses); lidar-data only. sky_masks: a folder of sky masks
     (modelforge/sky.py; regularize["sky"]): left out of the photometric loss, their rendered opacity pulled to 0;
-    lidar-data only. data: the dataset nerfstudio reads (training_data: a multi-camera project's transforms at the
+    lidar-data only. sun_maps: a folder of direct-sunlight maps (sun_maps; regularize["sun"]): the photos' lighting
+    learned per photo, the splat in diffuse light (docs/todo_lighting.md); lidar-data only. data: the dataset nerfstudio reads (training_data: a multi-camera project's transforms at the
     training size, with downscale 1), else PROJECT."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
@@ -245,6 +247,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         if sky_masks:
             from modelforge import sky
             cmd += ["--pipeline.model.sky-alpha-lambda", f"{sky.ALPHA:g}"]
+        if sun_maps:
+            cmd += ["--pipeline.model.sun-light", "True"]
     if (regularize or {}).get("bilateral"):
         cmd += ["--pipeline.model.use-bilateral-grid", "True"]
     if (regularize or {}).get("antialiased"):  # Mip-Splatting's 2D filter (gsplat)
@@ -262,6 +266,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         depth_args += ["--loss-masks", str(loss_masks)]
     if sky_masks and lidar_depth is not None:
         depth_args += ["--sky-masks", str(sky_masks)]
+    if sun_maps and lidar_depth is not None:
+        depth_args += ["--sun-maps", str(sun_maps)]
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
@@ -283,7 +289,8 @@ def exposure_known(project):
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
     return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or float(regularize.get("needle") or 0) > 0
-                                 or bool(regularize.get("exposure")) or bool(regularize.get("sky")))
+                                 or bool(regularize.get("exposure")) or bool(regularize.get("sky"))
+                                 or bool(regularize.get("sun")))
     # older records may name far_mask: gone
 
 
@@ -329,6 +336,33 @@ def training_data(project, downscale):
     json.dump({**t, "frames": frames}, open(out + ".part", "w"), indent=1)
     os.replace(out + ".part", out)
     return out, 1
+
+
+def sun_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
+    """Direct sunlight per pixel of every training view (export/sun_vis.py, docs/todo_lighting.md) from the SfM mesh,
+    with each photo's sun (lighting.sun_per_photo of the project whose images the dataset uses: tiles share it), in
+    <mesh folder>/sun_x<downscale>/. Returns the folder."""
+    from modelforge import lighting, sky
+    root = sky.root(project)
+    sun_json = os.path.join(root, lighting.DIR, "sun.json")
+    poses = os.path.join(root, "poses.json")
+    if not os.path.exists(sun_json) or os.path.getmtime(sun_json) < os.path.getmtime(poses):
+        os.makedirs(os.path.dirname(sun_json), exist_ok=True)
+        suns = lighting.sun_per_photo(root)
+        if not suns:
+            raise RuntimeError("sun light: no photo with a known time and position (needs DJI metadata)")
+        json.dump(suns, open(sun_json, "w"), indent=1)
+    out = os.path.join(os.path.dirname(mesh), f"sun_x{int(downscale)}")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "sun_vis.py")
+
+    def line(text):
+        on_line(text)
+        m = re.search(r"sun visibility: (\d+) / (\d+)", text)
+        if m and on_count:
+            on_count(int(m.group(1)), int(m.group(2)))
+    _stream([os.path.join(NS_BIN, "python"), script, project, mesh, sun_json, out, "--downscale", str(int(downscale))],
+            line, job or Job())
+    return out
 
 
 def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):
@@ -531,7 +565,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
                 + (f", needles {float(reg['needle']):g}" if reg.get("needle") else "")
                 + (", exposure from the metadata" if reg.get("exposure") else "")
-                + (", sky masks" if reg.get("sky") else ""))
+                + (", sky masks" if reg.get("sky") else "") + (", sunlight learned per photo" if reg.get("sun") else ""))
     stop = threading.Event()
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
@@ -550,6 +584,13 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if (regularize or {}).get("sky"):  # the sky left out (modelforge/sky.py): masks at the training size
         from modelforge import sky
         skies = sky.masks(project, downscale, on_line, job=job, on_count=on_prepare)
+    suns = None
+    if (regularize or {}).get("sun"):  # the photos' sunlight learned apart (docs/todo_lighting.md)
+        from modelforge import sfm_mesh, sky
+        mesh = depth_cloud or seed_mesh or sfm_mesh.depth_cloud(sky.root(project))
+        if not mesh:
+            raise RuntimeError("sun light needs the SfM mesh (Sparse Mesh tab)")
+        suns = sun_maps(project, mesh, downscale, on_line, job=job, on_count=on_prepare)
     seeds = None
     if seed_mesh:
         from modelforge import sfm_mesh
@@ -560,7 +601,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         seeds = os.path.abspath(seeds)
     cmd = train_command(project, method, iterations, extra, cache, factor, preview_every if on_snapshot else None,
                         lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks, skies,
-                        data=None if data == project else data)
+                        data=None if data == project else data, sun_maps=suns)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 
@@ -729,6 +770,10 @@ def main():
                     help="leave the sky out: segment it in every photo (SegFormer, modelforge/sky.py), no photometric "
                          "loss there and the rendered opacity pulled to 0, so no Gaussians stand in for the sky "
                          "(default: on for DJI projects; --no-sky-masks: off)")
+    ap.add_argument("--sun-light", action="store_true",
+                    help="learn each photo's lighting (ambient + direct sun x the sunlight from the SfM mesh), so "
+                         "shadows and sun stay out of the splat: it holds the scene in diffuse light "
+                         "(docs/todo_lighting.md; needs sfmmesh/mesh.ply and DJI metadata)")
     ap.add_argument("--seed-mesh", action="store_true",
                     help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
                          "flat in its surface")
@@ -748,7 +793,7 @@ def main():
     from modelforge import sky as _sky
     use_sky = _sky.default_on(project) if args.sky_masks is None else args.sky_masks
     reg = {"flatten": args.flatten, "needle": args.needle, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
-           "bilateral": args.bilateral_grid, "antialiased": args.antialiased}
+           "bilateral": args.bilateral_grid, "antialiased": args.antialiased, "sun": args.sun_light}
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None

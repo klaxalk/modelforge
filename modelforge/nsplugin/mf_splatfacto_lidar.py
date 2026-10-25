@@ -131,6 +131,13 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     use_exposure: bool = False
     """scale each training render by the photo's relative exposure (dataparser metadata "exposure_gains", from the
     DJI metadata), in linear light: the Gaussians hold the colours at the median exposure"""
+    sun_light: bool = False
+    """light each training render as ambient_i + sun_i x S (docs/todo_lighting.md): S = the photo's direct sunlight
+    per pixel from the SfM mesh (dataparser metadata "sun_files": visibility x cos, -1 unknown; export/sun_vis.py),
+    ambient_i / sun_i = learned RGB per photo (log); the Gaussians hold the scene in diffuse light (mean ambient 1):
+    shadows and sun stay in the photos' lighting, not in the splat"""
+    sun_light_blur: float = 0.004
+    """the sun map smoothed by this share of the width (penumbra, the mesh's approximation of the casters)"""
 
 
 class SplatfactoLidarModel(SplatfactoModel):
@@ -159,6 +166,15 @@ class SplatfactoLidarModel(SplatfactoModel):
             print(f"[lidar] exposure gains for {len(self.exposure_gains or [])} training images (x{g.min():.2f} .. "
                   f"x{g.max():.2f})" if self.exposure_gains else "[lidar] use_exposure: no exposure gains in "
                   "transforms.json (frames mf_exposure)", flush=True)
+        self.sun_files = meta.get("sun_files") if self.config.sun_light else None
+        if self.sun_files:
+            n = len(self.sun_files)
+            self.mf_ambient = torch.nn.Parameter(torch.zeros(n, 3))  # log, per photo
+            self.mf_sun = torch.nn.Parameter(torch.full((n, 3), -3.0))  # log: sunlight starts weak
+            print(f"[lidar] sun light: maps for {sum(f is not None for f in self.sun_files)} of {n} training images",
+                  flush=True)
+        elif self.config.sun_light:
+            print("[lidar] sun_light: no sun maps (dataparser --sun-maps)", flush=True)
         if self.mask_files:
             print(f"[lidar] loss masks for {sum(f is not None for f in self.mask_files)} of {len(self.mask_files)} "
                   "training images", flush=True)
@@ -177,6 +193,31 @@ class SplatfactoLidarModel(SplatfactoModel):
               if self.has_lidar else "[lidar] no LiDAR points (transforms.json lidar_ply_file_path): "
               "training as plain splatfacto", flush=True)
 
+    def _sun_light(self, idx, H, W):
+        """(H, W, 3) light of training photo idx: ambient + sun x S (unknown pixels: the photo's mean S)."""
+        amb = torch.exp(self.mf_ambient[idx])
+        sun = torch.exp(self.mf_sun[idx])
+        f = self.sun_files[idx] if idx < len(self.sun_files) else None
+        if f is None:
+            return amb.view(1, 1, 3).expand(H, W, 3)
+        import cv2
+        S = np.load(f).astype(np.float32)
+        known = S >= 0
+        S[~known] = float(S[known].mean()) if known.any() else 0.0
+        if S.shape != (H, W):
+            S = cv2.resize(S, (W, H), interpolation=cv2.INTER_AREA)
+        b = self.config.sun_light_blur * W
+        if b > 0.5:
+            S = cv2.GaussianBlur(S, (0, 0), b)
+        S = torch.from_numpy(S).to(amb.device)
+        return amb.view(1, 1, 3) + sun.view(1, 1, 3) * S[..., None]
+
+    def get_param_groups(self):
+        gps = super().get_param_groups()
+        if self.sun_files:
+            gps["mf_light"] = [self.mf_ambient, self.mf_sun]
+        return gps
+
     def _loss_mask(self, camera):
         """(H, W) bool loss mask of the training image at the undistorted training camera, or None."""
         idx = (camera.metadata or {}).get("cam_idx")
@@ -188,12 +229,15 @@ class SplatfactoLidarModel(SplatfactoModel):
 
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
-        if self.training and self.exposure_gains:
+        if self.training and (self.exposure_gains or self.sun_files):
             idx = (camera.metadata or {}).get("cam_idx")
             if idx is not None:
-                g = float(self.exposure_gains[int(idx)])
                 lin = out["rgb"].clamp(1e-6, 1) ** 2.2  # sRGB-like camera response, approximated by a gamma
-                out["rgb"] = (lin * g).clamp(1e-6, 1) ** (1 / 2.2)
+                if self.exposure_gains:
+                    lin = lin * float(self.exposure_gains[int(idx)])
+                if self.sun_files:
+                    lin = lin * self._sun_light(int(idx), *lin.shape[:2])
+                out["rgb"] = lin.clamp(1e-6, 1) ** (1 / 2.2)
         if self.training and self.mask_files:
             m = self._loss_mask(camera)
             if m is not None:
@@ -244,6 +288,8 @@ class SplatfactoLidarModel(SplatfactoModel):
                 mm = F.interpolate(m[None, None].float(), size=(H, W), mode="nearest")[0, 0].to(target.device) > 0.5
                 outputs = dict(outputs, lidar_depth=torch.where(mm[:, :, None], target, torch.zeros_like(target)))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
+        if self.training and self.sun_files:  # the scale between the Gaussians' colour and the light: mean ambient 1
+            loss["mf_light_gauge"] = 0.1 * self.mf_ambient.mean() ** 2
         if sky_loss is not None:
             loss["sky_alpha"] = sky_loss
         if self.training and self.config.flatten_lambda > 0:
@@ -292,6 +338,8 @@ def _method(base, name, description):
     cfg.pipeline.model = SplatfactoLidarModelConfig(
         **{f.name: getattr(m, f.name) for f in fields(m) if f.init and f.name != "_target"})
     cfg.pipeline.datamanager.dataparser = LidarDataParserConfig()
+    from nerfstudio.engine.optimizers import AdamOptimizerConfig
+    cfg.optimizers["mf_light"] = {"optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15), "scheduler": None}  # sun_light
     return MethodSpecification(config=cfg, description=description)
 
 

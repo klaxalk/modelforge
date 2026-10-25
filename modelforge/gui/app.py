@@ -727,6 +727,14 @@ class App:
                      "and the opacity rendered in front of the sky is pulled to 0, so no Gaussians stand in for the "
                      "sky (domes and haze in front of the horizon, floaters over the scene). The sky then shows the "
                      "viewer's background. On by default for DJI projects.")
+            self.g_splat_sun = gui.add_checkbox(
+                "Sunlight learned per photo (no shadows in the splat)", initial_value=False,
+                hint="Light each training photo as ambient + direct sun, the sunlight per pixel traced from the SfM "
+                     "mesh (which surfaces face the sun, which lie in a shadow) at that photo's sun position (GPS + "
+                     "time), and learn the two (RGB) per photo. The splat then holds the scene in diffuse light: hard "
+                     "shadows and sunlit patches stay with the photos instead of being baked into the Gaussians, and "
+                     "flights in sun and under clouds agree. Needs the SfM mesh (Sparse Mesh tab) and DJI metadata; "
+                     "~0.2 s per photo once to trace the sunlight (kept in sfmmesh/sun_x<N>/). Experimental.")
             self.g_splat_needle = gui.add_number(
                 "No needles (weight)", initial_value=splat.NEEDLE, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's largest scale beyond 3x its middle one: no long needles / ribbons (the "
@@ -2004,6 +2012,9 @@ class App:
                          "all") or \
                     stage in pipeline.DENSE_STAGES or given:
                 self._refresh_dense()
+            if self.project is not None and stage in ("refine", "sfm", "all"):
+                self.project.apply_source_offsets()  # the prior path where the refine put each flight
+                self.ingest._draw_scene()
             self.refresh_snapshot_list(select="main" if stage in ("refine", "reconstruct", "sfm", "all", "export")
                                        else None)
             if stage in ("refine", "reconstruct", "sfm"):
@@ -2531,7 +2542,7 @@ class App:
     def _regularize(self):
         """Splat tab → Flatten Gaussians, No needles, exposure, anti-aliased for splat.run (None when all off)."""
         reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
-               "sky": bool(self.g_splat_sky.value),
+               "sky": bool(self.g_splat_sky.value), "sun": bool(self.g_splat_sun.value),
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
                "antialiased": bool(self.g_splat_antialiased.value)}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None

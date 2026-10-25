@@ -260,3 +260,22 @@ def test_drift_across_flights(tmp_path, monkeypatch, cross):
     spread = np.median(np.linalg.norm(pos - np.median(pos, 0), axis=1))
     print("camera spread around the common offset", round(float(spread), 3))
     assert spread < 0.05
+
+
+def test_view_priors_follow_the_refined_source_offsets(tmp_path):
+    """The View's prior cameras / path sit where the refine put each flight (report.json source_offsets_m)."""
+    import json
+    import shutil
+    from modelforge.gui.data import Project
+    real = os.environ.get("MODELFORGE_TEST_PROJECT", os.path.join(os.path.dirname(__file__), "..", "data",
+                                                                  "fullrun_test"))
+    if not os.path.exists(os.path.join(real, "poses.json")):
+        pytest.skip("needs a project with poses.json")
+    shutil.copy2(os.path.join(real, "poses.json"), tmp_path / "poses.json")
+    raw = Project(str(tmp_path)).prior_cams.centers.copy()
+    json.dump({"refine": {"prior_model": {"source_offsets_m": {"0": [1.0, -2.0, 12.06]}}}},
+              open(tmp_path / "report.json", "w"))
+    p = Project(str(tmp_path))
+    assert np.allclose(p.prior_cams.centers, raw + [1.0, -2.0, 12.06]) and p.source_offsets[0][2] == 12.06
+    os.remove(tmp_path / "report.json")
+    assert p.apply_source_offsets() == {} and np.allclose(p.prior_cams.centers, raw)

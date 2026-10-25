@@ -286,7 +286,23 @@ class Project:
             cams.centers[i] = p.center
             cams.R_wc[i] = p.R_cw.T
         self.prior_cams = cams
+        self.prior_centers_raw = cams.centers.copy()
         self.has_priors = priors_mod.has_poses(self.priors)  # False: video without metadata
+        self.source_offsets = {}
+        self.apply_source_offsets()
+
+    def apply_source_offsets(self):
+        """Prior cameras shifted by the per-flight position offsets the refine found (report.json refine.prior_model
+        source_offsets_m: a flight's GNSS bias, its take-off height, e.g. a barometric altitude off by 12 m between
+        two days), so the View's prior cameras and prior path sit where the refine put that flight (the user asked,
+        2026-10-25). Without a refine: as recorded. Returns {source: ENU offset}."""
+        pm = (self.report().get("refine") or {}).get("prior_model") or {}
+        off = {int(k): np.array(v, float) for k, v in (pm.get("source_offsets_m") or {}).items()}
+        self.prior_cams.centers[:] = self.prior_centers_raw
+        for src, o in off.items():
+            self.prior_cams.centers[self.source == src] += o
+        self.source_offsets = off
+        return off
 
     def report(self):
         path = os.path.join(self.path, "report.json")

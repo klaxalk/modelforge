@@ -32,6 +32,9 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     """Sky masks: a folder of <image name>.png (0 = sky, 255 = the rest) at the training images' size, before
     undistortion (modelforge/sky.py): nerfstudio's own masks (undistorted with the photo, left out of the photometric
     loss); the model adds its opacity loss on them (sky_alpha_lambda)."""
+    sun_maps: Optional[Path] = None
+    """Direct sunlight per pixel: a folder of <image name>.npy (visibility x cos, -1 unknown) at the undistorted
+    training camera (modelforge/export/sun_vis.py), for the model's sun_light."""
     seed_ply: Optional[Path] = None
     """Extra starting points with normals and colours (modelforge sfm_mesh.seed_points: the SfM mesh where the SfM
     points are thin), appended to the SfM points; the model starts them flat in the surface (metadata
@@ -73,6 +76,10 @@ class LidarDataParser(Nerfstudio):
             folder = Path(self.config.loss_masks)
             files = [str(folder / (Path(f).name + ".png")) for f in out.image_filenames]
             out.metadata["mask_files"] = [f if Path(f).exists() else None for f in files]
+        if self.config.sun_maps:
+            folder = Path(self.config.sun_maps)
+            files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]
+            out.metadata["sun_files"] = [f if Path(f).exists() else None for f in files]
         if self.config.depth_maps:
             folder = Path(self.config.depth_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]

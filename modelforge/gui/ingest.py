@@ -583,14 +583,17 @@ class IngestPanel:
             return
         segs_in, cols_in, segs_out = [], [], []
         pts, pcols = [], []
+        # where the refine put each flight (its per-flight offset; poses.json source k = plan source k)
+        offsets = getattr(self.app.project, "source_offsets", None) or {} if self.app.project is not None else {}
         for sp, pv in zip(self.plan.sources, self.prev["sources"]):
-            t, v = pv["track"].astype(np.float32), pv["track_valid"]
+            o = np.asarray(offsets.get(sp.index, np.zeros(3)), np.float32)
+            t, v = pv["track"].astype(np.float32) + o, pv["track_valid"]
             seg = np.stack([t[:-1], t[1:]], 1)
             inside = v[:-1] & v[1:]
             segs_in.append(seg[inside])
             cols_in.append(np.tile(np.array(source_color(sp.index), np.uint8), (int(inside.sum()), 2, 1)))
             segs_out.append(seg[~inside])
-            pts.append(pv["samples"])
+            pts.append(np.asarray(pv["samples"], np.float32) + o)
             pcols.append(np.tile(np.array(source_color(sp.index), np.uint8), (len(pv["samples"]), 1)))
         segs_in = np.concatenate(segs_in) if segs_in else np.zeros((0, 2, 3), np.float32)
         cols_in = np.concatenate(cols_in) if cols_in else np.zeros((0, 2, 3), np.uint8)

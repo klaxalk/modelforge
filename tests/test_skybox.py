@@ -3,16 +3,17 @@ import datetime
 
 import numpy as np
 
+from modelforge import sun
 from modelforge.gui import skybox
 
 
 def test_sun_position():
     # Berlin, 2026-06-21 11:07 UTC (~local solar noon): due south, 90 - 52.5 + 23.4 = 60.9° up
     t = datetime.datetime(2026, 6, 21, 11, 7, tzinfo=datetime.timezone.utc).timestamp()
-    az, el = skybox.sun_position(52.52, 13.40, t)
+    az, el = sun.position(52.52, 13.40, t)
     assert abs(az - 180) < 3 and abs(el - 60.9) < 1
     # evening: west-north-west, low
-    az, el = skybox.sun_position(52.52, 13.40, t + 8 * 3600)
+    az, el = sun.position(52.52, 13.40, t + 8 * 3600)
     assert 290 < az < 320 and el < 10
 
 
