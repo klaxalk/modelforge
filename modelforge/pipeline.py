@@ -35,7 +35,7 @@ from modelforge import dense, jobs
 from modelforge.export import lidar as lidar_mod
 from modelforge.export import nerfstudio
 from modelforge.dji import ingest
-from modelforge.sfm import checkpoint, chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust
+from modelforge.sfm import checkpoint, chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust, tie_points
 
 SFM_STAGES = ("features", "pairs", "match", "refine", "export")  # DJI: refine from the pose priors
 VIDEO_SFM_STAGES = ("features", "pairs", "match", "reconstruct", "export")  # no metadata: incremental SfM
@@ -570,11 +570,20 @@ def refine_key(project, rounds, use_chunks, cfg, max_iterations, model):
     import dataclasses
     return checkpoint.key(project, {"rounds": [vars(r) for r in rounds], "chunked": bool(use_chunks),
                                     "cfg": dataclasses.asdict(cfg) if use_chunks else None,
-                                    "max_iterations": max_iterations, "model": model.summary()})
+                                    "max_iterations": max_iterations, "model": model.summary(),
+                                    "tie_points": tie_points.load(project)})
 
 
-def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
-                 max_iterations=500, skip=None, ba_mode=DEFAULT_BA_MODE, chunks=None, skip_round=None, resume=False):
+def stage_refine(project, report, pri, *args, **kwargs):
+    """_stage_refine with the project's manual tie points (sfm/tie_points.py) in every bundle adjustment."""
+    with tie_points.active(project) as ties:
+        if ties:
+            log(f"refine: {len(ties)} tie points ({sum(len(t['obs']) for t in ties)} clicks)")
+        return _stage_refine(project, report, pri, *args, **kwargs)
+
+
+def _stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=None, model=None, token=None,
+                  max_iterations=500, skip=None, ba_mode=DEFAULT_BA_MODE, chunks=None, skip_round=None, resume=False):
     """progress(event: dict) is called with phase "triangulate" | "ba" | "round_done" | "done", and in a
     chunked refine also "chunk_done" | "posegraph"; "ba" events carry the live Reconstruction (poses
     are updated every iteration). Events carry "stage" ("calib" | "round" | "chunk" | "polish"),
@@ -668,6 +677,10 @@ def stage_refine(project, report, pri, rounds=refine.DEFAULT_ROUNDS, progress=No
             log(f"refine: SfM points vs LiDAR ({check['covered'] * 100:.0f}% covered): median {check['median_m']} m, "
                 f"p90 {check['p90_m']} m, {check['within_10cm'] * 100:.0f}% within 10 cm")
     results["prior_model"] = model.summary()
+    if tie_points._ACTIVE:  # how well the refined cameras agree with the user's clicks
+        results["tie_points"] = tie_points.errors(rec)
+        log("refine: tie points " + ", ".join(f"{k} {v['error_px']} px ({v['clicks']} clicks)"
+                                             for k, v in results["tie_points"].items()))
     results["seconds"] = round(time.time() - t_start, 1)
     import resource
     results["peak_rss_gb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, 2)  # of this process

@@ -130,9 +130,10 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    Videos tab and Ingest tab "＋ Upload video / SRT / ROS bag": 1 MiB parts over the GUI's websocket straight to `.<name>.mfupload` on disk, ≤ 32 MiB in
    flight, resumes after a dropped connection, a reload or a GUI restart (pick the same file again); interrupted ones
    listed in the Videos tab (`modelforge/gui/upload.py`, the page's UPLOADER): `docs/todo_upload.md`.
-6. **TODO: manual tie points** (the user asked, 2026-10-25; after the lighting work): after a first SfM, the user clicks
-   the same spot in 2+ photos (where flights did not merge), stored per project, extra high-weight tracks in the BA /
-   loop edges in the pose graph, "Refine again": `docs/todo_tie_points.md`.
+6. **Manual tie points: done 2026-10-25** (the user asked): left tab Tie points + the Tie point window (Ctrl + click a
+   spot, open the photos that see it, click to zoom, click to record; 2+ clicks per flight / pass), Refine again; they
+   measure how far apart passes are and feed the per-flight offset (overriding SIFT there), the drift and the chunked
+   loop closures (as BA residuals they only bent the clicked cameras): `docs/todo_tie_points.md`.
 7. **TODO: register more images into an SfM model** (the user asked, 2026-10-25; after tie points and lighting): SfM on
    keyframes, the other extracted frames registered by PnP against the fixed model (interpolated poses alone are 5-10 px
    off), so denser splat subsets need no new SfM: `docs/todo_register_more.md`.

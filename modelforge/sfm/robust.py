@@ -311,6 +311,10 @@ def _split_pairs(rec, priors, db_path, same_source):
         x1 = xyz[sort[np.searchsorted(pids, p1[split], sorter=sort)]] if split.any() else np.zeros((0, 3))
         x2 = xyz[sort[np.searchsorted(pids, p2[split], sorter=sort)]] if split.any() else np.zeros((0, 3))
         yield reg[i1], reg[i2], x1 - x2, int(np.sum(both & (p1 == p2)))
+    from modelforge.sfm import tie_points  # the user's tie points: as split matches between their passes
+    if tie_points._ACTIVE:
+        for a, b, d in tie_points.split_pairs(rec, priors, same_source):
+            yield a, b, np.tile(d, (tie_points.SPLIT_COPIES, 1)), 0
 
 
 def split_point_edges(rec, priors, db_path):
@@ -324,9 +328,19 @@ def split_point_edges(rec, priors, db_path):
         e = edges.setdefault((s1, s2), {"diffs": [], "merged": 0})
         e["merged"] += merged
         e["diffs"] += list(d)
-    return {k: {"n_split": len(v["diffs"]), "merged": v["merged"],
-                "median": np.median(np.array(v["diffs"]), axis=0) if v["diffs"] else np.zeros(3)}
-            for k, v in edges.items()}
+    out = {k: {"n_split": len(v["diffs"]), "merged": v["merged"],
+               "median": np.median(np.array(v["diffs"]), axis=0) if v["diffs"] else np.zeros(3)}
+           for k, v in edges.items()}
+    from modelforge.sfm import tie_points  # where the user tied two flights together, their clicks decide
+    ties = {}
+    if tie_points._ACTIVE:
+        for im1, im2, d in tie_points.split_pairs(rec, priors, same_source=False):
+            s1, s2 = priors[im1.name].source, priors[im2.name].source
+            ties.setdefault((min(s1, s2), max(s1, s2)), []).append(d if s1 < s2 else -d)
+    for k, ds in ties.items():
+        e = out.setdefault(k, {"n_split": 0, "merged": 0})
+        e["median"], e["tie_points"] = np.median(np.array(ds), axis=0), len(ds)
+    return out
 
 
 def _solve_offsets(edges, ref):
@@ -379,7 +393,7 @@ def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
         return None
     ref = priors_raw[by_order(priors_raw)[0]].source
     edges = split_point_edges(rec, priors_raw, db_path)
-    use = {k: e for k, e in edges.items() if e["n_split"] >= min_split}
+    use = {k: e for k, e in edges.items() if e["n_split"] >= min_split or e.get("tie_points")}
     inc = _solve_offsets(use, ref) if use else {}
     _shift_cameras(rec, priors_raw, inc)
     model._offset_inc = {s: np.asarray(d, float) for s, d in inc.items()}  # update_drift: already applied

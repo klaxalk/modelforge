@@ -279,3 +279,64 @@ def test_view_priors_follow_the_refined_source_offsets(tmp_path):
     assert np.allclose(p.prior_cams.centers, raw + [1.0, -2.0, 12.06]) and p.source_offsets[0][2] == 12.06
     os.remove(tmp_path / "report.json")
     assert p.apply_source_offsets() == {} and np.allclose(p.prior_cams.centers, raw)
+
+
+@pytest.mark.parametrize("with_ties", [False, True])
+def test_tie_points_join_two_flights(tmp_path, with_ties):
+    """Manual tie points (sfm/tie_points.py): two flights whose priors are offset and whose photos SIFT could not
+    match across (the cross-flight matches deleted), so the per-flight offset estimate has nothing to measure and the
+    second flight stays at its biased priors; six tie points (true projections, as clicks; 2 photos of each flight)
+    measure the offset and pull it to the truth."""
+    import json
+    import sqlite3
+    from modelforge.sfm import tie_points
+    offset = np.array([0.6, -0.4, 0.3])
+    db_path, image_path, pri, gt = make_two_source_scene(tmp_path, offset)
+    con = sqlite3.connect(db_path)
+    src = {i: pri[n].source for i, n in con.execute("SELECT image_id, name FROM images")}
+    gone = [pid for (pid,) in con.execute("SELECT pair_id FROM two_view_geometries")
+            if src[pycolmap.pair_id_to_image_pair(pid)[0]] != src[pycolmap.pair_id_to_image_pair(pid)[1]]]
+    for table in ("two_view_geometries", "matches"):
+        con.executemany(f"DELETE FROM {table} WHERE pair_id = ?", [(p,) for p in gone])
+    con.commit()
+    con.close()
+    assert gone
+    truth = refine.init_from_database(db_path, pri)  # the true poses + points, for the clicks
+    pycolmap.set_random_seed(0)
+    o = pycolmap.SyntheticDatasetOptions()
+    o.num_rigs, o.num_cameras_per_rig, o.num_frames_per_rig, o.num_points3D = 1, 1, 40, 400
+    true_rec = pycolmap.synthesize_dataset(o)
+    names = sorted(true_rec.image(i).name for i in true_rec.reg_image_ids())
+    by_name = {true_rec.image(i).name: i for i in true_rec.reg_image_ids()}
+    rng = np.random.default_rng(1)
+    pts = []
+    for k, pid in enumerate(rng.choice(sorted(true_rec.points3D), 6, replace=False)):
+        X = true_rec.points3D[pid].xyz
+        obs = []
+        for n in (names[3 + k], names[12 + k], names[24 + k], names[33 + k]):  # 2 photos of each flight
+            q = tie_points.project(true_rec, by_name[n], X)
+            if q is not None:
+                obs.append({"image": n, "x": float(q[0]), "y": float(q[1])})
+        pts.append({"name": f"T{k + 1}", "obs": obs})
+    if with_ties:
+        json.dump({"points": pts}, open(tmp_path / "tie_points.json", "w"))
+    model = robust.PriorModel(abs_sigmas=PriorSigmas(0.3, 0.3, 0.2, 0.2), calibrate=False, estimate_systematic=False,
+                              estimate_drift=False)
+    rec = truth
+    with tie_points.active(str(tmp_path)):
+        for i in range(3):
+            rec = refine.triangulate(rec, db_path, image_path, str(tmp_path / f"round_{i}"), refine.Round(4.0, 1.0, 2.0))
+            ba = refine.prior_ba(rec, robust.corrected_priors(pri, model), model, refine_intrinsics=False)
+            assert ba["usable"]
+            rep = robust.update_source_offsets(model, rec, pri, db_path)
+    second = [rec.image(i).name for i in rec.reg_image_ids() if pri[rec.image(i).name].source == 1]
+    err = np.median([np.linalg.norm(refine.center_of(np.array(rec.frame(rec.image(i).frame_id).rig_from_world.params))
+                                    - gt[rec.image(i).name]) for i in rec.reg_image_ids()
+                     if rec.image(i).name in second])
+    e = tie_points.errors(rec, points=pts)
+    print("with ties" if with_ties else "without", round(float(err), 3), {k: v["error_px"] for k, v in e.items()},
+          rep["offsets_m"])
+    if with_ties:
+        assert err < 0.03 and max(v["error_px"] for v in e.values()) < 5.0
+    else:
+        assert err > 0.3  # the flight stays near its biased priors

@@ -6,6 +6,9 @@ the icon (running: a green dot, failed: a red one), and a change of data-notice 
 entry or the queue ended) shows a browser notification (the browser asks for permission after the first click in the
 page; notifications need https or localhost).
 
+Clicks on an img[data-mf-click="<uuid>"] (gui/tiepoints.py: the Tie point window) are sent to the hidden text input
+of that uuid as "fx,fy,time" (fractions of the image's width / height).
+
 UPLOADER: streaming, resumable uploads (modelforge/gui/upload.py has the protocol): a file picked in an element with
 data-mf-upload="<target>" (gui/upload.widget) is sent in 1 MiB parts with at most 32 MiB beyond the server's
 acknowledgement, through viser's own message sender (window.__mfV, set by docker/patch_viser_camera.py, which also
@@ -68,6 +71,10 @@ document.addEventListener("change",e=>{const t=e.target;if(!t||!t.matches||!t.ma
  const box=t.closest("[data-mf-upload-box]"),out=box&&box.querySelector(".mf-upload-status"),target=t.dataset.mfUpload;
  const show=s=>{if(out)out.textContent=s};
  for(const f of Array.from(t.files))busy=busy.then(()=>one(f,target,show)).catch(x=>show(String(x)));t.value=""},true);
+document.addEventListener("click",e=>{const t=e.target;if(!t||!t.matches||!t.matches("img[data-mf-click]"))return;
+ const r=t.getBoundingClientRect(),v=window.__mfV;if(!v||!v.sendMessage||!r.width)return;
+ v.sendMessage({type:"GuiUpdateMessage",uuid:t.dataset.mfClick,updates:{value:((e.clientX-r.left)/r.width).toFixed(6)+","+
+ ((e.clientY-r.top)/r.height).toFixed(6)+","+Date.now()}})},true);
 window.addEventListener("beforeunload",e=>{if(Object.keys(ups).length){e.preventDefault();e.returnValue=""}});
 })()</script>"""
 

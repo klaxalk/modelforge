@@ -34,6 +34,7 @@ from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.subset import SubsetPanel
 from modelforge.gui import views as views_mod
+from modelforge.gui.tiepoints import TiePointsPanel
 from modelforge.gui.upload import StreamUploads
 from modelforge.gui.views import ViewsPanel
 
@@ -461,6 +462,8 @@ class App:
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
 
+        with self.left.add_tab("Tie points", viser.Icon.TARGET):  # manual tie points (gui/tiepoints.py)
+            self.tiepoints = TiePointsPanel(self, gui)
         before = set(vars(self))  # the right panel's inputs: the settings a queued entry keeps (_settings)
         with tabs.add_tab("Sparse", viser.Icon.CAMERA):
             self.g_sparse_md = gui.add_markdown("")
@@ -964,6 +967,7 @@ class App:
             self.g_photo_md = gui.add_markdown("_Fly the camera path (quick bar **Fly**): the photo nearest to the "
                                                "flight's position shows here_")
         self._photo_shown = None
+        self.tiepoints.make_window()  # the Tie point window (floating, opened by the Tie points tab)
         self._place_panels()
 
     def _place_panels(self):
@@ -1110,6 +1114,7 @@ class App:
             self.semantic.clear_for_switch()  # the old project's search markers and results
             self.views.refresh()  # this project's saved views
             self.difix_views.refresh()
+            self.tiepoints.refresh()
             self._refresh_difix()
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
@@ -1443,10 +1448,15 @@ class App:
         return None
 
     def _pivot_click(self, ev):
-        """Ctrl + click: the clicked spot becomes the point the view orbits and zooms about (camera stays put)."""
+        """Ctrl + click: the clicked spot becomes the point the view orbits and zooms about (camera stays put); the
+        Tie points tab lists the photos that see it."""
         hit = self.ray_hit(ev.ray_origin, ev.ray_direction)
         if hit is None:
             return
+        try:
+            self.tiepoints.on_pick(hit)
+        except Exception:  # noqa: BLE001 - a pick never breaks navigation
+            traceback.print_exc()
         try:
             ev.client.camera.look_at = hit
         except Exception:  # noqa: BLE001 - the browser went away
@@ -2012,7 +2022,9 @@ class App:
                          "all") or \
                     stage in pipeline.DENSE_STAGES or given:
                 self._refresh_dense()
-            if self.project is not None and stage in ("refine", "sfm", "all"):
+            if self.project is not None and stage in ("refine", "sfm", "all") or "refine" in (given or ()):
+                self.tiepoints.refresh()  # their errors after this refine
+            if self.project is not None and (stage in ("refine", "sfm", "all") or "refine" in (given or ())):
                 self.project.apply_source_offsets()  # the prior path where the refine put each flight
                 self.ingest._draw_scene()
             self.refresh_snapshot_list(select="main" if stage in ("refine", "reconstruct", "sfm", "all", "export")
