@@ -168,6 +168,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    a tile's own, those showing >= 20 % of it always stay (a higher bar dropped berlin views of the kind the merge broke);
    a training A/B on one tile is open: `docs/todo_tile_size.md`.
 10. **Saved camera views: done 2026-10-25** (the user asked): left panel → Views: Save current view (position, look-at, up, field of view) under a name; ▶ glide there, ⟳ replace, ✏ rename, 🗑 delete; per project in `PROJECT/views.json`: `docs/todo_saved_views.md`.
+11. **TODO: Ingest tab: pick a folder, list only its videos** (the user asked, 2026-10-25): the Videos list there shows every
+   clip of the library at once; a folder picker (the library's folders, as in the Videos tab) narrowing the list to that
+   folder would make finding the clip easier.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
