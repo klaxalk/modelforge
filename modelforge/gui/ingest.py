@@ -563,10 +563,14 @@ class IngestPanel:
             same = extracted == {"sources": [asdict(s) for s in self.sources], "settings": asdict(self.settings)}
             lines.append(f"{n_img} images extracted" + ("" if same or extracted is None else
                          " · **the plan differs from the extracted images** (re-extract with overwrite)"))
+        elif self.path and ingest.has_outputs(self.path):  # images without poses.json: an extraction that stopped
+            n_left = len(os.listdir(os.path.join(self.path, "images")))
+            lines.append(f"{n_left} images from an interrupted extraction (no poses.json): tick **Overwrite** and "
+                         "extract again (they move to `previous/`)")
         else:
             lines.append("no images yet: add sources, check the plan, then extract")
         self.g_md.content = "  \n".join(lines)
-        self.g_overwrite.visible = bool(n_img)
+        self.g_overwrite.visible = bool(n_img) or bool(self.path and ingest.has_outputs(self.path))
 
     # ------------------------------------------------------------------ display
     def _draw_scene(self):
@@ -701,7 +705,8 @@ class IngestPanel:
         if not self.plan or not self.plan.num_images:
             self.g_status.content = "⚪ nothing to extract: the plan selects no images"
             return
-        if self.app.project and not self.g_overwrite.value:
+        if ingest.has_outputs(self.path) and not self.g_overwrite.value:  # also images of an interrupted extraction
+            self._update_status()  # shows the Overwrite box
             self.g_status.content = "⚪ this project already has images: tick **Overwrite** to re-extract " \
                                     "(old outputs move to `previous/`)"
             return
@@ -748,6 +753,7 @@ class IngestPanel:
             self.g_status.content = f"❌ **extraction failed**: `{e}`"
         finally:
             self.running = False
+            self._update_status()  # images left by a stop or a failure: the Overwrite box
             self.app.g_stop.disabled = not self.app.running
             self.g_extract.disabled = False
             self.g_progress.visible = False

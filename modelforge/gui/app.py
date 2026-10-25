@@ -1333,6 +1333,10 @@ class App:
             except Exception:  # never let the title stop the GUI
                 pass
             try:
+                self._write_busy()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 tick = getattr(self, "_auto_tick", 0) + 1
                 self._auto_tick = tick
                 if tick % 5 == 1:
@@ -1340,6 +1344,23 @@ class App:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(1.0)
+
+    BUSY_FILE = ".modelforge_gui_busy.json"
+
+    def _write_busy(self):
+        """ROOT/.modelforge_gui_busy.json: what this GUI is doing (a job, an extraction, uploads), rewritten when it
+        changes, so whoever restarts the GUI can see work that runs inside it (an extraction was killed by a
+        restart, 2026-10-25: it starts no process of its own a process check would see)."""
+        busy = {"job": self._job.get("label") if self.running and getattr(self, "_job", None) else None,
+                "extraction": bool(getattr(self.ingest, "running", False)),
+                "uploads": self.uploads.progress() if hasattr(self, "uploads") else [],
+                "project": os.path.basename(os.path.abspath(self.path)) if self.path else None}
+        busy["busy"] = bool(busy["job"] or busy["extraction"] or busy["uploads"])
+        if busy != getattr(self, "_busy_last", None):
+            self._busy_last = busy
+            path = os.path.join(self.root, self.BUSY_FILE)
+            json.dump(dict(busy, since=time.strftime("%Y-%m-%d %H:%M:%S")), open(path + ".tmp", "w"))
+            os.replace(path + ".tmp", path)
 
     def _show_ba_auto(self):
         """Sparse tab, under BA mode: what auto would pick now (from the match stage's inlier matches and the RAM

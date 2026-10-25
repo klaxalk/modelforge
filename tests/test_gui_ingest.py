@@ -59,6 +59,24 @@ def test_plan_two_pieces(app):
     assert p.g_pv_image.image.shape == (360, 640, 3) and "inside" in p.g_pv_md.content
 
 
+def test_images_of_an_interrupted_extraction(app):
+    """Images without poses.json (an extraction that stopped): the Overwrite box shows and extraction asks for it
+    (before, the box stayed hidden and extraction refused: no way out in the GUI)."""
+    p = app.ingest
+    img = os.path.join(app.path, "images")
+    os.makedirs(img, exist_ok=True)
+    open(os.path.join(img, "x_00001.jpg"), "wb").close()
+    try:
+        p._update_status()
+        assert p.g_overwrite.visible and "interrupted extraction" in p.g_md.content
+        p.extract()
+        assert "tick **Overwrite**" in p.g_status.content and not p.running
+    finally:
+        os.remove(os.path.join(img, "x_00001.jpg"))
+        p._update_status()
+    assert not p.g_overwrite.visible
+
+
 def test_extract_and_run_first_stages(app):
     p = app.ingest
     p.extract()
