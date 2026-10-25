@@ -93,3 +93,13 @@ browser's load stays the same everywhere.
 2. An octree inside tiles (large tiles, untiled splats).
 3. Render fine-tuning of the coarse levels.
 4. A 3D Tiles export (KHR Gaussian splatting) for viewers outside the GUI (Cesium).
+
+## Flash on every swap (fixed 2026-10-25)
+
+The user saw the splat flash every few seconds while moving (the cut is swapped every MOVING_EVERY 2 s then).
+viser's client (Splatting/GaussianSplats.tsx) rebuilds its splat buffer when the total number of Gaussians changes and
+leaves the new draw order empty until its sort worker answers (only the very first buffer starts in identity order),
+so nothing is drawn for a moment; with an unchanged total it updates the texture in place and draws with the previous
+order. `gui/lod.py` now pads every cut to a constant total (the budget, or the coarsest cut + 1) with an invisible
+group (`/dense/splat_lod/pad`: opacity 0, tiny, at the scene's centre). Left: until the new sort arrives, one frame or
+so in the previous order (slight shimmer at most). Test: `test_view_draws_cells` (total constant across a swap).

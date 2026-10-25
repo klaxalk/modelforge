@@ -3,6 +3,11 @@ cell its own viser splat object at the level the camera needs (viser sorts all s
 blend correctly). The cut follows the browser that moved last: ~SETTLE s after its camera stops (every MOVING_EVERY s
 while it keeps moving), the changed cells are swapped in one atomic update.
 
+The number of Gaussians sent stays constant (a padding object of invisible Gaussians, PAD, takes up the rest of the
+cap): viser rebuilds its splat buffer when the total changes and draws nothing until its sort worker has ordered the
+new one (only its very first buffer starts in identity order), so every swap flashed; with the same total it updates
+the buffer in place and keeps drawing with the previous order (the user saw a flash every ~2 s while moving).
+
 No hierarchy yet for this splat: it is built in a job process of its own (~10 s per million Gaussians, ~0.5 GB per
 million), meanwhile the random subset is shown as before.
 """
@@ -15,6 +20,7 @@ import numpy as np
 from modelforge import splat_lod
 
 NODE = "/dense/splat_lod"
+PAD = NODE + "/pad"
 SETTLE = 0.4  # s after the camera stopped
 MOVING_EVERY = 2.0  # s between updates while it keeps moving
 MIN_MOVE = 0.02  # of the distance to the nearest cell: smaller moves do not count
@@ -118,6 +124,22 @@ class SplatLod:
         pos, fwd, fov, h = self.cam
         return splat_lod.choose(idx, pos, fwd, fov_y=fov, height_px=h, budget=budget)
 
+    def _cap(self):
+        """Gaussians sent in all: the budget, or the coarsest cut when even that is larger; + 1 for the padding."""
+        coarsest = sum(c["levels"][-1]["n"] for c in self.idx["cells"])
+        return max(int(self.app.g_lod_budget.value), coarsest) + 1
+
+    def _pad(self, n):
+        """n invisible Gaussians (opacity 0, tiny, at the scene's centre): the rest of the cap."""
+        lo = np.min([c["box"][0] for c in self.idx["cells"]], 0)
+        hi = np.max([c["box"][1] for c in self.idx["cells"]], 0)
+        n = max(1, int(n))
+        self.pad_n = n
+        self.app.server.scene.add_gaussian_splats(
+            PAD, centers=np.tile(0.5 * (lo + hi), (n, 1)).astype(np.float32),
+            covariances=np.tile(np.eye(3, dtype=np.float32) * 1e-8, (n, 1, 1)),
+            rgbs=np.zeros((n, 3), np.float32), opacities=np.zeros((n, 1), np.float32))
+
     def _apply(self, cut):
         project, scene = self.app.path, self.app.server.scene
         changed = [i for i, k in cut.items() if self.drawn.get(i) != k]
@@ -125,6 +147,7 @@ class SplatLod:
             return
         sem = self.app.semantic
         with self.app.server.atomic():
+            self._pad(self._cap() - self.total(cut))  # the same total as before: no flash (see the top)
             for i in changed:
                 k = cut[i]
                 cell = self.idx["cells"][i]

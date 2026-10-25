@@ -98,6 +98,8 @@ def test_view_draws_cells(tmp_path, monkeypatch):
             time.sleep(0.2)
         assert app.lod.idx is not None, app.g_dense_md.content
         assert app.lod.total() <= 30_000 and "level of detail" in app.g_dense_md.content
+        sent = app.lod.total() + app.lod.pad_n  # padded to a constant total: viser updates in place, no flash
+        assert sent == app.lod._cap()
         coarse = dict(app.lod.drawn)
         cam = SimpleNamespace(position=(-5.0, -5.0, 1.0), look_at=(0.0, 0.0, 0.0), fov=0.9, image_height=1080)
         app.lod.on_camera(SimpleNamespace(camera=cam))
@@ -105,6 +107,7 @@ def test_view_draws_cells(tmp_path, monkeypatch):
         while app.lod.drawn == coarse and time.time() - t0 < 10:
             time.sleep(0.1)
         assert app.lod.drawn != coarse and 0 in app.lod.drawn.values() and app.lod.total() <= 30_000
+        assert app.lod.total() + app.lod.pad_n == sent
         app.semantic.rel = np.linspace(0, 1, idx_n := app.lod.idx["gaussians"])  # a fake search result
         app.semantic.g_near.value = False
         app.redraw_splat_decorated()
