@@ -86,4 +86,7 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
         out["modelforge"] = extra
     path = os.path.join(project, "transforms.json")
     json.dump(out, open(path, "w"), indent=1)
+    from modelforge.sfm import register  # photos registered into this model later (Images used: Register more photos)
+    if register.load(project):
+        register.add_frames(project)
     return path

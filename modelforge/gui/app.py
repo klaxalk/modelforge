@@ -93,6 +93,9 @@ STAGE_HINTS = {
     "difix": "Refine the finished splat towards the Difix tab's target views: renders moved step by step from the "
              "nearest photo towards each target, cleaned by Difix (a diffusion model), trained on together with the "
              "photos. Better from those views and near them; the splat before the first refinement is kept (Undo).",
+    "register": "Place the extracted photos not in use into the refined model (matched to the model photos nearest "
+                "in time, located by PnP, the model unchanged) and add them to transforms.json for the splat. A new "
+                "refine makes them stale: register again.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → "
@@ -113,6 +116,7 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab; optional: **Patch holes**",
+    "register": "Splat tab: **Train + export splat** trains on the model photos + the registered ones",
     "difix": "View tab → Dense / splat → **Splat**: look from the target views; Difix tab → **Undo** restores the splat",
     "splatmesh-fill": "View tab → Dense / splat → Mesh **splat** (patched); Export tab",
     "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes**",
@@ -235,6 +239,7 @@ class App:
         threading.Thread(target=self._watch_uploads, daemon=True).start()
         self._apply_sky()
         self._refresh_difix()
+        self._refresh_register()
         threading.Thread(target=self._watch_status, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
@@ -469,6 +474,22 @@ class App:
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
             self.g_buttons["analyze"] = self.subset.g_analyze
+            with gui.add_folder("Register more photos (for the splat)", expand_by_default=False):
+                gui.add_markdown(
+                    "After SfM: place more of the **extracted** photos (those not in use) into the model, without "
+                    "running SfM again, so the splat trains on a denser set. Each is matched to the model photos "
+                    "nearest in time and located (PnP, the model unchanged; ~3 s per 4K photo); its pose must agree "
+                    "with the flight's trajectory (the metadata + the refine's corrections, interpolated).")
+                self.g_reg_every = gui.add_number(
+                    "Of the unused photos, every", initial_value=1, min=1, max=100, step=1,
+                    hint="1 = all extracted photos not in use; 2 = every second of them; … (per flight, in time).")
+                b = gui.add_button("Register more photos", icon=viser.Icon.PHOTO_PLUS, hint=STAGE_HINTS["register"])
+                b.on_click(lambda _: self.run_stage("register"))
+                self.g_buttons["register"] = b
+                b = gui.add_button("Remove registered photos", icon=viser.Icon.TRASH,
+                                   hint="Back to the model's own photos: the registered ones leave transforms.json.")
+                b.on_click(lambda _: self._unregister())
+                self.g_reg_md = gui.add_markdown("")
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
                                hint="Runs features → pairs → match → refine → export in sequence (the SfM mesh is "
                                     "its own tab: Sparse Mesh). About 15-20 min on CPU for 300 images; matching dominates.")
@@ -1112,12 +1133,13 @@ class App:
             self._default_view()
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.semantic.clear_for_switch()  # the old project's search markers and results
-            self.views.refresh()  # this project's saved views
+            self.server.scene.remove_by_name("/dense/splat_live")
+            self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
+            self.views.refresh()  # this project's saved views, tie points, Difix and registration state
             self.difix_views.refresh()
             self.tiepoints.refresh()
             self._refresh_difix()
-            self.server.scene.remove_by_name("/dense/splat_live")
-            self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
+            self._refresh_register()
             self._show_project()
             self._history_lines, self._log_lines = [], []
             self.g_history.content, self.g_log.content = "_nothing run in this session_", ""
@@ -1160,6 +1182,27 @@ class App:
             except Exception as e:  # noqa: BLE001 - the view without a sky, not a broken GUI
                 self.g_sky_md.content = f"❌ sky box: {e}"
         threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_register(self):
+        """Sparse tab → Register more photos: how many are registered (and whether for this model)."""
+        if not self.path or not hasattr(self, "g_reg_md"):
+            return
+        from modelforge.sfm import register
+        n_pool = len(register.candidates(self.path)) if os.path.exists(os.path.join(self.path, "sparse", "refined",
+                                                                                    "images.bin")) else 0
+        reg = register.load(self.path) if n_pool or os.path.exists(os.path.join(self.path, register.DIR)) else None
+        stale = os.path.exists(os.path.join(self.path, register.DIR, "registered.json")) and reg is None
+        self.g_reg_md.content = (
+            f"{len(reg['images'])} photos registered into this model (in transforms.json)" if reg else
+            "⚠ the registered photos belong to an earlier model: register again" if stale else
+            f"{n_pool} extracted photos not in use" if n_pool else "no extracted photos outside the ones in use")
+
+    def _unregister(self):
+        from modelforge.sfm import register
+        if self.running:
+            return
+        register.remove(self.path)
+        self._refresh_register()
 
     def _refresh_difix(self):
         """The Difix tab's status line and Undo (after a refinement, on a project switch)."""
@@ -1882,7 +1925,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix",
+            elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix", "register",
                            "sfmmesh-fill", "sfmmesh-colour"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
@@ -1991,6 +2034,12 @@ class App:
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
+                elif st == "register":
+                    self._in_job("modelforge.sfm.register:run", report=None, every=int(self.g_reg_every.value),
+                                 token=worker.TOKEN, callbacks={"on_line": self._on_log, "on_progress": lambda k, n:
+                                                                self._on_count_progress("register", "photo", k, n)})
+                    report = pipeline.Report(project)
+                    self._refresh_register()
                 elif st == "difix":
                     difix.run(project, self.difix_views.views(), steps=int(self.g_difix_steps.value),
                               rounds=int(self.g_difix_rounds.value), shift_m=float(self.g_difix_shift.value),
@@ -2912,6 +2961,11 @@ class App:
                 r = rep["splat_mesh"]["fill"]
                 return (f"{r['holes']:,} holes closed (up to {r['max_hole']:.2f} across, largest "
                         f"{r['largest_patched']:.2f}) with {r['faces_added']:,} faces; mesh {r['faces']:,} faces")
+            if st == "register":
+                r = rep["register"]
+                return (f"{r['registered']} of {r['tried']} photos registered (median {r['inliers_median']} inliers, "
+                        f"{r.get('error_px_median')} px); {r['not_located']} not located, {r['off_trajectory']} off "
+                        f"the trajectory")
             if st == "difix":
                 r = rep["difix"]
                 return (f"towards {r['targets']} views, {r['rounds']} rounds, {r['steps']:,} steps, Difix at "

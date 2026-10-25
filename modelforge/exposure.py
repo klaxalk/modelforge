@@ -70,3 +70,32 @@ def per_image(project):
             x["gain"] = round(x.pop("e") / ref, 5)
     json.dump({"key": key, "images": out}, open(cache, "w"))
     return out
+
+
+def gains_for(project, records):
+    """{name: gain} for photos outside the set in use (records like poses.json images: "image", "source",
+    "frame"; e.g. extracted frames registered into the model, sfm/register.py), on the same reference (the median of
+    the photos in use)."""
+    ref_imgs = per_image(project)
+    if not ref_imgs:
+        return {}
+    ref = float(np.median([x["shutter_s"] * x["iso"] / x["fnum"] ** 2 for x in ref_imgs.values()]))
+    p = json.load(open(os.path.join(project, "poses.json")))
+    from modelforge.dji import djmd
+    meta, out = {}, {}
+    for r in records:
+        k = r.get("source", 0)
+        if k not in meta:
+            s = (p.get("sources") or [{}])[k] if k < len(p.get("sources") or []) else {}
+            v = _video(project, s.get("video"))
+            try:
+                meta[k] = djmd.decode(v) if v and v.lower().endswith((".mp4", ".mov")) else None
+            except Exception:  # noqa: BLE001
+                meta[k] = None
+        m, f = meta[k], r.get("frame")
+        if m is None or f is None or not 0 <= f < len(m):
+            continue
+        c = m[f]
+        if c.iso > 0 and c.shutter_s > 0 and c.fnum > 0:
+            out[r["image"]] = round(float(c.shutter_s * c.iso / c.fnum ** 2) / ref, 5)
+    return out

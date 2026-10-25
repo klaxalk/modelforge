@@ -134,9 +134,10 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    spot, open the photos that see it, click to zoom, click to record; 2+ clicks per flight / pass), Refine again; they
    measure how far apart passes are and feed the per-flight offset (overriding SIFT there), the drift and the chunked
    loop closures (as BA residuals they only bent the clicked cameras): `docs/todo_tie_points.md`.
-7. **TODO: register more images into an SfM model** (the user asked, 2026-10-25; after tie points and lighting): SfM on
-   keyframes, the other extracted frames registered by PnP against the fixed model (interpolated poses alone are 5-10 px
-   off), so denser splat subsets need no new SfM: `docs/todo_register_more.md`.
+7. **Register more photos into an SfM model: done 2026-10-25** (the user asked): Sparse tab → Register more photos: the
+   unused extracted photos located by PnP against the fixed model (0.67 px on kladno_dopravnik; the metadata + the
+   refine's interpolated corrections alone 2.0 px median, up to 33: the check), added to transforms.json for the splat:
+   `docs/todo_register_more.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142

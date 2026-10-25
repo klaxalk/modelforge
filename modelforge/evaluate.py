@@ -47,14 +47,26 @@ def _features(db, name):
 
 def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     """{name: {"viewmat": 4x4 world -> OpenCV camera, "inliers": n, "camera_id": COLMAP camera}} for the held-out
-    images that could be located (others are reported and skipped). A held-out image takes the camera of the model
-    images of its source nearest in time (a source is one camera), its features extracted with that camera."""
+    images that could be located (others are reported and skipped)."""
+    return locate(project, holdout["images_dir"], holdout["images"], os.path.join(project, "evaluation"),
+                  neighbors=neighbors, ratio=ratio, log=log)
+
+
+def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=MIN_INLIERS, log=print,
+           on_progress=None, token=None, keep_matches=False):
+    """Place photos the model does not hold into the refined model, which stays as it is (held-out evaluation,
+    sfm/register.py): each photo takes the camera of its source's model images nearest in time (a source is one
+    camera), its SIFT features (extracted with that camera into WS) are matched (ratio test) to those `neighbors`
+    images' features, the matches with a 3D point give 2D-3D pairs, PnP + refinement gives the pose.
+    images: [{"image", "time_s", "source"}]. Returns {name: {"viewmat", "inliers", "camera_id", "matches",
+    "error_px" (median reprojection error of the inliers)}} (keep_matches: also the inlier "p2d", "p3d");
+    on_progress(done, total)."""
     import cv2
     import pycolmap
+    holdout = {"images_dir": images_dir, "images": images}
     rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
     report = json.load(open(os.path.join(project, "report.json")))
     upright = bool(report.get("features", {}).get("upright", True))
-    ws = os.path.join(project, "evaluation")
     os.makedirs(ws, exist_ok=True)
     mdb = pycolmap.Database.open(os.path.join(project, "features.db"))
     poses = json.load(open(os.path.join(project, "poses.json")))["images"]
@@ -76,7 +88,11 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
     bf = cv2.BFMatcher(cv2.NORM_L2)
     out = {}
     try:
-        for h in holdout["images"]:
+        for k_h, h in enumerate(holdout["images"]):
+            if token is not None:
+                token.check()
+            if on_progress:
+                on_progress(k_h, len(holdout["images"]))
             if h["image"] not in cam_of:
                 log(f"evaluate: {h['image']} not located (no model image of its source)")
                 continue
@@ -100,12 +116,20 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
             res = None
             if len(p2d) >= MIN_INLIERS:
                 res = pycolmap.estimate_and_refine_absolute_pose(np.array(p2d, float), np.array(p3d, float), cam)
-            if res is None or res["num_inliers"] < MIN_INLIERS:
+            if res is None or res["num_inliers"] < min_inliers:
                 log(f"evaluate: {h['image']} not located ({len(p2d)} 2D-3D matches)")
                 continue
             m = np.eye(4)
             m[:3] = res["cam_from_world"].matrix()
-            out[h["image"]] = {"viewmat": m.tolist(), "inliers": int(res["num_inliers"]), "camera_id": int(cid)}
+            mask = np.asarray(res.get("inlier_mask", np.ones(len(p2d), bool)), bool)
+            P2, P3 = np.array(p2d, float)[mask], np.array(p3d, float)[mask]
+            q = (P3 @ m[:3, :3].T + m[:3, 3])
+            proj = np.array([cam.img_from_cam(v) for v in q]).reshape(-1, 2)
+            out[h["image"]] = {"viewmat": m.tolist(), "inliers": int(res["num_inliers"]), "camera_id": int(cid),
+                               "matches": len(p2d),
+                               "error_px": round(float(np.median(np.linalg.norm(proj - P2, axis=1))), 3)}
+            if keep_matches:
+                out[h["image"]]["p2d"], out[h["image"]]["p3d"] = P2, P3
     finally:
         for hdb in hdbs.values():
             hdb.close()
