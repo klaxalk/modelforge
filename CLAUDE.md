@@ -171,6 +171,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 11. **TODO: Ingest tab: pick a folder, list only its videos** (the user asked, 2026-10-25): the Videos list there shows every
    clip of the library at once; a folder picker (the library's folders, as in the Videos tab) narrowing the list to that
    folder would make finding the clip easier.
+12. **TODO: rename the Videos tab** to "Data" or similar (the user asked, 2026-10-25): it also holds ROS bags; the
+   hints, the Ingest tab's references to it and the docs follow.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
