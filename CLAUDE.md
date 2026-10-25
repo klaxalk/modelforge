@@ -133,6 +133,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 6. **TODO: manual tie points** (the user asked, 2026-10-25; after the lighting work): after a first SfM, the user clicks
    the same spot in 2+ photos (where flights did not merge), stored per project, extra high-weight tracks in the BA /
    loop edges in the pose graph, "Refine again": `docs/todo_tie_points.md`.
+7. **TODO: register more images into an SfM model** (the user asked, 2026-10-25; after tie points and lighting): SfM on
+   keyframes, the other extracted frames registered by PnP against the fixed model (interpolated poses alone are 5-10 px
+   off), so denser splat subsets need no new SfM: `docs/todo_register_more.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
