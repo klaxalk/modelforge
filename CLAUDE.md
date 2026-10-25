@@ -167,8 +167,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    voxel, budget) swapped ~0.4 s after the camera stops (`gui/lod.py`); merged levels beat the random subset by
    2.5-9 dB and the full splat itself up to ~3 px. Open: Fly look-ahead, render fine-tuning, 3D Tiles:
    `docs/todo_splat_lod.md`.
-7. **TODO: normalize the lighting** (sunny vs overcast; sun visibility from the SfM mesh + per-photo gains in the
-   splat plugin; waiting for the user's mixed-lighting project): `docs/todo_lighting.md`.
+7. **TODO: normalize the lighting** (sunny vs overcast; the user's `berlin_lighting`; **prototype 2026-10-25**: sunlight maps from
+   the SfM mesh + per-photo ambient / sun in the plugin (Splat tab option): cleaner splat, sunny +0.9 dB colour-corrected, overcast
+   the same, but the sun term stays weak and the look darker; next steps listed): `docs/todo_lighting.md`.
 8. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
    `docs/todo_splat_editing.md`.
 9. ~~Covisibility tiles too large~~ **done 2026-10-24** (kladno_dira 5187 photos: 479–2434 per tile, 2.5x slots →

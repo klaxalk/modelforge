@@ -55,7 +55,7 @@ def main():
     und = [undistorted_camera(c, a.downscale, t) for c in cams]
     st = os.stat(a.mesh)
     key = {"mesh": os.path.realpath(a.mesh), "size": st.st_size, "mtime": st.st_mtime, "downscale": a.downscale,
-           "cameras": [{"K": np.round(K, 6).tolist(), "w": w, "h": h} for K, w, h in und], "version": 2}
+           "cameras": [{"K": np.round(K, 6).tolist(), "w": w, "h": h} for K, w, h in und], "version": 3}
     os.makedirs(a.out, exist_ok=True)
     man = os.path.join(a.out, "manifest.json")
     old = json.load(open(man)) if os.path.exists(man) else None
@@ -76,8 +76,18 @@ def main():
     t0 = time.time()
     mesh = o3d.t.io.read_triangle_mesh(a.mesh)
     scene = o3d.t.geometry.RaycastingScene()
+    V = mesh.vertex.positions.numpy().astype(np.float64)
+    F = mesh.triangle.indices.numpy().astype(np.int64)
     scene.add_triangles(o3d.t.geometry.TriangleMesh(mesh.vertex.positions.to(o3d.core.float32),
                                                     mesh.triangle.indices.to(o3d.core.int32)))
+    # smooth normals: per vertex the area-weighted sum of its faces' normals, interpolated over each hit triangle
+    # (a facet's own normal gave every triangle of the Poisson surface its own cos: evenly lit grass came out as a
+    # patchwork of light and dark facets)
+    fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    vn = np.zeros_like(V)
+    for k in range(3):
+        np.add.at(vn, F[:, k], fn)
+    vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
     rays_cam = {}
     lit_share = []
     for k, f in enumerate(todo):
@@ -98,7 +108,11 @@ def main():
         S = np.full(len(d), -1.0, np.float32)
         s = sun_vector(suns[name]["azimuth"], suns[name]["elevation"])
         if hit.any():
-            n = r["primitive_normals"].numpy()[hit].astype(np.float64)
+            fid = r["primitive_ids"].numpy()[hit].astype(np.int64)
+            uv = r["primitive_uvs"].numpy()[hit].astype(np.float64)
+            tri = F[fid]
+            n = (vn[tri[:, 0]] * (1 - uv[:, :1] - uv[:, 1:2]) + vn[tri[:, 1]] * uv[:, :1]
+                 + vn[tri[:, 2]] * uv[:, 1:2])
             n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
             n *= -np.sign(np.sum(n * d[hit], axis=1, keepdims=True) + 1e-12)  # towards the camera
             p = o[hit] + t_hit[hit, None] * d[hit]
