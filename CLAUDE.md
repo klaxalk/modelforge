@@ -163,7 +163,7 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    479–1902, 2.26x): the split's slack shrinks with depth (own photos 233–953 → 304–666), joined photos capped at 0.5x
    a tile's own, those showing >= 20 % of it always stay (a higher bar dropped berlin views of the kind the merge broke);
    a training A/B on one tile is open: `docs/todo_tile_size.md`.
-10. **TODO: saved camera views** (the user asked, 2026-10-24): a left-panel tab to save the current camera pose under a name and jump back to it from a list, per project: `docs/todo_saved_views.md`.
+10. **Saved camera views: done 2026-10-25** (the user asked): left panel → Views: Save current view (position, look-at, up, field of view) under a name; ▶ glide there, ⟳ replace, ✏ rename, 🗑 delete; per project in `PROJECT/views.json`: `docs/todo_saved_views.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").

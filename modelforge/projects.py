@@ -34,6 +34,7 @@ FINAL = (
     ("dense/textured-poisson", "textured mesh (Poisson)"),
     ("splat/splat_enu.ply", "Gaussian splat (ENU)"),
     ("export", "exported mesh / splat"),
+    ("views.json", "saved camera views (Views tab)"),
 )
 INTERMEDIATE = (
     ("images", "extracted frames"),

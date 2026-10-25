@@ -33,6 +33,7 @@ from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.subset import SubsetPanel
+from modelforge.gui.views import ViewsPanel
 
 SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
 
@@ -438,6 +439,8 @@ class App:
             self.g_plan.on_update(lambda _: self._set_plan_visible(self.g_plan.value))
             self.ingest.g_show.on_update(lambda _: self._set_plan_visible(self.ingest.g_show.value))
 
+        with self.left.add_tab("Views", viser.Icon.BOOKMARKS):  # saved camera views, per project
+            self.views = ViewsPanel(self, gui)
         with self.left.add_tab("Search", viser.Icon.SEARCH):  # semantic search, its own tab after View
             self.semantic = SemanticPanel(self, gui)
         self.lod = SplatLod(self)
@@ -1045,6 +1048,7 @@ class App:
             self._default_view()
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.semantic.clear_for_switch()  # the old project's search markers and results
+            self.views.refresh()  # this project's saved views
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self._show_project()
@@ -1369,9 +1373,10 @@ class App:
         lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
         return (lo + hi) / 2, max(float(np.linalg.norm(hi - lo)), 1e-3)
 
-    def glide_to(self, client, position, look_at, seconds=1.2, rate_hz=30.0):
-        """Move a browser's camera smoothly (smoothstep) to position, looking at look_at, z up. Stops its
-        orbit / flight; returns at once (the glide runs in a thread)."""
+    def glide_to(self, client, position, look_at, seconds=1.2, rate_hz=30.0, up=None, fov=None):
+        """Move a browser's camera smoothly (smoothstep) to position, looking at look_at, z up (or `up`); `fov`
+        (vertical, radians) is set at the end (Views). Stops its orbit / flight; returns at once (the glide runs
+        in a thread)."""
         if client is None:
             return
         self._stop_fly()
@@ -1386,10 +1391,12 @@ class App:
                     a = k / n
                     a = a * a * (3 - 2 * a)
                     with client.atomic():
-                        client.camera.up_direction = (0.0, 0.0, 1.0)
+                        client.camera.up_direction = tuple(up) if up is not None else (0.0, 0.0, 1.0)
                         client.camera.position = tuple(p0 + (p1 - p0) * a)
                         client.camera.look_at = tuple(l0 + (l1 - l0) * a)
                     time.sleep(1.0 / rate_hz)
+                if fov is not None:
+                    client.camera.fov = float(fov)
             except Exception:  # the browser went away
                 pass
         threading.Thread(target=run, daemon=True).start()
