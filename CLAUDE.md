@@ -95,6 +95,20 @@ Tested only partially:
   one sample clip (true offset 0, estimate 3 cm). **Not yet on two different
   flights.**
 
+**Session 2026-10-25 handoff** (for the next session):
+- Projects: `berlin_lighting` (2000 photos, 2 flights / cameras; SfM 0.64 px; tie points T1, T2 (T3 empty): T2 joins the
+  flights to 4 cm, T1 leaves 52 cm (each flight's clicks consistent: maybe a different / moved spot; the user was asked);
+  44 % of the cross-flight matches merged; berlin_3_1's barometric altitude was 12 m off between the days, the refine
+  found +10.5 m). Tiles set up (covisibility, 4 tiles); experiment copies `tiles/light_base`, `tiles/light_sun` of tile 2.
+- The GUI writes what it is doing to `data/.modelforge_gui_busy.json` every second (job, extraction, uploads): read it
+  before any GUI restart (a restart killed the user's extraction, 2026-10-25; extraction runs inside the GUI process).
+- Browser-side code lives in `docker/patch_viser_page.py` (title / notifications, the streaming uploader, photo clicks
+  for tie points) and `docker/patch_viser_camera.py` (keys, speed, Orbit, Fly, `window.__mfV`, upload acks, staged splat
+  buffer updates against LoD flashes); the running container is patched by hand (restore `index.html.orig_mf`, run both).
+- Still open from today: the sun-arm retrain's scores (`build/light_ab2.log`); the 4K run with split threshold 0.0005
+  (needs the user's OK: 40-60 min); Difix packages in the image (not rebuilt); the LoD flicker fix not yet confirmed by
+  the user in a browser (their other machine's GPU may have been the cause).
+
 Open items by priority (high / medium / low; the user sets them; the TODO docs follow this list):
 
 **High**
@@ -167,9 +181,13 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    voxel, budget) swapped ~0.4 s after the camera stops (`gui/lod.py`); merged levels beat the random subset by
    2.5-9 dB and the full splat itself up to ~3 px. Open: Fly look-ahead, render fine-tuning, 3D Tiles:
    `docs/todo_splat_lod.md`.
-7. **TODO: normalize the lighting** (sunny vs overcast; the user's `berlin_lighting`; **prototype 2026-10-25**: sunlight maps from
-   the SfM mesh + per-photo ambient / sun in the plugin (Splat tab option): cleaner splat, sunny +0.9 dB colour-corrected, overcast
-   the same, but the sun term stays weak and the look darker; next steps listed): `docs/todo_lighting.md`.
+7. **TODO: normalize the lighting** (sunny vs overcast; the user's `berlin_lighting`: berlin_1_1 4K sunny 13 July,
+   berlin_3_1 FHD overcast 15 July). **Done 2026-10-25:** sun per photo + shadow survey (`modelforge/lighting.py`), sunlight
+   maps from the SfM mesh (`export/sun_vis.py`) or a splat (`export/sun_vis_splat.py`), per-photo ambient / sun in the plugin
+   (Splat tab "Sunlight learned per photo", `--sun-light`), the look tied to the least-shadowed flight. Result: a cleaner
+   splat (fewer smears, sunny +0.9 dB colour-corrected) but **the hard shadows stay**: the computed maps match the photos'
+   shadows only weakly (0.5 stops vs real 1.5-2.5; the sun direction verified). **Next (the user agreed): learn a
+   per-Gaussian sun visibility per flight / time segment instead of computing shadows**: `docs/todo_lighting.md`.
 8. **Idea, not now: splat editing** (sky floaters, fog, selection, non-destructive delete):
    `docs/todo_splat_editing.md`.
 9. ~~Covisibility tiles too large~~ **done 2026-10-24** (kladno_dira 5187 photos: 479–2434 per tile, 2.5x slots →

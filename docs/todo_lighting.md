@@ -70,3 +70,32 @@ manual tie points).
 - Next: (1) the splat's look: tie the ambient to the overcast flight (or a chosen photo) instead of the mean; (2) speed
   (2x slower: the maps read and blurred per step: cache them); (3) the score without the sky; (4) crops of known
   shadows (removed or averaged?); (5) casters from the splat's own depth after a warm-up.
+
+## Second round (2026-10-25, later): the maps are the problem
+
+- Fixes: the splat's look = the least-shadowed flight (the survey's dark share; `sun_x<N>/ref.json`; the plugin holds
+  those photos' mean ambient at 1, `metadata["sun_ref"]`); maps cached per photo and size (the per-step read + blur
+  doubled the training time); `evaluate.run(sky=)` leaves the sky out of PSNR (and fills it from the photo for SSIM /
+  LPIPS); `build/light_crops.py` (close-ups of hard shadows: photo | base | sun).
+- Close-ups of the first run: **the hard shadows are in both splats**; sun_light mainly fixed colours / smears.
+- Agreement of the maps with the photos (`build/sun_agree.py`: in the sunny photos, brightness of the pixels a map
+  calls sunlit minus those it calls shadow; real shadows 1.5-2.5 stops): mesh maps 0.52 stops (0.34 on green), the
+  overcast control 0.1-0.2. **The sun direction is right** (`build/sun_dir_test.py`: as computed 0.52, +-90 / 180 /
+  mirrored 0.1-0.3).
+- **Shadow mapping with the splat** (`export/sun_vis_splat.py`: per sun direction an orthographic depth map of the
+  splat from the sun (gsplat camera_model "ortho"), each pixel's surface from the splat's depth at the photo, casters
+  = opacity > 0.5 and < 1 m; 0.02 s per map): no better, 0.52 stops. At a 17° sun the shadows are long and depend on
+  every crown's exact shape: neither the mesh nor the splat is that exact.
+- A retrain of the sun arm with the fixes (`build/light_ab.py sun eval`, log `build/light_ab2.log`) was running when
+  the session ended: check its scores / look.
+
+## Next: learn the shadows instead of computing them (proposed, the user agreed to the idea)
+
+Within one flight the sun barely moves (~2° in 10 min), so "in shadow" is a fixed property of each spot for that
+flight. Each Gaussian gets a learned sun visibility per flight (or per ~10-min segment of a long flight: the sun moves
+~15° / h): light = ambient_i + sun_i x v(pixel), v rendered as an extra channel (alpha-blended per-Gaussian values;
+cos folded in), per photo ambient / sun RGB as now. Diffuse photos (overcast) or flights at other times of day (the
+same spot lit in one, shaded in another) pin the surface colour; the sunny photos then fit v. Render with v off = the
+diffuse look. Limits: spots shaded in every flight stay as they look (dark material vs shade is ambiguous); a single
+sunny flight alone needs a prior on sun / ambient; moved objects' shadows are scene changes. Cost: one value per
+Gaussian per flight (densification must carry it: add it to gauss_params), one extra render pass (+30-50 % time).
