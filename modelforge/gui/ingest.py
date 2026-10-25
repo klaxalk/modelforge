@@ -141,17 +141,14 @@ class IngestPanel:
                                        hint="Add as source: the whole clip becomes a new source (narrow it with its "
                                             "range). Rescan: look for new videos.")
             row.on_click(lambda e: self.add_source() if e.target.value == "Add as source" else self.rescan())
-            self.g_upload = gui.add_upload_button(
-                "Upload video / SRT / ROS bag", icon=viser.Icon.UPLOAD,
-                mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.bag,.mcap",
-                hint="Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, or a ROS bag file (ROS 1 "
-                     ".bag, ROS 2 .mcap) from this computer into the shared video library (data/videos/, managed in "
-                     "the Videos tab). The video carries all the metadata; the .SRT only gives a quicker, firmer "
-                     "telemetry alignment. A ROS 2 bag folder (metadata.yaml + .db3) goes through the Videos tab as a "
-                     ".zip. Large files take a while: progress shows below. An existing file is not overwritten.")
-            self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
             from modelforge.gui import upload as stream_upload
-            gui.add_html(stream_upload.widget("videos:"))  # streamed to disk, resumes after an interruption
+            self.g_upload = gui.add_html(stream_upload.widget("videos:", hint=(
+                "Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, or a ROS bag file (ROS 1 .bag, "
+                "ROS 2 .mcap) from this computer into the shared video library (data/videos/, managed in the Videos "
+                "tab). The video carries all the metadata; the .SRT only gives a quicker, firmer telemetry alignment. "
+                "A ROS 2 bag folder (metadata.yaml + .db3) goes through the Videos tab as a .zip. Streamed to disk, "
+                "any size; an interrupted upload resumes (pick the same file again after a reload). An existing file "
+                "is not overwritten.")))
             self.g_upload_md = gui.add_markdown("")
         self.g_ros = gui.add_folder("ROS bag")
         with self.g_ros:
@@ -274,24 +271,6 @@ class IngestPanel:
                 found += [os.path.relpath(v) for v in find(r)]
         found = list(dict.fromkeys(found))
         self.g_video.options = tuple(found) or ("(none found)",)
-
-    def _on_upload(self, up):
-        def work():
-            try:
-                path = videos.save_upload(self.app.root, up.name, up.content)
-                rel = os.path.relpath(path)
-                self.rescan()
-                if rel in self.g_video.options:
-                    self.g_video.value = rel
-                hint = "" if rel.lower().endswith(".srt") else "; then **Add as source**" if videos.is_bag(path) else (
-                    "; then **Add as source**" + ("" if ingest.find_srt(path) else
-                                                  " (no .SRT: fine, the alignment is estimated from the video, "
-                                                  "about a minute once per clip)"))
-                self.g_upload_md.content = f"✅ uploaded `{rel}` ({len(up.content) / 1e6:.0f} MB){hint}"
-                self.app.videos.refresh()
-            except (OSError, ValueError) as e:
-                self.g_upload_md.content = f"❌ upload failed: `{e}`"
-        threading.Thread(target=work, daemon=True).start()
 
     def add_source(self, video=None):
         v = video or self.g_video_path.value.strip() or self.g_video.value

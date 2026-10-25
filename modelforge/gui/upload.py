@@ -229,9 +229,10 @@ def discard(folder, name):
             os.remove(p)
 
 
-def widget(target, label="＋ Upload a large file (resumable)"):
+def widget(target, label="＋ Upload video / SRT / ROS bag", hint=""):
     """HTML for the tabs: a file picker the patched page's uploader watches (data-mf-upload = the target)."""
-    return (f'<div data-mf-upload-box="1" style="margin:4px 0">'
+    import html
+    return (f'<div data-mf-upload-box="1" style="margin:4px 0" title="{html.escape(hint, quote=True)}">'
             f'<label style="display:block;text-align:center;padding:6px 10px;border-radius:6px;cursor:pointer;'
             f'border:1px solid rgba(128,128,128,.5);font-size:0.85em">{label}'
             f'<input type="file" multiple data-mf-upload="{target}" style="display:none"></label>'

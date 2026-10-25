@@ -17,19 +17,7 @@ from modelforge import projects, videos
 from modelforge.gui import upload as stream_upload
 
 MAX_ROWS = 300
-
-
-def upload_progress(server):
-    """'name 412 / 1200 MB (34 %)' for uploads still arriving (viser keeps them in memory until complete)."""
-    states = getattr(server.gui, "_current_file_upload_states", {}) or {}
-    out = []
-    for st in list(states.values()):
-        total = st.get("total_bytes") or 0
-        done = st.get("transferred_bytes") or 0
-        if total:
-            out.append(f"{st.get('filename', '?')} {done / 1e6:.0f} / {total / 1e6:.0f} MB "
-                       f"({100 * done / total:.0f} %)")
-    return out
+UPLOAD_HINT = ('Into the current folder: a clip (.MP4 / .MOV), optionally with its .SRT sidecar (same name; the video carries all the metadata, the .SRT only gives a quicker, firmer telemetry alignment), or a ROS bag: a ROS 1 .bag or ROS 2 .mcap file, or a ROS 2 bag folder packed as .zip / .tar / .tar.gz (unpacked here). The files of a bag folder (metadata.yaml + .db3 / .mcap) can also be uploaded one by one into a new folder. Several files at once go one after the other. Streamed to disk in pieces, any size; an interrupted upload resumes (on its own after a dropped connection; pick the same file again after a reload). Existing files are not overwritten.')
 
 
 def _dur(s):
@@ -51,17 +39,7 @@ class VideosPanel:
                                    hint="Up: parent folder. New folder: create one here. Refresh: rescan.")
         bar.on_click(lambda e: {"⬆ Up": self.up, "📁＋ New folder": lambda: self.ask_new_folder(e.client),
                                 "⟳ Refresh": lambda: self.refresh()}[e.target.value]())
-        self.g_upload = gui.add_upload_button(
-            "＋ Upload video / SRT / ROS bag", icon=viser.Icon.PLUS,
-            mime_type="video/mp4,video/quicktime,.mp4,.MP4,.mov,.MOV,.srt,.SRT,.mcap,.bag,.zip,.tar,.tgz,.gz,.db3,.yaml",
-            hint="Into the current folder: a clip (.MP4 / .MOV), optionally with its .SRT sidecar (same name; the "
-                 "video carries all the metadata, the .SRT only gives a quicker, firmer telemetry alignment), or a "
-                 "ROS bag: a ROS 1 .bag or ROS 2 .mcap file, or a ROS 2 bag folder packed as .zip / .tar / .tar.gz (unpacked here). The "
-                 "files of a bag folder (metadata.yaml + .db3 / .mcap) can also be uploaded one by one into a new "
-                 "folder. The browser sends one file at a time and the server holds it in memory until it is "
-                 "complete (about twice its size); progress shows below. Existing files are not overwritten.")
-        self.g_upload.on_upload(lambda e: self._upload(e.target.value))
-        self.g_stream = gui.add_html(stream_upload.widget("videos:"))  # streamed to disk, resumable
+        self.g_stream = gui.add_html(stream_upload.widget("videos:", hint=UPLOAD_HINT))  # streamed, resumable
         self.g_msg = gui.add_markdown("")
         self.g_files = gui.add_folder("Files")
         with gui.add_folder("Selected clip / bag"):
@@ -106,7 +84,7 @@ class VideosPanel:
                                "Click a folder to open it, a clip or 🤖 ROS bag for its details; ✏ rename, 🗑 delete.")
         self.g_path.content = (f"📂 `{videos.LIBRARY_DIR}/{self.cwd + '/' if self.cwd else ''}`"
                                f" · {n_vid} clips / bags here and below")
-        html = stream_upload.widget("videos:" + self.cwd, "＋ Upload a large file here (streamed, resumable)")
+        html = stream_upload.widget("videos:" + self.cwd, hint=UPLOAD_HINT)
         if self.g_stream.content != html:  # into the current folder
             self.g_stream.content = html
         with self._lock:
@@ -480,25 +458,3 @@ class VideosPanel:
             f"✅ uploaded `{os.path.relpath(path)}` ({projects.human(size)}){note}"
         self._refresh(select=path if not path.lower().endswith(".srt") else None)
         self.app.ingest.rescan()
-
-    def _upload(self, up):
-        cwd = self.cwd
-
-        def work():  # off viser's message thread: large files take seconds to write
-            try:
-                path = videos.save_upload(self.app.root, up.name, up.content, rel_dir=cwd)
-                note = ""
-                if up.name.lower().endswith(videos.ARCHIVE_EXTS):
-                    note = " · unpacked: ROS bag"
-                elif up.name.lower() == "metadata.yaml" or up.name.lower().endswith(".db3"):
-                    folder = os.path.dirname(path)
-                    note = (" · this folder is now a ROS bag: ⬆ Up to see it" if videos.is_bag(folder) else
-                            " · part of a bag folder: also upload metadata.yaml and every .db3 / .mcap file here")
-                    path = folder
-                self.g_msg.content = (f"✅ uploaded `{os.path.relpath(path)}` "
-                                      f"({projects.human(len(up.content))}){note}")
-                self._refresh(select=path if not path.lower().endswith(".srt") else None)
-                self.app.ingest.rescan()
-            except (OSError, ValueError) as ex:
-                self.g_msg.content = f"❌ upload failed: `{ex}`"
-        threading.Thread(target=work, daemon=True).start()

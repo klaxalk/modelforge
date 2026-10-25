@@ -140,7 +140,6 @@ def test_folders(root):
 
 def test_videos_tab(app, root):
     """The file manager rows: open / select by name, rename and delete through the context actions."""
-    from viser import UploadedFile
     v = app.videos
 
     def entry(name):
@@ -153,7 +152,10 @@ def test_videos_tab(app, root):
     e = entry("flights")
     v._row_click(e, v._label(e), v._label(e), None)  # click the folder name: open it
     assert v.cwd == "flights" and v.entries == [] and len(v._rows) == 1  # the "empty folder" note
-    v._upload(UploadedFile("new.MP4", open(os.path.join(root, "videos", "b.mp4"), "rb").read()))
+    part = os.path.join(root, "videos", "flights", ".new.MP4.mfupload")  # a streamed upload, complete (gui/upload.py)
+    shutil.copyfile(os.path.join(root, "videos", "b.mp4"), part)
+    v.uploaded(videos.finish_upload(root, "new.MP4", part, "flights"), "new.MP4", os.path.getsize(part.replace(
+        ".new.MP4.mfupload", "new.MP4")))
     assert wait_for(lambda: v.current is not None and v.current["name"] == "new.MP4"), v.g_msg.content
     assert "SRT: none (optional" in v.g_info.content and len(v._rows) == 1
     n = len(app.ingest.sources)

@@ -28,7 +28,7 @@ from modelforge.gui import skybox
 from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.jobqueue import QueuePanel
 from modelforge.gui.lod import SplatLod
-from modelforge.gui.videos import VideosPanel, upload_progress
+from modelforge.gui.videos import VideosPanel
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
@@ -1174,9 +1174,9 @@ class App:
             self.g_difix_md.content = f"❌ {e}"
 
     def _watch_uploads(self):
-        """Progress of browser uploads still arriving (viser delivers them only when complete)."""
+        """Progress of the streaming uploads arriving (gui/upload.py)."""
         while True:
-            p = upload_progress(self.server) + self.uploads.progress()
+            p = self.uploads.progress()
             if p:  # once complete, the upload handlers write the result
                 self.videos.g_msg.content = self.ingest.g_upload_md.content = "⏳ receiving " + " · ".join(p)
             time.sleep(0.5)

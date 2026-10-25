@@ -4,6 +4,7 @@ berlin-derived synthetic bag (skipped without the sample clip and data/fullrun_t
 
 import json
 import os
+import shutil
 import socket
 import time
 
@@ -11,7 +12,7 @@ import cv2
 import numpy as np
 import pytest
 
-from modelforge import pipeline, projects
+from modelforge import pipeline, projects, videos
 from modelforge.dji import ingest as dji
 from modelforge.rosbag import bag
 from modelforge.rosbag import ingest as ri
@@ -262,14 +263,12 @@ def test_rosbag_project_through_the_gui(tmp_path, ros1):
     try:
         ing = app.ingest
         assert ing.kind == "rosbag" and ing.g_ros.visible and ing.g_upload.visible  # .bag / .mcap are single files
-        if ros1:  # the Ingest tab's upload button takes a ROS 1 bag into the library, ready as a source
-
-            class Upload:
-                name, content = "uploaded.bag", open(bag_path, "rb").read()
-            ing._on_upload(Upload())
-            t_up = time.time()
-            while "uploaded" not in ing.g_upload_md.content and time.time() - t_up < 60:
-                time.sleep(0.2)
+        if ros1:  # an upload (streamed, complete: gui/upload.py) of a ROS 1 bag: in the library, ready as a source
+            part = os.path.join(root, "videos", ".uploaded.bag.mfupload")
+            os.makedirs(os.path.dirname(part), exist_ok=True)
+            shutil.copyfile(bag_path, part)
+            app.videos.uploaded(videos.finish_upload(root, "uploaded.bag", part), "uploaded.bag",
+                                os.path.getsize(bag_path))
             assert ing.g_upload_md.content.startswith("✅"), ing.g_upload_md.content
             assert os.path.relpath(os.path.join(root, "videos", "uploaded.bag")) in ing.g_video.options
         assert app.g_buttons["refine"].visible and app.g_dense_lidar.visible and not app.g_upright.value

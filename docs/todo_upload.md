@@ -46,7 +46,8 @@ our own browser and server sides:
   video list refreshed. Refused (a name that may not be uploaded, an existing file): acknowledged with -1, the reason
   in the Videos tab.
 - Interrupted uploads are listed in the Videos tab's folder ("⏸ name · done / size MB", 🗑 deletes what arrived).
-  viser's own upload buttons stay for small files.
+  viser's own upload buttons were removed once the user had tried it (2026-10-25): this is the only upload now, with
+  their labels and hover hints.
 - **Checked:** `tests/test_upload.py` (parts out of order, a transfer resumed, a server restart resumed from the saved
   length, refused names, a bag archive unpacked); the page script in node against a mock server that drops the
   connection for 10 s mid-upload (resumed, identical file); a 3.2 MB upload through the live GUI's websocket from

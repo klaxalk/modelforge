@@ -126,8 +126,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    per entry done 2026-10-24 (waits until the RAM it needs is free); **entries of other projects run without switching
    the view, done 2026-10-24**: in a process of their own, `gui/headless.py` (an App on that project without a
    browser), progress on the entry's line, "Stop entry", outlives a GUI restart): `docs/todo_job_queue.md`.
-5. **Streaming, resumable uploads: done 2026-10-25** (the user asked): Videos tab "＋ Upload a large file here (streamed,
-   resumable)" and Ingest tab: 1 MiB parts over the GUI's websocket straight to `.<name>.mfupload` on disk, ≤ 32 MiB in
+5. **Streaming, resumable uploads: done 2026-10-25** (the user asked; the only upload since, viser's buttons removed):
+   Videos tab and Ingest tab "＋ Upload video / SRT / ROS bag": 1 MiB parts over the GUI's websocket straight to `.<name>.mfupload` on disk, ≤ 32 MiB in
    flight, resumes after a dropped connection, a reload or a GUI restart (pick the same file again); interrupted ones
    listed in the Videos tab (`modelforge/gui/upload.py`, the page's UPLOADER): `docs/todo_upload.md`.
 
