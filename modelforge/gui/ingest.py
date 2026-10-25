@@ -150,6 +150,8 @@ class IngestPanel:
                      "telemetry alignment. A ROS 2 bag folder (metadata.yaml + .db3) goes through the Videos tab as a "
                      ".zip. Large files take a while: progress shows below. An existing file is not overwritten.")
             self.g_upload.on_upload(lambda e: self._on_upload(e.target.value))
+            from modelforge.gui import upload as stream_upload
+            gui.add_html(stream_upload.widget("videos:"))  # streamed to disk, resumes after an interruption
             self.g_upload_md = gui.add_markdown("")
         self.g_ros = gui.add_folder("ROS bag")
         with self.g_ros:

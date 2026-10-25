@@ -34,6 +34,7 @@ from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.subset import SubsetPanel
 from modelforge.gui import views as views_mod
+from modelforge.gui.upload import StreamUploads
 from modelforge.gui.views import ViewsPanel
 
 SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
@@ -229,6 +230,7 @@ class App:
         self.server.on_client_connect(self._on_connect)
         self.server.on_client_disconnect(self._on_disconnect)
         self.server.scene.on_click(modifier="cmd/ctrl")(self._pivot_click)  # Ctrl + click: orbit / zoom about there
+        self.uploads = StreamUploads(self)  # streaming, resumable uploads (gui/upload.py)
         threading.Thread(target=self._watch_uploads, daemon=True).start()
         self._apply_sky()
         self._refresh_difix()
@@ -1174,7 +1176,7 @@ class App:
     def _watch_uploads(self):
         """Progress of browser uploads still arriving (viser delivers them only when complete)."""
         while True:
-            p = upload_progress(self.server)
+            p = upload_progress(self.server) + self.uploads.progress()
             if p:  # once complete, the upload handlers write the result
                 self.videos.g_msg.content = self.ingest.g_upload_md.content = "⏳ receiving " + " · ".join(p)
             time.sleep(0.5)

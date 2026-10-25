@@ -14,6 +14,7 @@ import traceback
 import viser
 
 from modelforge import projects, videos
+from modelforge.gui import upload as stream_upload
 
 MAX_ROWS = 300
 
@@ -60,6 +61,7 @@ class VideosPanel:
                  "folder. The browser sends one file at a time and the server holds it in memory until it is "
                  "complete (about twice its size); progress shows below. Existing files are not overwritten.")
         self.g_upload.on_upload(lambda e: self._upload(e.target.value))
+        self.g_stream = gui.add_html(stream_upload.widget("videos:"))  # streamed to disk, resumable
         self.g_msg = gui.add_markdown("")
         self.g_files = gui.add_folder("Files")
         with gui.add_folder("Selected clip / bag"):
@@ -104,11 +106,21 @@ class VideosPanel:
                                "Click a folder to open it, a clip or 🤖 ROS bag for its details; ✏ rename, 🗑 delete.")
         self.g_path.content = (f"📂 `{videos.LIBRARY_DIR}/{self.cwd + '/' if self.cwd else ''}`"
                                f" · {n_vid} clips / bags here and below")
+        html = stream_upload.widget("videos:" + self.cwd, "＋ Upload a large file here (streamed, resumable)")
+        if self.g_stream.content != html:  # into the current folder
+            self.g_stream.content = html
         with self._lock:
             for r in self._rows:
                 r.remove()
             self._rows = []
             with self.g_files:
+                for st in stream_upload.unfinished(videos.resolve_dir(root, self.cwd)):
+                    g = self.gui.add_button_group(
+                        "", options=(f"⏸ {st['name']} · {st['done'] / 1e6:.0f} / {st['size'] / 1e6:.0f} MB", "🗑"),
+                        hint="An interrupted upload: pick the same file again with the resumable upload above and it "
+                             "continues where it stopped. 🗑 deletes what arrived.")
+                    g.on_click(lambda ev, name=st["name"]: self._discard(name) if ev.target.value == "🗑" else None)
+                    self._rows.append(g)
                 if listing.get("inside_bag"):
                     self._rows.append(self.gui.add_markdown("_this folder is a ROS bag (metadata.yaml found): "
                                                             "upload any remaining .db3 / .mcap files here, then "
@@ -448,6 +460,26 @@ class VideosPanel:
                 traceback.print_exc()
                 self.g_msg.content = f"❌ download failed: `{ex}`"
         threading.Thread(target=work, daemon=True).start()
+
+    def _discard(self, name):
+        stream_upload.discard(videos.resolve_dir(self.app.root, self.cwd), name)
+        self.g_msg.content = f"🗑 interrupted upload `{name}` deleted"
+        self.refresh()
+
+    def uploaded(self, path, name, size):
+        """A streamed upload is in the library (gui/upload.py)."""
+        note = ""
+        if name.lower().endswith(videos.ARCHIVE_EXTS):
+            note = " · unpacked: ROS bag"
+        elif name.lower() == "metadata.yaml" or name.lower().endswith(".db3"):
+            folder = os.path.dirname(path)
+            note = (" · this folder is now a ROS bag: ⬆ Up to see it" if videos.is_bag(folder) else
+                    " · part of a bag folder: also upload metadata.yaml and every .db3 / .mcap file here")
+            path = folder
+        self.g_msg.content = self.app.ingest.g_upload_md.content = \
+            f"✅ uploaded `{os.path.relpath(path)}` ({projects.human(size)}){note}"
+        self._refresh(select=path if not path.lower().endswith(".srt") else None)
+        self.app.ingest.rescan()
 
     def _upload(self, up):
         cwd = self.cwd

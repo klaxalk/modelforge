@@ -126,9 +126,10 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    per entry done 2026-10-24 (waits until the RAM it needs is free); **entries of other projects run without switching
    the view, done 2026-10-24**: in a process of their own, `gui/headless.py` (an App on that project without a
    browser), progress on the entry's line, "Stop entry", outlives a GUI restart): `docs/todo_job_queue.md`.
-5. **TODO: streaming, resumable uploads** (the user asked, 2026-10-25): viser holds an upload in RAM until complete and
-   an interrupted one starts over; chunks with offsets to disk, resume after a drop, files of any size:
-   `docs/todo_upload.md`.
+5. **Streaming, resumable uploads: done 2026-10-25** (the user asked): Videos tab "＋ Upload a large file here (streamed,
+   resumable)" and Ingest tab: 1 MiB parts over the GUI's websocket straight to `.<name>.mfupload` on disk, ≤ 32 MiB in
+   flight, resumes after a dropped connection, a reload or a GUI restart (pick the same file again); interrupted ones
+   listed in the Videos tab (`modelforge/gui/upload.py`, the page's UPLOADER): `docs/todo_upload.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
@@ -2070,7 +2071,7 @@ Code layout:
       with the others (also checked in `IngestPanel.add_source`).
     - Tests: `tests/test_videos.py` (`test_bag_uploads`,
       `test_bag_rename_move_delete_follow_projects`).
-  - **Uploads.** viser buffers an upload in server memory and delivers it only
+  - **Uploads.** (Large files: the streaming, resumable upload, `docs/todo_upload.md`.) viser buffers an upload in server memory and delivers it only
   when complete, so a 1.2 GB clip needs ~2.4 GB of RAM at peak.
   `App._watch_uploads` shows progress from viser's in-flight transfer table
   (`_current_file_upload_states`, private, read defensively). Files are

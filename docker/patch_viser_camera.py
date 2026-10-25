@@ -14,7 +14,8 @@ the code after unpacking; each pattern occurs once, in the camera controls' per-
    hidden input data-fly names (`report`), so the server pauses the clock (`paused`, for every browser, the
    slider and the photo window) and continues it from t.
 
-Splat buffer updates are staged until the sort worker has ordered them (SPLAT below): no gap, no stale order.
+window.__mfV (viser's message sender for the page's uploader) is set every frame, and upload acknowledgements of
+the streaming uploads go to window.__mfAck. Splat buffer updates are staged until the sort worker has ordered them (SPLAT below): no gap, no stale order.
 
 Re-applying is safe: the loader's edit and the script are replaced, so this runs on an image patched by the older
 patch_viser_keys.sh too. Fails if viser's loader or the hook changed.
@@ -26,7 +27,7 @@ import sys
 
 HOOK = "qf((e,t)=>{let n=a.cameraControl,r=j.current;if(n===null||r.size===0||!n.enabled)return;let i=2*t,o=50*Yt.DEG2RAD*t;"
 # the hook's own argument renamed, so `e` is the viewer context again (NL(e): viser's scene root transform)
-NEW_HOOK = ("qf((mfX,t)=>{let n=a.cameraControl,r=j.current;let mfE=document.getElementById(`mf-move-speed`),"
+NEW_HOOK = ("qf((mfX,t)=>{window.__mfV=a;let n=a.cameraControl,r=j.current;let mfE=document.getElementById(`mf-move-speed`),"
             "mfO=+(mfE?.dataset.orbit||0);if(n!==null&&n.enabled&&window.__mfFly?.(n,()=>NL(e),r.size>0,a))return;"
             "if(n===null||r.size===0&&!mfO||!n.enabled)return;mfO&&n.rotate(mfO*Yt.DEG2RAD*Math.min(t,.1),0,!0);"
             "let i=(window.__mfSpeed=+(mfE?.dataset.speed||window.__mfSpeed||5))*t,o=50*Yt.DEG2RAD*t;")
@@ -38,6 +39,8 @@ DECODE = "const code=td.decode(heap.subarray(up+ss,up+sz))"
 # in its own order, until the worker's first sort of the new one arrives; then buffer and order are applied together.
 SPLAT_SEND = "m({updateBuffer:p.gaussianBuffer,updateGroupIndices:p.groupIndices,updateNumGroups:p.numGroups})"
 SPLAT = (
+    # streaming uploads (docker/patch_viser_page.py UPLOADER): their acknowledgements go to the page's uploader
+    ("case`FileTransferPartAck`:f({", "case`FileTransferPartAck`:if(window.__mfAck&&window.__mfAck(n))return;f({"),
     # the worker: the generation of the buffer it sorts, in every result
     ("self.postMessage({sortedIndices:o},[o.buffer])", "self.postMessage({sortedIndices:o,gen:self.__mfg|0},[o.buffer])"),
     ("e.setBuffer(n.updateBuffer,n.updateGroupIndices),r=!0",

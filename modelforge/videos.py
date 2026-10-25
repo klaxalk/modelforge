@@ -161,13 +161,9 @@ def save_upload(root, filename, data, overwrite=False, rel_dir=""):
     Archives (.zip / .tar / .tar.gz) of a bag folder are unpacked (extract_bags); metadata.yaml and .db3
     are parts of a bag folder (upload them into one). Returns the saved path (an unpacked archive: its
     first bag)."""
-    name = safe_name(filename)
-    low = name.lower()
-    if not low.endswith(UPLOAD_EXTS) or (low.endswith(".yaml") and low != "metadata.yaml"):
-        raise ValueError(f"not a video, .SRT or ROS bag file: {name} (allowed: {', '.join(UPLOAD_EXTS)}; "
-                         ".yaml only as a bag's metadata.yaml)")
+    name = upload_name(filename)
     d = resolve_dir(root, rel_dir, create=True)
-    if low.endswith(ARCHIVE_EXTS):
+    if name.lower().endswith(ARCHIVE_EXTS):
         return extract_bags(root, name, data, d)
     path = os.path.join(d, name)
     if os.path.lexists(path) and not overwrite:
@@ -179,6 +175,34 @@ def save_upload(root, filename, data, overwrite=False, rel_dir=""):
     return path
 
 
+def upload_name(filename):
+    """The library name of an uploaded file (ValueError for what may not be uploaded)."""
+    name = safe_name(filename)
+    low = name.lower()
+    if not low.endswith(UPLOAD_EXTS) or (low.endswith(".yaml") and low != "metadata.yaml"):
+        raise ValueError(f"not a video, .SRT or ROS bag file: {name} (allowed: {', '.join(UPLOAD_EXTS)}; "
+                         ".yaml only as a bag's metadata.yaml)")
+    return name
+
+
+def finish_upload(root, filename, part, rel_dir=""):
+    """A streamed upload (gui/upload.py) complete in the file `part` -> ROOT/videos/rel_dir/<name>, as save_upload
+    (archives unpacked, then the part removed). Returns the saved path."""
+    name = upload_name(filename)
+    d = resolve_dir(root, rel_dir, create=True)
+    if name.lower().endswith(ARCHIVE_EXTS):
+        try:
+            return extract_bags(root, name, part, d)
+        finally:
+            if os.path.exists(part):
+                os.remove(part)
+    path = os.path.join(d, name)
+    if os.path.lexists(path):
+        raise FileExistsError(f"{os.path.relpath(path, root)} already exists in the library")
+    os.replace(part, path)
+    return path
+
+
 def _archive_stem(name):
     low = name.lower()
     ext = next(e for e in sorted(ARCHIVE_EXTS, key=len, reverse=True) if low.endswith(e))
@@ -186,7 +210,8 @@ def _archive_stem(name):
 
 
 def extract_bags(root, name, data, dest):
-    """Unpack an uploaded archive holding ROS bag(s) into the library folder dest. Loose bag files
+    """Unpack an uploaded archive (bytes, or the path of a file holding it) holding ROS bag(s) into the library
+    folder dest. Loose bag files
     (metadata.yaml at the archive's top) go into a folder named after the archive; otherwise its
     top-level entries are kept. Members leaving the folder, links and devices are refused. Returns the
     first bag's path; ValueError (nothing kept) without a bag inside."""
@@ -195,14 +220,15 @@ def extract_bags(root, name, data, dest):
     try:
         low = name.lower()
         if low.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
+            with zipfile.ZipFile(data if isinstance(data, str) else io.BytesIO(data)) as z:
                 for m in z.infolist():
                     target = os.path.realpath(os.path.join(tmp, m.filename))
                     if not target.startswith(os.path.realpath(tmp) + os.sep):
                         raise ValueError(f"archive member leaves the folder: {m.filename}")
                 z.extractall(tmp)
         else:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as t:
+            with (tarfile.open(data, mode="r:*") if isinstance(data, str) else
+                  tarfile.open(fileobj=io.BytesIO(data), mode="r:*")) as t:
                 t.extractall(tmp, filter="data")  # refuses absolute / .. paths, links out, devices
         tops = [n for n in os.listdir(tmp) if not n.startswith(".") and n != "__MACOSX"]
         if "metadata.yaml" in tops:  # the bag folder's files themselves
