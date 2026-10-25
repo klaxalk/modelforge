@@ -126,6 +126,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    per entry done 2026-10-24 (waits until the RAM it needs is free); **entries of other projects run without switching
    the view, done 2026-10-24**: in a process of their own, `gui/headless.py` (an App on that project without a
    browser), progress on the entry's line, "Stop entry", outlives a GUI restart): `docs/todo_job_queue.md`.
+5. **TODO: streaming, resumable uploads** (the user asked, 2026-10-25): viser holds an upload in RAM until complete and
+   an interrupted one starts over; chunks with offsets to disk, resume after a drop, files of any size:
+   `docs/todo_upload.md`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
