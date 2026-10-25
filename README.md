@@ -42,16 +42,6 @@ MODELFORGE_GPU=1 scripts/dev python -m modelforge.pipeline data/clip_frames --st
 scripts/splat data/clip_frames                                                   # nerfstudio splatfacto, GPU
 ```
 
-## The GUI as an app on a phone or tablet (Tailscale)
-
-The GUI page is installable (manifest, icons, a service worker; `docker/patch_viser_page.py`), but browsers install
-only from https. With Tailscale on the machine and the phone:
-
-1. Tailscale admin console → DNS: enable MagicDNS and **HTTPS Certificates** (once per tailnet).
-2. On the machine: `tailscale serve --bg 8080` (the GUI on `https://<machine>.<tailnet>.ts.net/`, tailnet only;
-   `tailscale serve --https=443 off` removes it).
-3. On the phone, Chrome: open that address → ⋮ → **Install app** / **Add to Home screen**.
-
 ## Outputs (in `data/<clip>_frames/`)
 
 | Path | What |

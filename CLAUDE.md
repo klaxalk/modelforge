@@ -2112,12 +2112,6 @@ Code layout:
     the icon gets a green dot while a job runs, a red one after a failure (the user asked, 2026-10-22). Applied to the
     running container by hand too (`docker exec -u root … python docker/patch_viser_page.py INDEX docker/favicon.svg`;
     the original is kept as `index.html.orig_mf`). The panel label is `ViserServer(label=...)`.
-  - **Installable as an app** (2026-10-25, the user asked: the GUI on the Android home screen): the same patch writes
-    `manifest.json` (standalone, dark theme), the icons (`docker/app-icon-*.png`, rendered from favicon.svg with
-    Inkscape; a maskable one) and `mf-sw.js` (a service worker caching nothing) next to viser's index.html (viser
-    serves its build folder), and links / registers them. Chrome installs only from https: through Tailscale
-    (`tailscale serve --bg 8080`, HTTPS certificates enabled in the tailnet; README). Applied to the running container
-    by restoring `index.html.orig_mf` and running both page patches again.
   - **Hardware** window (bottom, right of the log, `modelforge/gui/hardware.py`, the user asked): live CPU, RAM, GPU
     utilization and GPU memory (bars + numbers + GPU temperature / power), and a 2-minute history plot.
     Sampled at 1 Hz from `/proc/stat`, `/proc/meminfo` (host-wide, also in the container) and

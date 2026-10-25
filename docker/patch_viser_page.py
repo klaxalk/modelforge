@@ -6,19 +6,9 @@ the icon (running: a green dot, failed: a red one), and a change of data-notice 
 entry or the queue ended) shows a browser notification (the browser asks for permission after the first click in the
 page; notifications need https or localhost).
 
-Installable as an app (the user asked, 2026-10-25: on the phone's home screen): next to index.html go manifest.json
-(name, icons, standalone, dark theme), the icons (docker/app-icon-*.png, rendered from favicon.svg; the maskable one
-with the background to the edges, the cube in Android's safe zone) and mf-sw.js, a service worker that caches nothing
-(the GUI needs the live server; Chrome only wants one registered); the page links the manifest and registers it.
-Chrome installs only from https (or localhost): through Tailscale, `tailscale serve --bg 8080` gives the machine an
-https address on the tailnet (README).
-
 Usage: python patch_viser_page.py VISER_INDEX_HTML FAVICON_SVG
 """
-import json
-import os
 import re
-import shutil
 import sys
 from urllib.parse import quote
 
@@ -43,31 +33,6 @@ def icon(svg, colour):
     return "data:image/svg+xml," + quote(re.sub(r"\s+", " ", svg).strip(), safe="=:/'")
 
 
-MANIFEST = {
-    "name": "ModelForge", "short_name": "ModelForge", "description": "DJI flights to splats and meshes",
-    "start_url": "/", "scope": "/", "display": "standalone", "background_color": "#17212d", "theme_color": "#17212d",
-    "icons": [{"src": "app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-              {"src": "app-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-              {"src": "app-icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}]}
-ICONS = ("app-icon-192.png", "app-icon-512.png", "app-icon-maskable-512.png")
-SW = """// ModelForge: makes the GUI installable (Chrome wants a service worker); caches nothing, the GUI needs the server.
-self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
-"""
-APP_HEAD = ('<link rel="manifest" href="manifest.json" /><meta name="theme-color" content="#17212d" />'
-            '<meta name="mobile-web-app-capable" content="yes" /><link rel="apple-touch-icon" href="app-icon-192.png" />'
-            '<script>if("serviceWorker"in navigator)navigator.serviceWorker.register("mf-sw.js").catch(()=>{})</script>')
-
-
-def app_files(index, favicon):
-    """manifest.json, the icons and mf-sw.js next to the page (viser serves its build folder)."""
-    build, src = os.path.dirname(os.path.abspath(index)), os.path.dirname(os.path.abspath(favicon))
-    for name in ICONS:
-        shutil.copyfile(os.path.join(src, name), os.path.join(build, name))
-    json.dump(MANIFEST, open(os.path.join(build, "manifest.json"), "w"), indent=1)
-    open(os.path.join(build, "mf-sw.js"), "w").write(SW)
-
-
 def main(index, favicon):
     page = open(index).read()
     svg = open(favicon).read()
@@ -78,9 +43,8 @@ def main(index, favicon):
     page, n = re.subn(r"<title>[^<]*</title>", "<title>ModelForge</title>", page, count=1)
     assert n == 1, "viser's title not found"
     js = "{" + ",".join(f'{k}:"{v}"' for k, v in icons.items()) + "}"
-    page = page.replace("</head>", (SCRIPT % js).replace("\n", "") + APP_HEAD + "</head>", 1)
+    page = page.replace("</head>", (SCRIPT % js).replace("\n", "") + "</head>", 1)
     assert "mf-status" in page
-    app_files(index, favicon)
     open(index, "w").write(page)
 
 

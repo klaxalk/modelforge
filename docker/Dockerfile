@@ -108,10 +108,8 @@ RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
         huggingface_hub==0.36.2 hf-xet==1.7.0 regex==2026.9.29 sentencepiece==0.2.2 plyfile==1.1.5; \
     fi
 
-# Browser tab of the GUI: title and icon (viser hardcodes its own), the title / icon following the run state, and the
-# files that make it installable as an app (manifest, icons, service worker).
-COPY docker/patch_viser_page.py docker/favicon.svg docker/app-icon-192.png docker/app-icon-512.png \
-     docker/app-icon-maskable-512.png /tmp/
+# Browser tab of the GUI: title and icon (viser hardcodes its own), and the title / icon following the run state.
+COPY docker/patch_viser_page.py docker/favicon.svg /tmp/
 RUN python /tmp/patch_viser_page.py \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html" /tmp/favicon.svg
 # The browser's camera: keys R / F for up / down instead of viser's E / Q (the user asked), the move speed, View →
