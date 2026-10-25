@@ -117,9 +117,22 @@ class TiePointsPanel:
             s = getattr(pri.get(o["image"]), "source", 0)
             by_src.setdefault(s, []).append(o["image"])
         names = getattr(self.app.project, "source_names", [])
-        self.g_status.content = (f"**{p['name']}**: {len(p['obs'])} clicks · " + " · ".join(
+        lines = [f"**{p['name']}**: {len(p['obs'])} clicks · " + " · ".join(
             f"{names[s] if s < len(names) else f'flight {s + 1}'}: {len(v)}" for s, v in sorted(by_src.items()))
-            if p["obs"] else f"**{p['name']}**: no clicks yet")
+            if p["obs"] else f"**{p['name']}**: no clicks yet"]
+        rec = self.rec()
+        if rec is not None and len(p["obs"]) >= 2:  # per flight: its clicks alone (how good, how far apart)
+            pf = tp.per_flight(rec, pri, p)
+            for s, f in pf["flights"].items():
+                flight = names[s] if s < len(names) else f"flight {s + 1}"
+                note = ("" if f["clicks"] >= 2 and f["angle_deg"] >= tp.MIN_ANGLE_DEG else
+                        f" ⚠ add a photo from another direction (≥ {tp.MIN_ANGLE_DEG:.0f}° between the clicks)"
+                        if f["clicks"] >= 2 else " ⚠ needs 2+ clicks")
+                lines.append(f"{flight}: {f['clicks']} clicks, {f['angle_deg']}° apart"
+                             + (f", agree to {f['error_px']} px" if f["error_px"] is not None else "") + note)
+            if pf["apart_m"] is not None:
+                lines.append(f"the flights' points are **{pf['apart_m'] * 100:.0f} cm** apart here (current model)")
+        self.g_status.content = "  \n".join(lines)
 
     def new(self):
         project = self._project()

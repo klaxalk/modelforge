@@ -157,8 +157,15 @@ def errors(rec, points=None):
     return out
 
 
+MIN_ANGLE_DEG = 5.0  # a pass's clicks count for the offset only when their rays span this much (else poor depth)
 SPLIT_COPIES = 400  # a tie point's offset counts as this many split matches (drift / loop-closure weights saturate)
 GROUP_GAP_S = 60.0  # clicks of one flight more than this apart in time: different passes (a revisit)
+
+
+def _span(rec, obs):
+    """The largest angle (°) between the rays of clicks [(image_id, x, y)]."""
+    d = np.array([_ray(rec, i, x, y)[1] for i, x, y in obs])
+    return float(np.degrees(np.arccos(np.clip(d @ d.T, -1, 1))).max())
 
 
 def split_pairs(rec, priors, same_source, gap_s=GROUP_GAP_S, points=None):
@@ -179,7 +186,7 @@ def split_pairs(rec, priors, same_source, gap_s=GROUP_GAP_S, points=None):
             if g[-1] and t - (getattr(priors[rec.image(g[-1][-1][0]).name], "time", 0.0) or 0.0) > gap_s:
                 g.append([])
             g[-1].append((i, x, y))
-        flat = [(s, grp) for s, gs in groups.items() for grp in gs if len(grp) >= 2]
+        flat = [(s, grp) for s, gs in groups.items() for grp in gs if len(grp) >= 2 and _span(rec, grp) >= MIN_ANGLE_DEG]
         tri = [(s, grp, triangulate(rec, grp)) for s, grp in flat]
         tri = [(s, grp, X) for s, grp, X in tri if X is not None]
         for a in range(len(tri)):
@@ -188,3 +195,29 @@ def split_pairs(rec, priors, same_source, gap_s=GROUP_GAP_S, points=None):
                 sb, gb, Xb = tri[b]
                 if (sa == sb) == same_source:
                     yield rec.image(ga[0][0]), rec.image(gb[0][0]), Xa - Xb
+
+
+def per_flight(rec, priors, point):
+    """For one tie point (a points-file entry): per flight (source) its clicks in registered photos, the angle their
+    rays span (°), their own consistency (median reprojection px of the point they alone give) and that point; and the
+    distance between the flights' points (how far apart the flights still are there). {"flights": {source: {...}},
+    "apart_m"}."""
+    res = resolve(rec, [point])
+    if not res:
+        return {"flights": {}, "apart_m": None}
+    out, xs = {}, {}
+    for s in sorted({getattr(priors.get(rec.image(i).name), "source", 0) for i, _, _ in res[0][1]}):
+        o = [(i, x, y) for i, x, y in res[0][1] if getattr(priors.get(rec.image(i).name), "source", 0) == s]
+        d = np.array([_ray(rec, i, x, y)[1] for i, x, y in o])
+        ang = float(np.degrees(np.arccos(np.clip(d @ d.T, -1, 1))).max()) if len(o) > 1 else 0.0
+        X = triangulate(rec, o) if len(o) >= 2 else None
+        err = None
+        if X is not None:
+            err = float(np.median([np.hypot(*(project(rec, i, X) - [x, y])) for i, x, y in o]))
+            xs[s] = X
+        out[s] = {"clicks": len(o), "angle_deg": round(ang, 1), "error_px": None if err is None else round(err, 1)}
+    apart = None
+    if len(xs) >= 2:
+        ks = sorted(xs)
+        apart = round(float(max(np.linalg.norm(xs[a] - xs[b]) for a in ks for b in ks if a < b)), 3)
+    return {"flights": out, "apart_m": apart}
