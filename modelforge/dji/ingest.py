@@ -61,6 +61,7 @@ class Source:
     enabled: bool = True
     lead: float = None  # telemetry lead [frames]; None = estimate
     srt: str = None  # None = next to the video
+    alt_offset: float = None  # m added to rel_alt; None = auto (the takeoff altitudes' difference, takeoff_offset)
 
 
 @dataclass
@@ -387,12 +388,12 @@ def make_plan(sources, settings):
         windows, wrep = ex.plan_windows(s_curve, valids[i], spacing=spacing, window=settings.window) \
             if valids[i].any() else ([], {})
         rep = {**rep, **wrep, "num_images": len(windows)}
-        alt = 0.0
-        if c is not ref:
-            if c.takeoff_abs_alt is not None and ref.takeoff_abs_alt is not None:
-                alt = c.takeoff_abs_alt - ref.takeoff_abs_alt
-            else:
-                warnings.append(f"{s.video}: no usable abs_alt, assuming the same takeoff height as the reference")
+        if s.alt_offset is not None:  # set by hand (Ingest tab: Altitude offset)
+            alt = float(s.alt_offset)
+        else:
+            alt, note = takeoff_offset(c, ref)
+            if note:
+                warnings.append(f"{os.path.basename(s.video)}: {note}")
         key = os.path.abspath(s.video)
         if key not in bases:  # one timeline offset per video
             if all(x is not None for x in walls):
@@ -409,6 +410,41 @@ def make_plan(sources, settings):
         report["path_m"] = round(sum(p.report.get("path_m", 0.0) for p in plans), 1)
         report["rotation_deg"] = round(sum(p.report.get("rotation_deg", 0.0) for p in plans), 1)
     return Plan(plans, report, warnings)
+
+
+ALT_SUSPECT_M = 20.0  # a takeoff height difference beyond 20 m + half the distance between the takeoffs is suspect
+TAKEOFF_NEAR_M = 100.0  # ... when they lie this close horizontally
+
+
+def takeoff_point(clip):
+    """(lat, lon) of the clip's lowest telemetry sample if it is near its takeoff height (rel_alt < 3 m), else None
+    (a clip that starts in the air)."""
+    a = clip.telemetry()["a"]
+    if not len(a):
+        return None
+    k = int(np.argmin(a[:, 2]))
+    return (float(a[k, 0]), float(a[k, 1])) if a[k, 2] < 3.0 else None
+
+
+def takeoff_offset(c, ref):
+    """Auto altitude offset of clip c against the reference clip: the difference of their takeoff altitudes,
+    median(abs_alt - rel_alt) per flight. Returns (offset m, a warning or None). Refused (0) when the takeoffs lie
+    within TAKEOFF_NEAR_M horizontally and the offset exceeds ALT_SUSPECT_M + half that distance: karlak3 (a NEO2
+    flight taking off 10 m from karlak_1's) read 240 m lower than the two others of the same drone, which put it
+    240 m under them (2026-10-25)."""
+    if c is ref:
+        return 0.0, None
+    if c.takeoff_abs_alt is None or ref.takeoff_abs_alt is None:
+        return 0.0, "no usable abs_alt, assuming the same takeoff height as the reference (Altitude offset sets it)"
+    alt = c.takeoff_abs_alt - ref.takeoff_abs_alt
+    p, q = takeoff_point(c), takeoff_point(ref)
+    if p is None or q is None:
+        return alt, None
+    d = float(np.linalg.norm(ex.lla_to_ecef(p[0], p[1], 0.0) - ex.lla_to_ecef(q[0], q[1], 0.0)))
+    if d < TAKEOFF_NEAR_M and abs(alt) > ALT_SUSPECT_M + 0.5 * d:
+        return 0.0, (f"abs_alt puts its takeoff {alt:+.0f} m from the reference's, but it took off {d:.0f} m from it: "
+                     "implausible, using 0 (Altitude offset sets it by hand if real)")
+    return alt, None
 
 
 def look_at_depth(tel):
@@ -468,9 +504,13 @@ def archive_outputs(project, names=OUTPUTS):
     return dst if moved else None
 
 
-def run(project, sources, settings, progress=None, overwrite=False, log=print):
-    """Extract every source of the plan into PROJECT. progress(done, total, message)."""
+def run(project, sources, settings, progress=None, overwrite=False, log=print, windows=None):
+    """Extract every source of the plan into PROJECT. progress(done, total, message). windows: {plan source index:
+    [(first frame, last frame), ...]} instead of the plan's sampling (dji/flight_check.py: chosen frames)."""
     plan = make_plan(sources, settings)
+    if windows is not None:
+        for sp in plan.sources:
+            sp.windows = sorted(windows.get(sp.index, []))
     zooming = [f"{os.path.basename(sp.source.video)} ({zooms(sp.clip, sp.source)})" for sp in plan.sources
                if zooms(sp.clip, sp.source)]
     if zooming:
@@ -502,7 +542,7 @@ def run(project, sources, settings, progress=None, overwrite=False, log=print):
         yaw_src = c.yaw_source(settings.yaw_source)
         log(f"{sp.prefix}: lead {c.lead} frames via {c.align['method']}, {len(sp.windows)} images, "
             f"alt offset {sp.alt_offset:+.2f} m, camera heading from the {yaw_src} yaw")
-        for k, rgb, sharp in ex.select_sharpest(c.video, sp.windows, c.n):
+        for k, rgb, sharp in ex.select_sharpest(c.video, sp.windows, c.n, pts=c.pts):  # djmd = video frame times
             name = f"{sp.prefix}_{k:05d}.jpg"
             if name in seen:  # overlapping pieces of one video
                 continue

@@ -28,7 +28,7 @@ from ~2900 training images on.
 Usage (CUDA container):
     python -m modelforge.splat data/site [--method splatfacto-big] [--iterations 15000]
         [--cache disk|cpu|gpu] [--downscale 2] [--strategy default|mcmc] [--max-gaussians N]
-        [--camera-opt off|SO3xR3|SE3] [--no-plan] [--lidar-depth 0.2] [--resume] [extra ns-train args]
+        [--camera-opt off|SO3xR3|SE3] [--no-plan] [--lidar-depth 0.1] [--resume] [extra ns-train args]
 Stop (GUI) / Pause: the trainer saves a checkpoint at the current step (nsplugin/mf_train.py); Stop then
 exports the partial splat, and `resume` (--resume) continues with the run's own settings.
 """
@@ -51,7 +51,8 @@ from modelforge.splat_plan import DOWNSCALES  # image downsample factors offered
 NS_BIN = os.environ.get("NERFSTUDIO_BIN", "/opt/nerfstudio/bin")
 METHODS = ("splatfacto", "splatfacto-big")
 PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nsplugin")
-DEFAULT_LIDAR_DEPTH = 0.2  # weight of the LiDAR depth loss (relative depth error, see the plugin)
+DEFAULT_LIDAR_DEPTH = 0.1  # weight of the depth loss (relative depth error, see the plugin): LiDAR, SfM points or the
+#                            SfM mesh; 0.2 until 2026-10-25 (the user set 0.1)
 _LIDAR = re.compile(r"\[lidar\] step (\d+): depth error median ([\d.]+)% p90 ([\d.]+)% within 5% ([\d.]+)%(?: gated ([\d.]+)%)?")
 DEFAULT_ITERATIONS = 30000  # splatfacto's default
 CACHE_MODES = ("disk", "cpu", "gpu")  # nerfstudio's cache_images; disk keeps memory use flat
@@ -249,6 +250,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
             cmd += ["--pipeline.model.sky-alpha-lambda", f"{sky.ALPHA:g}"]
         if sun_maps:
             cmd += ["--pipeline.model.sun-light", "True"]
+            if reg.get("sun") == "learned":
+                cmd += ["--pipeline.model.sun-learned", "True"]
     if (regularize or {}).get("bilateral"):
         cmd += ["--pipeline.model.use-bilateral-grid", "True"]
     if (regularize or {}).get("antialiased"):  # Mip-Splatting's 2D filter (gsplat)
@@ -272,7 +275,8 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
 
 
 FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
-NEEDLE = 0.0  # default weight against needles (largest > 3x middle scale): karlak 0.02 removed them, LPIPS +0.015
+NEEDLE = 0.01  # default weight against needles (largest > 3x middle scale; the user set 0.01, 2026-10-25): karlak 0.02
+#               removed them, held-out PSNR -0.04 dB, LPIPS +0.015 on the flight path (their cost off the path unmeasured)
 EXPOSURE = True  # default: renders scaled by the photos' exposure from the metadata (karlak A/B 2026-10-24: held-out
 #                  +0.24 dB rendered with the photo's gain, +0.23 dB colour-corrected; docs/todo_splat_quality.md)
 
@@ -344,14 +348,8 @@ def sun_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
     <mesh folder>/sun_x<downscale>/. Returns the folder."""
     from modelforge import lighting, sky
     root = sky.root(project)
+    _sun_json(root)
     sun_json = os.path.join(root, lighting.DIR, "sun.json")
-    poses = os.path.join(root, "poses.json")
-    if not os.path.exists(sun_json) or os.path.getmtime(sun_json) < os.path.getmtime(poses):
-        os.makedirs(os.path.dirname(sun_json), exist_ok=True)
-        suns = lighting.sun_per_photo(root)
-        if not suns:
-            raise RuntimeError("sun light: no photo with a known time and position (needs DJI metadata)")
-        json.dump(suns, open(sun_json, "w"), indent=1)
     out = os.path.join(os.path.dirname(mesh), f"sun_x{int(downscale)}")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "sun_vis.py")
 
@@ -362,6 +360,55 @@ def sun_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
             on_count(int(m.group(1)), int(m.group(2)))
     _stream([os.path.join(NS_BIN, "python"), script, project, mesh, sun_json, out, "--downscale", str(int(downscale))],
             line, job or Job())
+    _sun_reference(root, out, on_line)
+    return out
+
+
+SUN_SEGMENT_S = 600  # learned sun visibility: one per flight, or per piece of at most this long (the sun ~2.5° in 10 min)
+
+
+def _sun_json(root):
+    from modelforge import lighting
+    sun_json = os.path.join(root, lighting.DIR, "sun.json")
+    if not os.path.exists(sun_json) or os.path.getmtime(sun_json) < os.path.getmtime(os.path.join(root, "poses.json")):
+        os.makedirs(os.path.dirname(sun_json), exist_ok=True)
+        suns = lighting.sun_per_photo(root)
+        if not suns:
+            raise RuntimeError("sun light: no photo with a known time and position (needs DJI metadata)")
+        json.dump(suns, open(sun_json, "w"), indent=1)
+    return json.load(open(sun_json))
+
+
+def sun_segments(project, on_line=print):
+    """The learned sun visibility's segments (docs/todo_lighting.md): per source (flight) its photos' UTC span cut
+    into equal pieces of <= SUN_SEGMENT_S; <root>/lighting/learned/segments.json {image: segment} (photos without a
+    time: none) + ref.json (the splat's look, as for the maps). Returns the folder (the dataparser's --sun-maps)."""
+    from modelforge import lighting, sky
+    root = sky.root(project)
+    suns = _sun_json(root)
+    out = os.path.join(root, lighting.DIR, "learned")
+    os.makedirs(out, exist_ok=True)
+    by_src = {}
+    for name, r in suns.items():
+        if r.get("utc") is not None:
+            by_src.setdefault(r.get("source", 0), []).append((float(r["utc"]), name))
+    segs, k = {}, 0
+    for src in sorted(by_src):
+        ts = sorted(by_src[src])
+        t0, span = ts[0][0], ts[-1][0] - ts[0][0]
+        n = max(1, math.ceil(span / SUN_SEGMENT_S))
+        for t, name in ts:
+            segs[name] = k + min(n - 1, int((t - t0) / max(span, 1e-9) * n))
+        on_line(f"sun light learned: source {src}: {len(ts)} photos over {span / 60:.1f} min, {n} segment(s)")
+        k += n
+    json.dump(segs, open(os.path.join(out, "segments.json"), "w"))
+    _sun_reference(root, out, on_line)
+    return out
+
+
+def _sun_reference(root, out, on_line=print):
+    """ref.json in out: the photos whose look the splat takes."""
+    from modelforge import lighting
     # the splat's look: the flight with the least hard shadow (the lighting survey's dark share; run on every 10th photo
     # when missing) sets the brightness (the plugin holds its photos' mean ambient at 1); one flight: all photos
     survey = os.path.join(root, lighting.DIR, "survey.json")
@@ -379,7 +426,6 @@ def sun_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
                     f"shadow: {100 * darkest[ref]:.1f} % dark)")
     json.dump(by_src[ref] if ref is not None else [n for v in by_src.values() for n in v],
               open(os.path.join(out, "ref.json"), "w"))
-    return out
 
 
 def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):
@@ -582,7 +628,8 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
                 + (f", needles {float(reg['needle']):g}" if reg.get("needle") else "")
                 + (", exposure from the metadata" if reg.get("exposure") else "")
-                + (", sky masks" if reg.get("sky") else "") + (", sunlight learned per photo" if reg.get("sun") else ""))
+                + (", sky masks" if reg.get("sky") else "") + (", sun visibility learned per Gaussian" if reg.get("sun") == "learned"
+                                                        else ", sunlight learned per photo" if reg.get("sun") else ""))
     stop = threading.Event()
     if on_snapshot:
         threading.Thread(target=_watch_checkpoints, args=(project, method_dir, t0, on_snapshot, stop, on_line),
@@ -602,7 +649,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         from modelforge import sky
         skies = sky.masks(project, downscale, on_line, job=job, on_count=on_prepare)
     suns = None
-    if (regularize or {}).get("sun"):  # the photos' sunlight learned apart (docs/todo_lighting.md)
+    if (regularize or {}).get("sun") == "learned":  # a sun visibility per Gaussian and flight (docs/todo_lighting.md)
+        suns = sun_segments(project, on_line)
+    elif (regularize or {}).get("sun"):  # the photos' sunlight learned apart (docs/todo_lighting.md)
         from modelforge import sfm_mesh, sky
         mesh = depth_cloud or seed_mesh or sfm_mesh.depth_cloud(sky.root(project))
         if not mesh:
@@ -791,6 +840,9 @@ def main():
                     help="learn each photo's lighting (ambient + direct sun x the sunlight from the SfM mesh), so "
                          "shadows and sun stay out of the splat: it holds the scene in diffuse light "
                          "(docs/todo_lighting.md; needs sfmmesh/mesh.ply and DJI metadata)")
+    ap.add_argument("--sun-learned", action="store_true",
+                    help="learn each photo's lighting with the shadows learned instead of computed: a sun visibility "
+                         "per Gaussian and flight / 10-min segment (docs/todo_lighting.md; needs DJI metadata)")
     ap.add_argument("--seed-mesh", action="store_true",
                     help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
                          "flat in its surface")
@@ -810,7 +862,8 @@ def main():
     from modelforge import sky as _sky
     use_sky = _sky.default_on(project) if args.sky_masks is None else args.sky_masks
     reg = {"flatten": args.flatten, "needle": args.needle, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
-           "bilateral": args.bilateral_grid, "antialiased": args.antialiased, "sun": args.sun_light}
+           "bilateral": args.bilateral_grid, "antialiased": args.antialiased,
+           "sun": "learned" if args.sun_learned else args.sun_light}
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None

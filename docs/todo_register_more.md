@@ -41,3 +41,10 @@ can use any denser subset without running SfM again.
   photos 22.28 dB / SSIM 0.595 / LPIPS 0.372 vs + 16 registered 22.34 / 0.590 / 0.386: no gain where the keyframes
   are already dense (as the keyframe calibration found); the value is SfM time (SfM on keyframes only) and thin
   stretches (fast turns, low passes), untested.
+- **Choosing the photos like Images used** (2026-10-25, the user asked): the folder has the same Selection as Sparse
+  tab → Images used (`gui/subset.py Selection`, shared): every N-th with Starting at and a Time range, or keyframes at
+  a density (default **extra dense**: SfM on dense keyframes, the denser ones registered); the choice is made over the
+  whole extracted pool and its photos in use are skipped (`register.candidates(selection=)`; the preview: "→ N photos
+  to register (M chosen, K of them in use)"). Keyframes need the overlap analysis (Images used → Analyze). Before:
+  only "every N of the unused photos" (still `register.run(every=)`). Tests: `test_candidates_from_a_selection`,
+  `test_gui_register_selection`.

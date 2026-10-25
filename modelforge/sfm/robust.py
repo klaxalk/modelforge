@@ -83,6 +83,9 @@ class PriorModel:
     estimate_systematic: bool = True
     estimate_source_offsets: bool = True  # multi-video projects: per-source position offset
     source_offsets: dict = field(default_factory=dict)  # source -> ENU offset [m] added to its priors
+    # which ENU axes the per-source offsets may move: dji/flight_check.py only z (its few far-away points measure
+    # the height between flights well and the horizontal badly: karlak's east swung -33 / +43 m between rounds)
+    source_offset_axes: tuple = (1.0, 1.0, 1.0)
     # within one source: ENU offset [m] linear in time between knots every drift_knot_s, added to the priors
     # (update_drift; long flights drift by metres, so revisits triangulate as offset copies)
     estimate_drift: bool = True
@@ -395,6 +398,7 @@ def update_source_offsets(model, rec, priors_raw, db_path, min_split=30):
     edges = split_point_edges(rec, priors_raw, db_path)
     use = {k: e for k, e in edges.items() if e["n_split"] >= min_split or e.get("tie_points")}
     inc = _solve_offsets(use, ref) if use else {}
+    inc = {s: np.asarray(d, float) * np.asarray(model.source_offset_axes, float) for s, d in inc.items()}
     _shift_cameras(rec, priors_raw, inc)
     model._offset_inc = {s: np.asarray(d, float) for s, d in inc.items()}  # update_drift: already applied
     for s, d in inc.items():

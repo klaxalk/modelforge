@@ -34,7 +34,9 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     loss); the model adds its opacity loss on them (sky_alpha_lambda)."""
     sun_maps: Optional[Path] = None
     """Direct sunlight per pixel: a folder of <image name>.npy (visibility x cos, -1 unknown) at the undistorted
-    training camera (modelforge/export/sun_vis.py), for the model's sun_light."""
+    training camera (modelforge/export/sun_vis.py), for the model's sun_light; ref.json there: the photos setting the
+    splat's look; segments.json ({image: segment}, modelforge splat.sun_segments): the flight / time segment of each
+    photo, for the model's sun_learned (no maps needed then)."""
     seed_ply: Optional[Path] = None
     """Extra starting points with normals and colours (modelforge sfm_mesh.seed_points: the SfM mesh where the SfM
     points are thin), appended to the SfM points; the model starts them flat in the surface (metadata
@@ -85,6 +87,11 @@ class LidarDataParser(Nerfstudio):
                 import json
                 names = set(json.load(open(ref)))
                 out.metadata["sun_ref"] = [Path(f).name in names for f in out.image_filenames]
+            seg = folder / "segments.json"
+            if seg.exists():
+                import json
+                segs = json.load(open(seg))
+                out.metadata["sun_segment"] = [int(segs.get(Path(f).name, -1)) for f in out.image_filenames]
         if self.config.depth_maps:
             folder = Path(self.config.depth_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]

@@ -99,3 +99,35 @@ same spot lit in one, shaded in another) pin the surface colour; the sunny photo
 diffuse look. Limits: spots shaded in every flight stay as they look (dark material vs shade is ambiguous); a single
 sunny flight alone needs a prior on sun / ambient; moved objects' shadows are scene changes. Cost: one value per
 Gaussian per flight (densification must carry it: add it to gauss_params), one extra render pass (+30-50 % time).
+
+## Learned sun visibility (2026-10-25, built; Splat tab "Sunlight" → learned per Gaussian, CLI `--sun-learned`)
+
+- Plugin (`sun_learned`): gauss_params `mf_vis` (logits, one column per segment; densification carries it like any
+  parameter, own optimizer `mf_vis`, lr 0.02), rendered as one extra channel with the RGB pass's footprints
+  (`rasterize_to_pixels` on its means2d / conics / opacities, detached: only the RGB loss moves geometry), light =
+  ambient_i + sun_i x v. Segments (`splat.sun_segments`, `<root>/lighting/learned/segments.json`): per flight, cut
+  into pieces of <= 10 min (`SUN_SEGMENT_S`). Renders outside training (export, viewer) = diffuse light; v is not
+  exported yet.
+- **The reference flight has no sun term** (`sun_ref_diffuse`): with one, the overcast flight put 25 % of the
+  Gaussians "in shade" by step 500 (v as a free brightness per Gaussian and flight). Now it alone sets the colours.
+- berlin_lighting tile 2, 15000 steps, `build/light_ab.py learned`: 993 s (sun maps 926 s, base 849 s); the sunny
+  flight's segment: ambient 2.9, sun 1.4 (lit = 1.5x shade, ~0.6 stops), 34.5 % of the Gaussians in shade.
+  `build/light_vis.jpg` (photo | diffuse | v | relit): v holds the real cast shadows (the hall's shadow on the field,
+  the wall's long shadow, tree shadows on a roof), but also speckle over grass / foliage.
+- **The held-out split of the earlier A/Bs was wrong**: nerfstudio sorts the full paths of the training file
+  (transforms_x2.json: `images/` FHD + `images_2/` 4K), the scripts sorted by name: their "held-out" photos were all
+  training photos. Rescored (`build/light_ab4.log`), true held-out, PSNR / cc / LPIPS:
+
+  | | sunny berlin_1_1 (28) | overcast berlin_3_1 (31) |
+  |---|---|---|
+  | base | 15.80 / 16.96 / 0.622 | 20.65 / 21.58 / 0.421 |
+  | sun maps | 13.22 / 17.96 / 0.621 | 20.41 / 21.70 / 0.431 |
+  | learned | 13.20 / 17.93 / 0.620 | 20.30 / 21.81 / 0.425 |
+
+- Shadow contrast in the diffuse look (`build/light_crops.py`, 19 hard-shadow windows of held-out sunny photos, lit -
+  shade): photo 1.33 stops, base 0.98, sun maps 1.04, learned 0.98: **the shadows are still mostly in the colours**.
+  Likely: only 44 % of the cross-flight matches merged, so much ground is seen by the sunny flight alone, where dark
+  surface and shade explain the photos equally.
+- Next ideas: v started from the traced maps instead of 0.73; a smoothness term on v (no grass speckle); better
+  cross-flight alignment (the real constraint).
+- View-only projects for a look in the GUI: `data/lightab_{base,sun,learned}` (hard links; delete when done).

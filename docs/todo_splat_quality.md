@@ -184,7 +184,7 @@ training. The flattening only shrinks the smallest axis (discs; their smallest a
 so nothing kept the largest axis from running away along the ground texture.
 
 **Needle term** (`needle_lambda` x mean(relu(log(largest / middle) - log(needle_ratio 3))), both axes may give; Splat
-tab "No needles (weight)", CLI `--needle W`, `regularize["needle"]`; **default off**). karlak A/B (`build/quality_ab.py
+tab "No needles (weight)", CLI `--needle W`, `regularize["needle"]`; default off, **0.01 since 2026-10-25** (the user's choice)). karlak A/B (`build/quality_ab.py
 needle`, 18k steps, exposure on, vs the exposure arm):
 
 | | PSNR | SSIM | LPIPS | p10 | > 5x | > 10x | Gaussians |

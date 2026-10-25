@@ -121,11 +121,15 @@ def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
     rep = {"mode": mode}
     if mode == "auto" and priors_mod.has_poses(pri):  # DJI: look-at overlap from the priors
         rep["ground_z"] = meta["ground_z"] if "ground_z" in meta else -meta["enu_origin_lla"][2]
-        pp = pairs.select(pri, rep["ground_z"])
+        # each flight's own takeoff height (its heights are rel_alt + its altitude offset): pairs between flights
+        # do not depend on that offset being right (pairs module doc)
+        ground = {s: rep["ground_z"] + float(src.get("alt_offset_m") or 0.0)
+                  for s, src in enumerate(meta.get("sources") or [])} or rep["ground_z"]
+        pp = pairs.select(pri, ground)
         terrain = _terrain(project)
         if terrain is not None:  # a re-run: look-ats on the surface of the earlier model, added to the flat ones
             flat = len(pp)
-            pp = sorted(set(pp) | set(pairs.select(pri, rep["ground_z"], terrain=terrain)))
+            pp = sorted(set(pp) | set(pairs.select(pri, ground, terrain=terrain)))
             rep.update(terrain_points=terrain.points, terrain_cell_m=round(terrain.cell, 2), flat_pairs=flat)
             log(f"pairs: terrain from {terrain.points:,} sparse points ({terrain.cell:.2f} m cells): "
                 f"{len(pp) - flat:,} pairs added to {flat:,} on flat ground")

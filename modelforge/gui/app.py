@@ -32,7 +32,7 @@ from modelforge.gui.videos import VideosPanel
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
-from modelforge.gui.subset import SubsetPanel
+from modelforge.gui.subset import RegisterPanel, SubsetPanel
 from modelforge.gui import views as views_mod
 from modelforge.gui.tiepoints import TiePointsPanel
 from modelforge.gui.upload import StreamUploads
@@ -43,6 +43,7 @@ SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export") 
 DENSE_QUALITY = {"superfast (320 px)": "superfast", "low (640 px, fast)": "low", "medium (1200 px)": "medium",
                  "high (full res)": "high", "max (COLMAP defaults)": "max"}  # label -> dense.QUALITY preset
 DENSE_QUALITY_DEFAULT = next(k for k, v in DENSE_QUALITY.items() if v == dense.DEFAULT_QUALITY)
+SUNLIGHT = {"off": False, "traced from the SfM mesh": True, "learned per Gaussian": "learned"}  # Splat tab → regularize["sun"]
 
 QUICK_SHORT = {"Cameras": "Cams", "Residuals": "Resid", "Trajectory": "Traj"}  # quick bar labels (two short rows)
 STAGE_HINTS = {
@@ -474,22 +475,8 @@ class App:
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
             self.g_buttons["analyze"] = self.subset.g_analyze
-            with gui.add_folder("Register more photos (for the splat)", expand_by_default=False):
-                gui.add_markdown(
-                    "After SfM: place more of the **extracted** photos (those not in use) into the model, without "
-                    "running SfM again, so the splat trains on a denser set. Each is matched to the model photos "
-                    "nearest in time and located (PnP, the model unchanged; ~3 s per 4K photo); its pose must agree "
-                    "with the flight's trajectory (the metadata + the refine's corrections, interpolated).")
-                self.g_reg_every = gui.add_number(
-                    "Of the unused photos, every", initial_value=1, min=1, max=100, step=1,
-                    hint="1 = all extracted photos not in use; 2 = every second of them; … (per flight, in time).")
-                b = gui.add_button("Register more photos", icon=viser.Icon.PHOTO_PLUS, hint=STAGE_HINTS["register"])
-                b.on_click(lambda _: self.run_stage("register"))
-                self.g_buttons["register"] = b
-                b = gui.add_button("Remove registered photos", icon=viser.Icon.TRASH,
-                                   hint="Back to the model's own photos: the registered ones leave transforms.json.")
-                b.on_click(lambda _: self._unregister())
-                self.g_reg_md = gui.add_markdown("")
+            self.register = RegisterPanel(self, gui)
+            self.g_buttons["register"] = self.register.g_run
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
                                hint="Runs features → pairs → match → refine → export in sequence (the SfM mesh is "
                                     "its own tab: Sparse Mesh). About 15-20 min on CPU for 300 images; matching dominates.")
@@ -709,15 +696,15 @@ class App:
                      "training image (the nearest per pixel; points seen through gaps dropped) and penalizes the "
                      "relative difference between the splat's rendered depth and theirs, so Gaussians stay on the "
                      "measured surfaces, also where the images lack texture. The points: the LiDAR cloud in ROS 2 "
-                     "bag projects (default 0.2), else the SfM points of the export (sparse_pc.ply, triangulated "
-                     "without the photos it left out; e.g. 0.2). 0 = off (plain splatfacto). The depth error is "
+                     f"bag projects (default {splat.DEFAULT_LIDAR_DEPTH:g}), else the SfM points of the export "
+                     "(sparse_pc.ply, triangulated without the photos it left out). 0 = off (plain splatfacto). The depth error is "
                      "reported in the log and History.")
             self.g_splat_mesh_prior = gui.add_checkbox(
                 "Depth prior: SfM mesh", initial_value=False, disabled=True,
                 hint="The depth loss measures against the SfM mesh's vertices (Sparse tab → Run SfM mesh, holes "
                      "patched) instead of the SfM points: evenly spaced, smoothed, and present in the patched holes. "
-                     "Ticked by itself once the project has an SfM mesh; ticking it sets Depth weight to 0.2 when it "
-                     "is 0.")
+                     "Ticked by itself once the project has an SfM mesh; ticking it sets Depth weight to "
+                     f"{splat.DEFAULT_LIDAR_DEPTH:g} when it is 0.")
             self.g_splat_mesh_prior.on_update(lambda _: self._mesh_prior_weight())
             self.g_splat_tile_mask = gui.add_checkbox(
                 "Tiles: train only the tile's pixels", initial_value=splat_tiles.TILE_MASK,
@@ -751,20 +738,26 @@ class App:
                      "and the opacity rendered in front of the sky is pulled to 0, so no Gaussians stand in for the "
                      "sky (domes and haze in front of the horizon, floaters over the scene). The sky then shows the "
                      "viewer's background. On by default for DJI projects.")
-            self.g_splat_sun = gui.add_checkbox(
-                "Sunlight learned per photo (no shadows in the splat)", initial_value=False,
-                hint="Light each training photo as ambient + direct sun, the sunlight per pixel traced from the SfM "
-                     "mesh (which surfaces face the sun, which lie in a shadow) at that photo's sun position (GPS + "
-                     "time), and learn the two (RGB) per photo. The splat then holds the scene in diffuse light: hard "
-                     "shadows and sunlit patches stay with the photos instead of being baked into the Gaussians, and "
-                     "flights in sun and under clouds agree. Needs the SfM mesh (Sparse Mesh tab) and DJI metadata; "
-                     "~0.2 s per photo once to trace the sunlight (kept in sfmmesh/sun_x<N>/). Experimental.")
+            self.g_splat_sunlight = gui.add_dropdown(
+                "Sunlight (shadows out of the splat)", options=tuple(SUNLIGHT), initial_value="off",
+                hint="Light each training photo as ambient + direct sun x the sunlight per pixel, the ambient and sun "
+                     "(RGB) learned per photo, so the splat holds the scene in diffuse light: hard shadows and sunlit "
+                     "patches stay with the photos instead of being baked into the Gaussians, and flights in sun and "
+                     "under clouds agree. The splat takes the look of the least-shadowed flight. Experimental "
+                     "(docs/todo_lighting.md). "
+                     "traced: the sunlight traced from the SfM mesh at each photo's sun (GPS + time); needs the SfM "
+                     "mesh (Sparse Mesh tab), ~0.2 s per photo once. On berlin_lighting it matched the real shadows "
+                     "only weakly. "
+                     "learned: every Gaussian learns whether it lies in shade, per flight (or 10-min piece of one); "
+                     "the least-shadowed flight is lit by its ambient only and sets the colours, the others' shade "
+                     "goes into that visibility. Works when a flight under clouds (or at another time of day) sees "
+                     "the same ground; ~+5 % training time. Needs DJI metadata (the photos' times).")
             self.g_splat_needle = gui.add_number(
                 "No needles (weight)", initial_value=splat.NEEDLE, min=0.0, step=0.01,
                 hint="Loss on each Gaussian's largest scale beyond 3x its middle one: no long needles / ribbons (the "
                      "flattening makes discs, but nothing keeps them from stretching along the ground texture; "
                      "kladno_dira: 30 % of the Gaussians over 5x). karlak 18k steps at 0.02: needles over 5x 30 % -> "
-                     "0.6 %, held-out PSNR the same (-0.04 dB), LPIPS 0.338 -> 0.353. 0 = off (default).")
+                     "0.6 %, held-out PSNR the same (-0.04 dB), LPIPS 0.338 -> 0.353. Default 0.01; 0 = off.")
             self.g_splat_exposure = gui.add_checkbox(
                 "Exposure from the metadata", initial_value=splat.EXPOSURE,
                 hint="Scale each training render by its photo's exposure (shutter x ISO / f-number², DJI metadata), "
@@ -988,7 +981,8 @@ class App:
             self.g_photo_md = gui.add_markdown("_Fly the camera path (quick bar **Fly**): the photo nearest to the "
                                                "flight's position shows here_")
         self._photo_shown = None
-        self.tiepoints.make_window()  # the Tie point window (floating, opened by the Tie points tab)
+        self.tiepoints.make_window(self.photo_panel)  # its second tab: the Tie point view (opened by the Tie points tab)
+        self.photo_panel_tab = "Photo"  # the tab the server last asked the browsers to show (show_tab)
         self._place_panels()
 
     def _place_panels(self):
@@ -1184,25 +1178,9 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _refresh_register(self):
-        """Sparse tab → Register more photos: how many are registered (and whether for this model)."""
-        if not self.path or not hasattr(self, "g_reg_md"):
-            return
-        from modelforge.sfm import register
-        n_pool = len(register.candidates(self.path)) if os.path.exists(os.path.join(self.path, "sparse", "refined",
-                                                                                    "images.bin")) else 0
-        reg = register.load(self.path) if n_pool or os.path.exists(os.path.join(self.path, register.DIR)) else None
-        stale = os.path.exists(os.path.join(self.path, register.DIR, "registered.json")) and reg is None
-        self.g_reg_md.content = (
-            f"{len(reg['images'])} photos registered into this model (in transforms.json)" if reg else
-            "⚠ the registered photos belong to an earlier model: register again" if stale else
-            f"{n_pool} extracted photos not in use" if n_pool else "no extracted photos outside the ones in use")
-
-    def _unregister(self):
-        from modelforge.sfm import register
-        if self.running:
-            return
-        register.remove(self.path)
-        self._refresh_register()
+        """Sparse tab → Register more photos: pool, analysis, status."""
+        if self.path and hasattr(self, "register"):
+            self.register.refresh()
 
     def _refresh_difix(self):
         """The Difix tab's status line and Undo (after a refinement, on a project switch)."""
@@ -1349,8 +1327,26 @@ class App:
             state, what = "idle", "idle"
         title = " · ".join(t for t in ("ModelForge", what, name) if t)
         notice = getattr(self, "_notice_last", "")  # "<n>|<text>": a new n = a browser notification
+        tab = getattr(self, "_tab_request", "")  # "<n>|<label>": a new n = the browsers click that tab
         return (f'<span id="mf-status" data-state="{state}" data-title="{html.escape(title, quote=True)}" '
-                f'data-notice="{html.escape(notice, quote=True)}"></span>')
+                f'data-notice="{html.escape(notice, quote=True)}" data-tab="{html.escape(tab, quote=True)}"></span>')
+
+    def show_tab(self, label):
+        """Make the browsers switch to the tab of this label (viser cannot select a tab from the server; the page
+        script, docker/patch_viser_page.py, clicks it). Used for the Photo window's Photo / Tie point tabs."""
+        n = int(getattr(self, "_tab_request", "0|").split("|", 1)[0] or 0) + 1
+        self._tab_request = f"{n}|{label}"
+        self.photo_panel_tab = label
+        try:
+            self.g_status_html.content = self._status_html()
+        except Exception:  # noqa: BLE001 - the 1 s status watcher sends it anyway
+            pass
+
+    def photo_tab(self):
+        """The Photo window back on its Photo tab at the photo's size (the Tie point view's Close)."""
+        self.photo_panel.set_width(PHOTO_PANEL_WIDTH)
+        self.photo_panel.set_height(round(PHOTO_PANEL_WIDTH / self.aspect) + 96)
+        self.show_tab("Photo")
 
     def _notice(self, text):
         """A browser notification (docker/patch_viser_page.py; in browsers that allowed them) and a History line."""
@@ -1819,7 +1815,7 @@ class App:
             self.g_state.content = (f"⏳ **queue entry {q['id']}** runs **{q['label']}** in this project, in its own "
                                     f"process: wait for it, or Queue → Stop entry")
             return
-        if self.project is None and stage != "all":  # the full pipeline extracts them itself
+        if self.project is None and stage not in ("all", "flightcheck"):  # the full pipeline extracts them itself
             self.g_state.content = "⚪ **no images yet**: extract them in the Ingest tab first"
             return
         if check_memory and self.project is not None:
@@ -1890,7 +1886,25 @@ class App:
         pipeline.LISTENERS.append(self._on_log)
         final = None
         try:
+            if stage == "flightcheck":  # Ingest tab, before extraction (dji/flight_check.py): no images needed
+                self._begin_stage("flight check", 0, 1)
+                self._flight_check()
+                final = (f"✅ **flight check finished** in {_fmt_s(time.time() - t0)} · {time.strftime('%H:%M:%S')}"
+                         "  \nIngest tab → Flight alignment: the measured offsets")
+                return
             if stage == "all" and self.project is None:
+                if self.ingest.flight_check_wanted():  # several flights: their altitude offsets from the images
+                    self._begin_stage("flight check", 0, 2)
+                    try:
+                        self._flight_check()
+                        used = self.ingest.apply_flight_check(only_auto=True)
+                        self._history("✅ **flight check** · altitude offsets " + (", ".join(
+                            f"{k} {v:+.1f} m" for k, v in used.items()) or "unchanged (too few shared points)"))
+                    except jobs.Cancelled:
+                        raise
+                    except Exception as e:  # noqa: BLE001 - the extraction goes on with the offsets it has
+                        self._history(f"⚠️ **flight check** skipped: `{e}`")
+                    self.ingest.plan_now()
                 self._begin_stage("extract", 0, 1)
                 self.ingest.extract_now()
                 self._history(f"✅ **extract** · {len(self.project.names)} images")
@@ -2035,7 +2049,7 @@ class App:
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
                 elif st == "register":
-                    self._in_job("modelforge.sfm.register:run", report=None, every=int(self.g_reg_every.value),
+                    self._in_job("modelforge.sfm.register:run", report=None, **self.register.job_kwargs(),
                                  token=worker.TOKEN, callbacks={"on_line": self._on_log, "on_progress": lambda k, n:
                                                                 self._on_count_progress("register", "photo", k, n)})
                     report = pipeline.Report(project)
@@ -2106,6 +2120,12 @@ class App:
         finally:
             pipeline.LISTENERS.remove(self._on_log)
             self._end_job(final, project)
+
+    def _flight_check(self):
+        self._in_job("modelforge.dji.flight_check:run", report=None, token=worker.TOKEN,
+                     callbacks={"on_line": self._on_log, "on_progress":
+                                lambda k, n: self._on_count_progress(self._job.get("label"), "step", k, n)})
+        self.ingest.show_flight_check()
 
     def _end_job(self, final, project):
         """A job ended (run here or re-attached): the state line, the buttons, Stop, the progress bar."""
@@ -2482,6 +2502,8 @@ class App:
         if self._stop_fly():
             return
         self._set_orbit(False)  # one camera driver at a time
+        if self.photo_panel_tab != "Photo":  # the Photo window shows the flight's photos, not the Tie point view
+            self.photo_tab()
         try:
             path = self._flight_path()
         except (ValueError, AttributeError) as e:
@@ -2603,7 +2625,7 @@ class App:
     def _regularize(self):
         """Splat tab → Flatten Gaussians, No needles, exposure, anti-aliased for splat.run (None when all off)."""
         reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
-               "sky": bool(self.g_splat_sky.value), "sun": bool(self.g_splat_sun.value),
+               "sky": bool(self.g_splat_sky.value), "sun": SUNLIGHT[self.g_splat_sunlight.value],
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
                "antialiased": bool(self.g_splat_antialiased.value)}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None
@@ -2802,7 +2824,7 @@ class App:
             traceback.print_exc()
 
     def _mesh_prior_weight(self):
-        """The SfM mesh prior needs a depth weight: 0.2 (splat.DEFAULT_LIDAR_DEPTH) when it is ticked at 0."""
+        """The SfM mesh prior needs a depth weight: splat.DEFAULT_LIDAR_DEPTH when it is ticked at 0."""
         if self.g_splat_mesh_prior.value and float(self.g_splat_depth.value) <= 0:
             self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH
 

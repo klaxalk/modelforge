@@ -346,36 +346,73 @@ def plan_windows(s, valid, num_images=None, spacing=None, window=0.5):
                      "num_images": n, "window": window}
 
 
-def select_sharpest(mp4, windows, n_frames):
-    """Single decode pass; keep the sharpest frame in each [a, b] window. Yields (frame, rgb, sharpness)."""
+def frame_times(mp4):
+    """Presentation time (s) of every video frame in display order, from the packets (no decoding)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+                          "-of", "csv=p=0", mp4], capture_output=True, text=True, check=True).stdout.split()
+    return np.sort(np.array([float(x.strip(",")) for x in out if x.strip(",") not in ("", "N/A")]))
+
+
+SEEK_FROM = 60  # frames: a range starting later is seeked to instead of decoded from the start
+SEEK_GAP = 300  # frames: a gap this long between two windows is seeked over (a new decoder) instead of decoded
+
+
+def decode_from(mp4, k0, pts=None):
+    """ffmpeg command piping rgb24 frames from frame k0 on. Before 2026-10-25 every frame up to k0 was decoded (trim
+    by frame index): 10+ min before the first image of a range late in a 33-min 4K clip. Now an accurate input seek to
+    half a frame before k0's time (ffmpeg drops the frames before it): identical frames (berlin_3_1 at 0 / 1 / 4321 /
+    9000 / 15001, a phone clip, dira.MP4 at 2000), 0.2-1.4 s instead of up to 53 s. pts: the frame times (DJI: the
+    djmd track's, equal to the video's), else read from the packets."""
+    head = ["ffmpeg", "-v", "error"]
+    tail = ["-i", mp4, "-map", "0:v:0", "-fps_mode", "passthrough"]
+    raw = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    if k0 < SEEK_FROM:
+        return head + tail + ["-vf", f"trim=start_frame={k0}"] + raw
+    t = frame_times(mp4) if pts is None or len(pts) <= k0 else np.asarray(pts, float)
+    if len(t) <= k0:
+        return head + tail + ["-vf", f"trim=start_frame={k0}"] + raw
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", mp4],
+                         capture_output=True, text=True).stdout.strip()
+    start = float(out) if out not in ("", "N/A") else 0.0
+    dt = float(np.median(np.diff(t[max(0, k0 - 50):k0 + 50]))) if len(t) > 1 else 1 / 30
+    return head + ["-ss", f"{max(0.0, t[k0] - start - 0.5 * dt):.6f}"] + tail + raw
+
+
+def select_sharpest(mp4, windows, n_frames, pts=None):
+    """Single decode pass; keep the sharpest frame in each [a, b] window. Yields (frame, rgb, sharpness).
+    pts: the video's frame times if known (decode_from)."""
     if not windows:
         return
     w, h = video_size(mp4)
-    # trim by frame index (not -ss) so frame numbering stays exact; frames before k0 are decoded but not piped
-    k0, k_last = windows[0][0], windows[-1][1]
-    p = subprocess.Popen(["ffmpeg", "-v", "error", "-i", mp4, "-map", "0:v:0", "-fps_mode", "passthrough",
-                          "-vf", f"trim=start_frame={k0}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                         stdout=subprocess.PIPE)
-    size = w * h * 3
-    wi, best, k = 0, None, k0
-    while wi < len(windows):
-        b = p.stdout.read(size)
-        if len(b) < size:
-            break
-        a_, b_ = windows[wi]
-        if k >= a_:
-            img = np.frombuffer(b, np.uint8).reshape(h, w, 3)
-            small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), (w // 4, h // 4), interpolation=cv2.INTER_AREA)
-            sharp = float(cv2.Laplacian(small, cv2.CV_64F).var())
-            if best is None or sharp > best[2]:
-                best = (k, img.copy(), sharp)
-        if k >= b_:
-            if best:
-                yield best
-            best, wi = None, wi + 1
-        k += 1
-    p.kill()
-    p.wait()
+    k0 = windows[0][0]
+    p = subprocess.Popen(decode_from(mp4, k0, pts), stdout=subprocess.PIPE)
+    try:  # finally: also when the caller stops early (Stop), which left ffmpeg running (2026-10-25)
+        size, wi, best, k = w * h * 3, 0, None, k0
+        while wi < len(windows):
+            if best is None and windows[wi][0] - k > SEEK_GAP:  # far to the next window: start decoding there
+                p.kill()
+                p.wait()
+                k = windows[wi][0]
+                p = subprocess.Popen(decode_from(mp4, k, pts), stdout=subprocess.PIPE)
+            b = p.stdout.read(size)
+            if len(b) < size:
+                break
+            a_, b_ = windows[wi]
+            if k >= a_:
+                img = np.frombuffer(b, np.uint8).reshape(h, w, 3)
+                small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), (w // 4, h // 4),
+                                   interpolation=cv2.INTER_AREA)
+                sharp = float(cv2.Laplacian(small, cv2.CV_64F).var())
+                if best is None or sharp > best[2]:
+                    best = (k, img.copy(), sharp)
+            if k >= b_:
+                if best:
+                    yield best
+                best, wi = None, wi + 1
+            k += 1
+    finally:
+        p.kill()
+        p.wait()
     if wi < len(windows):
         print(f"warning: video ended at frame {k} before window {wi} (djmd has {n_frames} packets)", file=sys.stderr)
 

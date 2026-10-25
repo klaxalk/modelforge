@@ -232,6 +232,23 @@ class IngestPanel:
                                                "summary shows which one each clip uses.")
             for h in (self.g_sampling, self.g_num, self.g_spacing, self.g_rotw, self.g_window, self.g_yaw):
                 h.on_update(lambda _: self._settings_changed())
+        self.g_fc = gui.add_folder("Flight alignment (several flights)", expand_by_default=False)
+        with self.g_fc:
+            gui.add_markdown(
+                "The flights' altitude offsets come from the drones' absolute altitude, which can be wrong (karlak3: "
+                "240 m low). The check measures them from the images: ~40 photos per flight where the flights look at "
+                "the same ground, matched across, refined with an offset per flight (a few minutes). Run full "
+                "pipeline does it by itself before extracting.")
+            self.g_fc_run = gui.add_button("Check flight alignment (images)", icon=viser.Icon.ARROWS_VERTICAL,
+                                           hint="Extracts a few photos per flight into flight_check/ (not the "
+                                                "project's images), matches them across the flights and refines "
+                                                "with an offset per flight. Runs as a job (Stop works).")
+            self.g_fc_run.on_click(lambda _: self.check_flights())
+            self.g_fc_md = gui.add_markdown("")
+            self.g_fc_use = gui.add_button("Use the measured altitude offsets", icon=viser.Icon.CHECK, disabled=True,
+                                           hint="Puts the measured offsets into each source's Altitude offset "
+                                                "(flights the check could not tie to the others keep theirs).")
+            self.g_fc_use.on_click(lambda _: self.apply_flight_check())
         self.g_plan_md = gui.add_markdown("")
         with gui.add_folder("Frame preview"):
             self.g_pv_source = gui.add_dropdown("Source", options=("-",), hint="Source to preview.")
@@ -318,6 +335,14 @@ class IngestPanel:
                                           hint="How many frames the djmd telemetry runs ahead of the video. "
                                                "Auto = estimated from the SRT, or without one from the video's "
                                                "optical flow (21.6 / 21.5 on the NEO2 sample).")
+                    alt = gui.add_text("Altitude offset [m]", initial_value="auto" if s.alt_offset is None
+                                       else f"{s.alt_offset:g}",
+                                       hint="Added to this flight's height above its takeoff (rel_alt), so flights "
+                                            "from different takeoff heights line up. auto = the difference of the "
+                                            "takeoff altitudes (abs_alt) against the first flight, refused when the "
+                                            "takeoffs are close but abs_alt says tens of metres apart (it can be "
+                                            "wrong: karlak3 read 240 m low). Or a number in metres; the refine "
+                                            "corrects the rest (per-flight offset).")
                     btn = gui.add_button_group("", options=("Preview", "Add piece", "Remove"),
                                                hint="Preview: show this source in Frame preview. Add piece: another "
                                                     "range of the same video. Remove: drop the source.")
@@ -325,11 +350,16 @@ class IngestPanel:
                 en.on_update(lambda _, k=k: self._enabled_changed(k))
                 lead.on_update(lambda _, k=k: self._lead_changed(k))
                 lead.visible = self.kind == "dji"
+                alt.on_update(lambda _, k=k: self._alt_changed(k))
+                alt.visible = self.kind == "dji"
                 btn.on_click(lambda e, k=k: self._source_action(k, e.target.value))
                 self._source_handles.append(f)
-                self._source_widgets.append({"md": md, "range": rng, "enabled": en, "lead": lead, "ready": False})
+                self._source_widgets.append({"md": md, "range": rng, "enabled": en, "lead": lead, "alt": alt,
+                                             "ready": False})
         self.g_sources_md.content = "" if self.sources else "Add a video above. Each source is a video and a time " \
             "range; add the same video again (\"Add piece\") to take several pieces."
+        self.g_fc.visible = self.kind == "dji" and len({s.video for s in self.sources if s.enabled}) >= 2
+        self.show_flight_check()
         self.g_pv_source.options = tuple(f"{k + 1}. {os.path.basename(s.video)}" for k, s in enumerate(self.sources)) \
             or ("-",)
         if self.g_pv_source.value not in self.g_pv_source.options:  # the previewed source is gone
@@ -350,7 +380,7 @@ class IngestPanel:
             self._rebuild_sources()
         elif action == "Add piece":
             s = self.sources[k]
-            self.sources.insert(k + 1, ingest.Source(s.video, s.start, s.end, s.enabled, s.lead, s.srt))
+            self.sources.insert(k + 1, ingest.Source(s.video, s.start, s.end, s.enabled, s.lead, s.srt, s.alt_offset))
             self._rebuild_sources()
         elif action == "Preview":
             self.g_pv_source.value = self.g_pv_source.options[k]
@@ -377,6 +407,73 @@ class IngestPanel:
         v = float(self._source_widgets[k]["lead"].value)
         self.sources[k].lead = None if v < 0 else v
         self.request_plan()
+
+    # ------------------------------------------------------------------ flight alignment (dji/flight_check.py)
+    def flight_check_wanted(self):
+        """Run full pipeline checks the flights first: DJI, two or more videos, an offset left on auto."""
+        en = [s for s in self.sources if s.enabled]
+        return self.kind == "dji" and len({s.video for s in en}) >= 2 and any(s.alt_offset is None for s in en)
+
+    def check_flights(self):
+        if self.running or self.app.running:
+            return
+        ingest.save_plan(self.path, self.sources, self.settings)  # the check reads ingest.json
+        self.app.run_stage("flightcheck")
+
+    def show_flight_check(self):
+        from modelforge.dji import flight_check
+        res = flight_check.load(self.path) if self.path else None
+        if not res:
+            self.g_fc_md.content, self.g_fc_use.disabled = "", True
+            return
+        lines = [f"**Last check** ({res['registered']} of {res['photos']} photos registered, {res['seconds']:.0f} s):"]
+        for f in res["flights"]:
+            lines.append(f"- {f['name']}: altitude offset **{f['alt_offset_m']:+.1f} m** (was {f['offset_used_m']:+.1f})"
+                         f" · {f['merged_points']} points shared"
+                         + ("" if f["trusted"] else " · ⚠ not trusted (too few shared points, or still moving)"))
+        for k, e in (res.get("apart") or {}).items():
+            x, y, z = e["apart_m"]
+            lines.append(f"- {k}: still {(x * x + y * y) ** 0.5:.1f} m apart horizontally (GPS; the refine "
+                         f"corrects it), {abs(z):.1f} m vertically")
+        self.g_fc_md.content = "  \n".join(lines)
+        self.g_fc_use.disabled = not any(f["trusted"] for f in res["flights"])
+
+    def apply_flight_check(self, only_auto=False):
+        """The measured offsets into the sources' Altitude offset (trusted flights; every piece of that video).
+        only_auto: leave offsets set by hand. Returns {video name: offset} applied."""
+        from modelforge.dji import flight_check
+        res = flight_check.load(self.path)
+        if not res:
+            return {}
+        done = {}
+        for f in res["flights"]:
+            if not f["trusted"]:
+                continue
+            for k, s in enumerate(self.sources):
+                if os.path.abspath(s.video) == os.path.abspath(f["video"]) and not (only_auto and s.alt_offset is not None):
+                    s.alt_offset = round(f["alt_offset_m"], 2)
+                    if k < len(self._source_widgets) and "alt" in self._source_widgets[k]:
+                        self._source_widgets[k]["alt"].value = f"{s.alt_offset:g}"
+                    done[f["name"]] = s.alt_offset
+        if done:
+            ingest.save_plan(self.path, self.sources, self.settings)
+            self.request_plan()
+        return done
+
+    def _alt_changed(self, k):
+        """Altitude offset: "auto" (or empty) = from the takeoff altitudes, else metres; anything else is left."""
+        w = self._source_widgets[k]["alt"]
+        text = w.value.strip().lower().replace(",", ".").replace("m", "").strip()
+        if text in ("", "auto"):
+            v = None
+        else:
+            try:
+                v = float(text)
+            except ValueError:
+                return  # half typed ("-", "1e"): wait for more
+        if v != self.sources[k].alt_offset:
+            self.sources[k].alt_offset = v
+            self.request_plan()
 
     def _settings_changed(self):
         if self._loading:
@@ -560,6 +657,11 @@ class IngestPanel:
         lines = []
         if n_img:
             extracted = self.app.project.meta.get("plan")
+            try:  # through the dataclasses: fields added later (alt_offset) take their defaults
+                extracted = {"sources": [asdict(ingest.Source(**x)) for x in extracted["sources"]],
+                             "settings": asdict(ingest.Settings(**extracted["settings"]))} if extracted else None
+            except (TypeError, KeyError):
+                pass
             same = extracted == {"sources": [asdict(s) for s in self.sources], "settings": asdict(self.settings)}
             lines.append(f"{n_img} images extracted" + ("" if same or extracted is None else
                          " · **the plan differs from the extracted images** (re-extract with overwrite)"))
@@ -719,6 +821,11 @@ class IngestPanel:
         self.g_extract.disabled = True
         self.g_progress.visible, self.g_progress.value = True, 0.0
         threading.Thread(target=self._extract, daemon=True).start()
+
+    def plan_now(self):
+        """Replan at once (after the flight check changed offsets; the planner thread would take a moment)."""
+        with self._lock:
+            self._replan()
 
     def extract_now(self):
         """Extract synchronously (full pipeline on a project without images); raises on failure."""

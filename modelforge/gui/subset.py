@@ -17,35 +17,90 @@ MODES = {"every N-th image": "every", "keyframes (from the analysis)": "keyframe
 DEFAULT_MODE = "keyframes (from the analysis)"  # a project that never chose a subset; Run full pipeline analyzes
 
 
+class Selection:
+    """The choice of extracted images: every N-th (with an offset and a time window) or keyframes at a density
+    (from the overlap analysis). Images used and Register more photos each have one (the user asked for the same
+    options in both, 2026-10-25)."""
+
+    def __init__(self, gui, mode=DEFAULT_MODE, level=overlap.DEFAULT_LEVEL, on_update=None):
+        self.g_mode = gui.add_dropdown(
+            "Selection", options=tuple(MODES), initial_value=mode,
+            hint="every N-th image: uniform along each source. keyframes (default; density dense): as few "
+                 "images as keep enough overlap between neighbours, measured on the images (Analyze below; "
+                 "Run full pipeline analyzes and selects by itself): fewer on straight cruising, more in turns "
+                 "and close passes. A project that chose every N-th image keeps it.")
+        self.g_every = gui.add_number(
+            "Keep every", initial_value=1, min=1, step=1,
+            hint="1 = all extracted images (in the time range), 2 = every other one, 3 = one in three, ... "
+                 "Counted per source in capture order.")
+        self.g_offset = gui.add_number(
+            "Starting at", initial_value=0, min=0, step=1,
+            hint="Which image of each source to start from (0 = the first): with Keep every 2, starting at 1 "
+                 "gives the other half.")
+        self.g_range = gui.add_multi_slider(
+            "Time range [s]", min=0.0, max=1.0, step=0.5, initial_value=(0.0, 1.0),
+            hint="Use only images inside this window of the project timeline (all sources).")
+        self.g_level = gui.add_dropdown(
+            "Keyframe density", options=tuple(overlap.LEVELS), initial_value=level,
+            hint="Minimum share of features a keyframe shares with the previous one, and half of that with "
+                 "the one before. Expected splat quality (held-out photos, kladno_dopravnik): "
+                 + "; ".join(f"{k} ({v:.2f}): {overlap.QUALITY[k]}" for k, v in overlap.LEVELS.items())
+                 + ".")
+        for g in (self.g_mode, self.g_every, self.g_offset, self.g_range, self.g_level):
+            g.on_update(lambda _: on_update and on_update())
+        self.g_mode.on_update(lambda _: self.show_mode())
+
+    def mode(self):
+        return MODES[self.g_mode.value]
+
+    def show_mode(self):
+        every = self.mode() == "every"
+        for g in (self.g_every, self.g_offset, self.g_range):
+            g.visible = every
+        self.g_level.visible = not every
+
+    def set_range(self, images):
+        """The time slider's bounds from the images; returns them."""
+        times = [im["time_s"] for im in images if im.get("time_s") is not None]
+        lo, hi = (math.floor(min(times)), math.ceil(max(times))) if times else (0.0, 1.0)
+        hi = max(hi, lo + 1)
+        self.g_range.min, self.g_range.max = float(lo), float(hi)
+        return lo, hi
+
+    def args(self, images, ov):
+        """apply_subsample / register keyword arguments: names (keyframes) or every / offset / start / end."""
+        if self.mode() == "keyframes":
+            level = self.g_level.value
+            names = overlap.select_keyframes(images, ov, overlap.LEVELS[level])
+            return dict(names=names, setting={"method": "keyframes", "level": level,
+                                              "min_overlap": overlap.LEVELS[level]})
+        lo, hi = self.g_range.value
+        full = lo <= self.g_range.min and hi >= self.g_range.max
+        return dict(every=int(self.g_every.value), offset=int(self.g_offset.value),
+                    start=None if full else float(lo), end=None if full else float(hi))
+
+    def names(self, images, ov):
+        a = self.args(images, ov)
+        return a["names"] if "names" in a else [images[k]["image"] for k in projects.subsample_selection(images, **a)]
+
+    def describe(self):
+        if self.mode() == "keyframes":
+            return f"keyframes ({self.g_level.value})"
+        lo, hi = self.g_range.value
+        full = lo <= self.g_range.min and hi >= self.g_range.max
+        return (f"every {int(self.g_every.value)}" + (f" from #{int(self.g_offset.value)}" if self.g_offset.value else "")
+                + ("" if full else f", {lo:g}–{hi:g} s"))
+
+
 class SubsetPanel:
     def __init__(self, app, gui):
         self.app = app
         self._images, self._overlap = [], None
         with gui.add_folder("Images used", expand_by_default=False):
             self.g_md = gui.add_markdown("")
-            self.g_mode = gui.add_dropdown(
-                "Selection", options=tuple(MODES), initial_value=DEFAULT_MODE,
-                hint="every N-th image: uniform along each source. keyframes (default; density dense): as few "
-                     "images as keep enough overlap between neighbours, measured on the images (Analyze below; "
-                     "Run full pipeline analyzes and selects by itself): fewer on straight cruising, more in turns "
-                     "and close passes. A project that chose every N-th image keeps it.")
-            self.g_every = gui.add_number(
-                "Keep every", initial_value=1, min=1, step=1,
-                hint="1 = all extracted images (in the time range), 2 = every other one, 3 = one in three, ... "
-                     "Counted per source in capture order.")
-            self.g_offset = gui.add_number(
-                "Starting at", initial_value=0, min=0, step=1,
-                hint="Which image of each source to start from (0 = the first): with Keep every 2, starting at 1 "
-                     "gives the other half.")
-            self.g_range = gui.add_multi_slider(
-                "Time range [s]", min=0.0, max=1.0, step=0.5, initial_value=(0.0, 1.0),
-                hint="Use only images inside this window of the project timeline (all sources).")
-            self.g_level = gui.add_dropdown(
-                "Keyframe density", options=tuple(overlap.LEVELS), initial_value=overlap.DEFAULT_LEVEL,
-                hint="Minimum share of features a keyframe shares with the previous one, and half of that with "
-                     "the one before. Expected splat quality (held-out photos, kladno_dopravnik): "
-                     + "; ".join(f"{k} ({v:.2f}): {overlap.QUALITY[k]}" for k, v in overlap.LEVELS.items())
-                     + ".")
+            self.sel = Selection(gui, on_update=self._preview)
+            self.g_mode, self.g_every, self.g_offset = self.sel.g_mode, self.sel.g_every, self.sel.g_offset
+            self.g_range, self.g_level = self.sel.g_range, self.sel.g_level
             self.g_analyze = gui.add_button(
                 "Analyze extracted images (optional)", icon=viser.Icon.ZOOM_CHECK,
                 hint="SIFT features of all extracted images and matches of each with the next "
@@ -61,18 +116,12 @@ class SubsetPanel:
                      "again. Keep every 1 over the whole range returns to all images. Run full pipeline applies "
                      "the panel's choice (keyframes or every N-th) by itself as its first step.")
             self.g_apply.on_click(lambda _: self.apply())
-            for g in (self.g_mode, self.g_every, self.g_offset, self.g_range, self.g_level):
-                g.on_update(lambda _: self._preview())
-            self.g_mode.on_update(lambda _: self._show_mode())
 
     def _mode(self):
-        return MODES[self.g_mode.value]
+        return self.sel.mode()
 
     def _show_mode(self):
-        every = self._mode() == "every"
-        for g in (self.g_every, self.g_offset, self.g_range):
-            g.visible = every
-        self.g_level.visible = not every
+        self.sel.show_mode()
 
     def refresh(self):
         """Load the open project's extracted images and show the current subset in the controls."""
@@ -82,10 +131,7 @@ class SubsetPanel:
         except (OSError, ValueError, KeyError):
             self._images, info = [], None
         self._overlap = overlap.load(self.app.path) if self.app.path else None
-        times = [im["time_s"] for im in self._images if im.get("time_s") is not None]
-        lo, hi = (math.floor(min(times)), math.ceil(max(times))) if times else (0.0, 1.0)
-        hi = max(hi, lo + 1)
-        self.g_range.min, self.g_range.max = float(lo), float(hi)
+        lo, hi = self.sel.set_range(self._images)
         st = (info or {}).get("setting") or {}
         # every N-th's fields are set whatever the mode: in keyframes mode (the default) they used to keep their
         # placeholders, so switching to every N-th selected the first second of the flight only (moric, 2026-10-22:
@@ -121,17 +167,11 @@ class SubsetPanel:
                                   f"{len(self._overlap['pairs']):,} verified pairs")
         self._show_mode()
         self._preview()
+        if getattr(self.app, "register", None) is not None:  # the same pool and analysis
+            self.app.register.refresh()
 
     def _args(self):
-        if self._mode() == "keyframes":
-            level = self.g_level.value
-            names = overlap.select_keyframes(self._images, self._overlap, overlap.LEVELS[level])
-            return dict(names=names, setting={"method": "keyframes", "level": level,
-                                              "min_overlap": overlap.LEVELS[level]})
-        lo, hi = self.g_range.value
-        full = lo <= self.g_range.min and hi >= self.g_range.max
-        return dict(every=int(self.g_every.value), offset=int(self.g_offset.value),
-                    start=None if full else float(lo), end=None if full else float(hi))
+        return self.sel.args(self._images, self._overlap)
 
     def _preview(self):
         if not self._images:
@@ -222,3 +262,94 @@ class SubsetPanel:
             self.refresh()
             self.g_preview.content = msg + "  \n" + self.g_preview.content
         threading.Thread(target=work, daemon=True).start()
+
+
+class RegisterPanel:
+    """Sparse tab → "Register more photos (for the splat)": after SfM, the photos of a Selection over the extracted
+    pool that are not in use are placed into the model (sfm/register.py) and added to transforms.json."""
+
+    def __init__(self, app, gui):
+        self.app = app
+        self._images, self._overlap = [], None
+        with gui.add_folder("Register more photos (for the splat)", expand_by_default=False):
+            gui.add_markdown(
+                "After SfM: place more of the **extracted** photos into the model, without running SfM again, so the "
+                "splat trains on a denser set. Choose them as in **Images used**; those of the choice already in "
+                "use are skipped. Each is matched to the model photos nearest in time and located (PnP, the model "
+                "unchanged; ~3 s per 4K photo); its pose must agree with the flight's trajectory (the metadata + "
+                "the refine's corrections, interpolated).")
+            self.sel = Selection(gui, level="extra dense", on_update=self._preview)
+            self.g_preview = gui.add_markdown("")
+            self.g_run = gui.add_button("Register more photos", icon=viser.Icon.PHOTO_PLUS,
+                                        hint="Place the photos chosen above (those not in use) into the refined model "
+                                             "and add them to transforms.json for the splat. A new refine makes them "
+                                             "stale: register again.")
+            self.g_run.on_click(lambda _: self.app.run_stage("register"))
+            self.g_remove = gui.add_button("Remove registered photos", icon=viser.Icon.TRASH,
+                                           hint="Back to the model's own photos: the registered ones leave "
+                                                "transforms.json.")
+            self.g_remove.on_click(lambda _: self.remove())
+            self.g_md = gui.add_markdown("")
+
+    def refresh(self):
+        """The open project's pool and analysis, the time range, the status."""
+        from modelforge.sfm import register
+        path = self.app.path
+        try:
+            self._images = projects.extracted_images(path) if path else []
+        except (OSError, ValueError, KeyError):
+            self._images = []
+        self._overlap = overlap.load(path) if path else None
+        lo0, hi0 = self.sel.g_range.value
+        lo, hi = self.sel.set_range(self._images)
+        if not (lo <= lo0 < hi0 <= hi) or (lo0, hi0) == (0.0, 1.0):  # keep a range chosen in this flight
+            self.sel.g_range.value = (float(lo), float(hi))
+        self.sel.show_mode()
+        self._preview()
+        if not path:
+            self.g_md.content = ""
+            return
+        reg = register.load(path)
+        stale = os.path.exists(os.path.join(path, register.DIR, "registered.json")) and reg is None
+        self.g_md.content = (
+            f"{len(reg['images'])} photos registered into this model (in transforms.json)"
+            + (f": {reg['stats']['selection']}" if reg.get("stats", {}).get("selection") else "") if reg else
+            "⚠ the registered photos belong to an earlier model: register again" if stale else "none registered")
+
+    def _in_use(self):
+        try:
+            return set(os.listdir(os.path.join(self.app.path, "images")))
+        except (OSError, TypeError):
+            return set()
+
+    def _preview(self):
+        has_model = bool(self.app.path) and os.path.exists(os.path.join(self.app.path, "sparse", "refined",
+                                                                        "images.bin"))
+        if not self._images or not has_model:
+            self.g_preview.content = "_needs extracted photos and an SfM model (Run SfM)_" if self.app.path else ""
+            self.g_run.disabled = True
+            return
+        if self.sel.mode() == "keyframes" and not self._overlap:
+            self.g_preview.content = ("keyframes need the analysis: **Images used → Analyze extracted images** "
+                                      "first, or choose every N-th")
+            self.g_run.disabled = True
+            return
+        names = self.sel.names(self._images, self._overlap)
+        used = self._in_use()
+        new = [n for n in names if n not in used]
+        self.g_preview.content = (f"→ **{len(new)}** photos to register ({len(names)} chosen, "
+                                  f"{len(names) - len(new)} of them in use)")
+        self.g_run.disabled = not new
+
+    def job_kwargs(self):
+        """register.run's selection + describe for the job."""
+        a = self.sel.args(self._images, self._overlap)
+        a.pop("setting", None)
+        return {"selection": a, "describe": self.sel.describe()}
+
+    def remove(self):
+        from modelforge.sfm import register
+        if self.app.running:
+            return
+        register.remove(self.app.path)
+        self.refresh()

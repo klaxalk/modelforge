@@ -331,3 +331,37 @@ def test_gui_every_nth_after_keyframes(tmp_path):
         assert f"→ **{len(range(0, n, 3))}** of {n} images" in s.g_preview.content, s.g_preview.content
     finally:
         app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "images.bin")),
+                    reason="needs a refined project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
+def test_gui_register_selection(tmp_path):
+    """Sparse tab → Register more photos chooses like Images used (the user asked, 2026-10-25): every N-th / time
+    range / keyframes over the pool, the photos in use skipped."""
+    from modelforge.gui.app import App
+    root = str(tmp_path)
+    real = os.path.join(root, "real")
+    shutil.copytree(os.path.join(REAL, "images"), os.path.join(real, "images"))
+    shutil.copy2(os.path.join(REAL, "poses.json"), os.path.join(real, "poses.json"))
+    names = [im["image"] for im in json.load(open(os.path.join(real, "poses.json")))["images"]]
+    projects.apply_subsample(real, every=3)
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), os.path.join(real, "sparse", "refined"))
+    app = App(real, port=free_port(), root=root)
+    try:
+        r, n = app.register, len(names)
+        used = len(range(0, n, 3))
+        r.sel.g_mode.value = "every N-th image"
+        r.sel.g_every.value = 1
+        assert f"→ **{n - used}** photos to register ({n} chosen, {used} of them in use)" in r.g_preview.content, \
+            r.g_preview.content
+        assert not r.g_run.disabled
+        r.sel.g_every.value = 3  # exactly the photos in use
+        assert "→ **0** photos" in r.g_preview.content and r.g_run.disabled
+        r.sel.g_offset.value = 1
+        kw = app.register.job_kwargs()
+        assert kw["selection"] == {"every": 3, "offset": 1, "start": None, "end": None}
+        assert kw["describe"] == "every 3 from #1"
+        r.sel.g_mode.value = "keyframes (from the analysis)"  # no analysis in this project
+        assert "Analyze" in r.g_preview.content and r.g_run.disabled
+    finally:
+        app.server.stop()

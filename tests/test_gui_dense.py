@@ -145,6 +145,10 @@ def test_tab_defaults(app):
     assert not app.g_dense_in_all.value  # the full pipeline's dense result is the splat mesh
     assert app.g_splat_cache.value == "auto" and app.g_splat_down.value == "auto"
     assert app.g_splat_strategy.value == "auto"
+    assert app.g_splat_sunlight.value == "off" and not (app._regularize() or {}).get("sun")
+    app.g_splat_sunlight.value = "learned per Gaussian"  # docs/todo_lighting.md: the sun visibility learned
+    assert app._regularize()["sun"] == "learned"
+    app.g_splat_sunlight.value = "off"
     app._refresh_splat_plan()  # auto values from the cameras, shown in the Splat tab
     t0 = time.time()
     while "Plan" not in app.g_splat_plan.content and time.time() - t0 < 30:

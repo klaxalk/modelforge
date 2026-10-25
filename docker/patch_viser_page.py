@@ -9,6 +9,9 @@ page; notifications need https or localhost).
 Clicks on an img[data-mf-click="<uuid>"] (gui/tiepoints.py: the Tie point window) are sent to the hidden text input
 of that uuid as "fx,fy,time" (fractions of the image's width / height).
 
+A change of #mf-status data-tab ("<n>|<label>", `App.show_tab`) clicks the tab of that label (viser cannot select a
+tab from the server): the Photo window's Photo / Tie point tabs.
+
 UPLOADER: streaming, resumable uploads (modelforge/gui/upload.py has the protocol): a file picked in an element with
 data-mf-upload="<target>" (gui/upload.widget) is sent in 1 MiB parts with at most 32 MiB beyond the server's
 acknowledgement, through viser's own message sender (window.__mfV, set by docker/patch_viser_camera.py, which also
@@ -23,16 +26,18 @@ from urllib.parse import quote
 
 BADGES = {"idle": "", "running": "#2ecc71", "failed": "#ff4d4f"}
 
-SCRIPT = """<script>(()=>{const I=%s;let s0="",n0=null;const f=()=>{const e=document.getElementById("mf-status");if(!e)return;
+SCRIPT = """<script>(()=>{const I=%s;let s0="",n0=null,t0=null;const f=()=>{const e=document.getElementById("mf-status");if(!e)return;
 const t=e.dataset.title||"ModelForge";if(document.title!==t)document.title=t;const s=e.dataset.state||"idle";
 if(s!==s0){s0=s;const l=document.getElementById("mf-icon");if(l)l.href=I[s]||I.idle;}
 const n=e.dataset.notice||"";if(n0===null){n0=n;}else if(n!==n0){n0=n;const k=n.indexOf("|");
 if(k>=0&&window.Notification&&Notification.permission==="granted"){try{new Notification("ModelForge",
-{body:n.slice(k+1),icon:I.idle});}catch(x){}}}};
+{body:n.slice(k+1),icon:I.idle});}catch(x){}}}
+const tb=e.dataset.tab||"";if(t0===null){t0=tb;}else if(tb!==t0){t0=tb;const lab=tb.slice(tb.indexOf("|")+1);
+for(const b of document.querySelectorAll('[role="tab"]')){if(b.textContent.trim()===lab){b.click();break;}}}};
 document.addEventListener("click",()=>{if(window.Notification&&Notification.permission==="default")
 Notification.requestPermission();},{once:true});
 new MutationObserver(f).observe(document.documentElement,{subtree:true,childList:true,attributes:true,
-attributeFilter:["data-title","data-state","data-notice"]});setInterval(f,2000);})()</script>"""
+attributeFilter:["data-title","data-state","data-notice","data-tab"]});setInterval(f,2000);})()</script>"""
 
 
 UPLOADER = """<script id="mf-upload">(()=>{

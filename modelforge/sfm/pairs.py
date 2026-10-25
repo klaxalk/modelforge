@@ -6,6 +6,12 @@ with the ground plane at takeoff height (z = -rel_alt of the ENU origin), capped
 at max_depth. Two views overlap when their look-at points are close relative to
 the viewing distance and their axes point in similar directions; this also pairs
 revisits of the same spot from different passes, and overlaps between videos.
+
+Several flights (2026-10-25): each flight's look-ats use its own takeoff height as the ground (ground_z per
+source: the reference's + that flight's altitude offset), and views of different flights are compared by their
+horizontal distance. A wrong altitude offset (karlak3: abs_alt 240 m low) then still pairs the flights, and the
+refine measures the true offset from those matches (robust.update_source_offsets); before, the flight's look-ats
+landed far from the others' and no pair between the flights was matched.
 """
 
 import os
@@ -54,14 +60,17 @@ class Terrain:
 
 def look_at_points(priors, ground_z, max_depth=150.0, terrain=None):
     """Each camera's look-at point: its optical axis meets the ground (the plane z = ground_z, or the terrain:
-    the first point along the axis at or below the surface), capped at max_depth."""
+    the first point along the axis at or below the surface), capped at max_depth. ground_z: one height, or
+    {source: height} (each flight's own takeoff height)."""
     names = sorted(priors, key=lambda n: priors[n].order)
     C = np.array([priors[n].center for n in names])
     A = np.array([priors[n].optical_axis for n in names])
     depth = np.full(len(names), max_depth)
     if terrain is None:
+        g = np.array([ground_z.get(priors[n].source, ground_z.get(0, 0.0)) for n in names], float) \
+            if isinstance(ground_z, dict) else np.full(len(names), float(ground_z))
         down = A[:, 2] < -1e-3
-        depth[down] = np.minimum((ground_z - C[down, 2]) / A[down, 2], max_depth)
+        depth[down] = np.minimum((g[down] - C[down, 2]) / A[down, 2], max_depth)
     else:
         steps = np.arange(1.0, max_depth + 1e-9, max(terrain.cell / 2, 0.25))
         for a in range(0, len(names), 500):
@@ -78,6 +87,7 @@ def select(priors, ground_z, seq_neighbors=5, spatial_neighbors=15, max_axis_ang
     names, P, A, depth = look_at_points(priors, ground_z, terrain=terrain)
     n = len(names)
     src = [priors[x].source for x in names]
+    src_arr = np.array(src)
     pairs = set()
     for i in range(n):
         for j in range(i + 1, min(n, i + 1 + seq_neighbors)):
@@ -85,7 +95,9 @@ def select(priors, ground_z, seq_neighbors=5, spatial_neighbors=15, max_axis_ang
                 pairs.add((i, j))
     cos_max = np.cos(np.radians(max_axis_angle_deg))
     for i in range(n):
-        d = np.linalg.norm(P - P[i], axis=1)
+        diff = P - P[i]
+        # another flight: horizontally (its altitude offset may be wrong; the refine measures it from the matches)
+        d = np.where(src_arr != src[i], np.linalg.norm(diff[:, :2], axis=1), np.linalg.norm(diff, axis=1))
         ok = (A @ A[i] > cos_max) & (d < overlap_factor * (depth + depth[i]))
         ok[i] = False
         cand = np.flatnonzero(ok)

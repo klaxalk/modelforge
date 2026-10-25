@@ -101,7 +101,7 @@ def depth_loss(depth, z, clamp=1.0, gate=0.0):
 @dataclass
 class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     _target: Type = field(default_factory=lambda: SplatfactoLidarModel)
-    lidar_depth_lambda: float = 0.2
+    lidar_depth_lambda: float = 0.1
     """weight of the LiDAR depth loss (0: only report the depth error)"""
     lidar_depth_clamp: float = 1.0
     """relative depth errors are clamped to this in the loss"""
@@ -138,6 +138,21 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     shadows and sun stay in the photos' lighting, not in the splat"""
     sun_light_blur: float = 0.004
     """the sun map smoothed by this share of the width (penumbra, the mesh's approximation of the casters)"""
+    sun_learned: bool = False
+    """sun_light with S learned instead of computed (docs/todo_lighting.md: the maps matched the real shadows only
+    weakly): every Gaussian holds a sun visibility per flight / time segment (gauss_params "mf_vis", logits; dataparser
+    metadata "sun_segment" per photo, -1 unknown = ambient only), rendered as an extra channel with the RGB pass's
+    footprints (detached: only the RGB loss moves the geometry); light = ambient_i + sun_i x v. Renders outside
+    training have no light: the scene in diffuse light"""
+    sun_ref_diffuse: bool = True
+    """sun_learned: the segments of the reference photos (the least-shadowed flight) are lit by their ambient only, so
+    they pin the Gaussians' colour and v holds only the other flights' shade (berlin_lighting: with a sun term the
+    overcast flight put 25 % of the Gaussians "in shade" by step 500: v as a free brightness per Gaussian and flight).
+    Kept when every segment is a reference (one flight)"""
+    sun_vis_init: float = 1.0
+    """starting logit of the visibility (sigmoid 0.73: mostly lit)"""
+    sun_vis_prior: float = 0.0
+    """weight of mean(1 - v) over the Gaussians: towards lit where nothing tells shade from a dark surface (0 = off)"""
 
 
 class SplatfactoLidarModel(SplatfactoModel):
@@ -166,7 +181,7 @@ class SplatfactoLidarModel(SplatfactoModel):
             print(f"[lidar] exposure gains for {len(self.exposure_gains or [])} training images (x{g.min():.2f} .. "
                   f"x{g.max():.2f})" if self.exposure_gains else "[lidar] use_exposure: no exposure gains in "
                   "transforms.json (frames mf_exposure)", flush=True)
-        self.sun_files = meta.get("sun_files") if self.config.sun_light else None
+        self.sun_files = meta.get("sun_files") if self.config.sun_light and not self.config.sun_learned else None
         self._sun_cache = {}  # (photo, H, W) -> its sunlight map at that size, blurred (CPU, float16)
         ref = meta.get("sun_ref")  # the photos whose ambient sets the splat's look (the most overcast flight)
         self.sun_ref = torch.tensor([bool(r) for r in ref]) if ref and any(ref) else None
@@ -177,8 +192,29 @@ class SplatfactoLidarModel(SplatfactoModel):
             print(f"[lidar] sun light: maps for {sum(f is not None for f in self.sun_files)} of {n} training images"
                   + (f"; the look of the {int(self.sun_ref.sum())} reference photos" if self.sun_ref is not None
                      else ""), flush=True)
-        elif self.config.sun_light:
+        elif self.config.sun_light and not self.config.sun_learned:
             print("[lidar] sun_light: no sun maps (dataparser --sun-maps)", flush=True)
+        seg = meta.get("sun_segment") if self.config.sun_light and self.config.sun_learned else None
+        self.sun_segment = seg if seg and max(seg) >= 0 else None
+        self.sun_diffuse = set()
+        if self.sun_segment:
+            n, k = len(self.sun_segment), max(self.sun_segment) + 1
+            refs = self.sun_ref.tolist() if self.sun_ref is not None else [False] * n
+            ref_segs = {g for g in set(self.sun_segment) if g >= 0 and all(r for g2, r in zip(self.sun_segment, refs)
+                                                                       if g2 == g)}
+            self.sun_diffuse = ref_segs if self.config.sun_ref_diffuse and len(ref_segs) < k else set()
+            self.mf_ambient = torch.nn.Parameter(torch.zeros(n, 3))  # log, per photo
+            self.mf_sun = torch.nn.Parameter(torch.full((n, 3), -1.0))  # log
+            self.gauss_params["mf_vis"] = torch.nn.Parameter(
+                torch.full((len(self.gauss_params["means"]), k), float(self.config.sun_vis_init)))
+            print(f"[lidar] sun light learned: a visibility per Gaussian for {k} flight / time segments, "
+                  f"{sum(s >= 0 for s in self.sun_segment)} of {n} training images"
+                  + (f", segment(s) {sorted(self.sun_diffuse)} (the reference) in ambient light only"
+                     if self.sun_diffuse else "")
+                  + (f"; the look of the {int(self.sun_ref.sum())} reference photos" if self.sun_ref is not None
+                     else ""), flush=True)
+        elif self.config.sun_learned:
+            print("[lidar] sun_learned: no segments (dataparser --sun-maps folder with segments.json)", flush=True)
         if self.mask_files:
             print(f"[lidar] loss masks for {sum(f is not None for f in self.mask_files)} of {len(self.mask_files)} "
                   "training images", flush=True)
@@ -222,9 +258,33 @@ class SplatfactoLidarModel(SplatfactoModel):
         S = S.to(amb.device, non_blocking=True).float()
         return amb.view(1, 1, 3) + sun.view(1, 1, 3) * S[..., None]
 
+    def _sun_learned_light(self, idx, H, W):
+        """(H, W, 3) light of training photo idx from the learned visibility: ambient + sun x v, v rendered with the
+        footprints of the RGB pass just made (self.info), detached; uncovered pixels lit."""
+        from gsplat import rasterize_to_pixels
+        amb = torch.exp(self.mf_ambient[idx]).view(1, 1, 3)
+        seg = self.sun_segment[idx] if idx < len(self.sun_segment) else -1
+        if seg < 0 or seg in self.sun_diffuse:
+            return amb.expand(H, W, 3)
+        info = self.info
+        vis = torch.sigmoid(self.gauss_params["mf_vis"][:, seg])[None, :, None]  # [1, N, 1]
+        v, a = rasterize_to_pixels(info["means2d"].detach(), info["conics"].detach(), vis,
+                                   info["opacities"].detach(), info["width"], info["height"], info["tile_size"],
+                                   info["isect_offsets"], info["flatten_ids"])
+        v = (v[0] + (1 - a[0].detach())).clamp(0, 1)  # (H, W, 1)
+        if v.shape[:2] != (H, W):
+            v = F.interpolate(v.permute(2, 0, 1)[None], size=(H, W), mode="bilinear")[0].permute(1, 2, 0)
+        return amb + torch.exp(self.mf_sun[idx]).view(1, 1, 3) * v
+
+    def get_gaussian_param_groups(self):
+        gps = super().get_gaussian_param_groups()
+        if "mf_vis" in self.gauss_params:
+            gps["mf_vis"] = [self.gauss_params["mf_vis"]]
+        return gps
+
     def get_param_groups(self):
         gps = super().get_param_groups()
-        if self.sun_files:
+        if self.sun_files or self.sun_segment:
             gps["mf_light"] = [self.mf_ambient, self.mf_sun]
         return gps
 
@@ -239,13 +299,15 @@ class SplatfactoLidarModel(SplatfactoModel):
 
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
-        if self.training and (self.exposure_gains or self.sun_files):
+        if self.training and (self.exposure_gains or self.sun_files or self.sun_segment):
             idx = (camera.metadata or {}).get("cam_idx")
             if idx is not None:
                 lin = out["rgb"].clamp(1e-6, 1) ** 2.2  # sRGB-like camera response, approximated by a gamma
                 if self.exposure_gains:
                     lin = lin * float(self.exposure_gains[int(idx)])
-                if self.sun_files:
+                if self.sun_segment:
+                    lin = lin * self._sun_learned_light(int(idx), *lin.shape[:2])
+                elif self.sun_files:
                     lin = lin * self._sun_light(int(idx), *lin.shape[:2])
                 out["rgb"] = lin.clamp(1e-6, 1) ** (1 / 2.2)
         if self.training and self.mask_files:
@@ -298,10 +360,16 @@ class SplatfactoLidarModel(SplatfactoModel):
                 mm = F.interpolate(m[None, None].float(), size=(H, W), mode="nearest")[0, 0].to(target.device) > 0.5
                 outputs = dict(outputs, lidar_depth=torch.where(mm[:, :, None], target, torch.zeros_like(target)))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
-        if self.training and self.sun_files:  # the scale between the Gaussians' colour and the light: the reference
+        if self.training and (self.sun_files or self.sun_segment):  # the scale between the Gaussians' colour and the light: the reference
             # photos' (the most overcast flight's) mean ambient 1, so the splat looks like them; else all photos'
             amb = self.mf_ambient[self.sun_ref.to(self.mf_ambient.device)] if self.sun_ref is not None else self.mf_ambient
             loss["mf_light_gauge"] = 0.1 * amb.mean() ** 2
+        if self.training and self.sun_segment:
+            if self.config.sun_vis_prior > 0:
+                loss["sun_vis_prior"] = self.config.sun_vis_prior * (1 - torch.sigmoid(self.gauss_params["mf_vis"])).mean()
+            every = self.config.lidar_report_every
+            if every and (self.step + 1) % every == 0:
+                self._sun_report()
         if sky_loss is not None:
             loss["sky_alpha"] = sky_loss
         if self.training and self.config.flatten_lambda > 0:
@@ -326,6 +394,22 @@ class SplatfactoLidarModel(SplatfactoModel):
                 loss["lidar_depth_loss"] = self.config.lidar_depth_lambda * term
             self._report(rel.detach(), gated)
         return loss
+
+    @torch.no_grad()
+    def _sun_report(self):
+        """[sun] per segment: photos, median ambient / sun (grey), share of the Gaussians in shade (v < 0.5)."""
+        seg = torch.tensor(self.sun_segment)
+        v = torch.sigmoid(self.gauss_params["mf_vis"])
+        amb, sun = torch.exp(self.mf_ambient).mean(1).cpu(), torch.exp(self.mf_sun).mean(1).cpu()
+        parts = []
+        for k in range(v.shape[1]):
+            m = seg == k
+            if m.any() and k in self.sun_diffuse:
+                parts.append(f"segment {k}: {int(m.sum())} photos, ambient {amb[m].median():.2f} (reference, no sun)")
+            elif m.any():
+                parts.append(f"segment {k}: {int(m.sum())} photos, ambient {amb[m].median():.2f} sun "
+                             f"{sun[m].median():.2f}, shade {100 * (v[:, k] < 0.5).float().mean():.1f}%")
+        print(f"[sun] step {self.step + 1}: " + "; ".join(parts), flush=True)
 
     def _report(self, rel, gated=0.0):
         if len(rel) > 4000:
@@ -352,6 +436,7 @@ def _method(base, name, description):
     cfg.pipeline.datamanager.dataparser = LidarDataParserConfig()
     from nerfstudio.engine.optimizers import AdamOptimizerConfig
     cfg.optimizers["mf_light"] = {"optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15), "scheduler": None}  # sun_light
+    cfg.optimizers["mf_vis"] = {"optimizer": AdamOptimizerConfig(lr=0.02, eps=1e-15), "scheduler": None}  # sun_learned
     return MethodSpecification(config=cfg, description=description)
 
 

@@ -144,11 +144,12 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    Videos tab and Ingest tab "＋ Upload video / SRT / ROS bag": 1 MiB parts over the GUI's websocket straight to `.<name>.mfupload` on disk, ≤ 32 MiB in
    flight, resumes after a dropped connection, a reload or a GUI restart (pick the same file again); interrupted ones
    listed in the Videos tab (`modelforge/gui/upload.py`, the page's UPLOADER): `docs/todo_upload.md`.
-6. **Manual tie points: done 2026-10-25** (the user asked): left tab Tie points + the Tie point window (Ctrl + click a
+6. **Manual tie points: done 2026-10-25** (the user asked): left tab Tie points + the Photo window's Tie point tab (merged into it 2026-10-25; Ctrl + click a
    spot, open the photos that see it, click to zoom, click to record; 2+ clicks per flight / pass), Refine again; they
    measure how far apart passes are and feed the per-flight offset (overriding SIFT there), the drift and the chunked
    loop closures (as BA residuals they only bent the clicked cameras): `docs/todo_tie_points.md`.
-7. **Register more photos into an SfM model: done 2026-10-25** (the user asked): Sparse tab → Register more photos: the
+7. **Register more photos into an SfM model: done 2026-10-25** (the user asked; the photos chosen like Images used:
+   every N-th / time range / keyframes at a density, those in use skipped): Sparse tab → Register more photos: the
    unused extracted photos located by PnP against the fixed model (0.67 px on kladno_dopravnik; the metadata + the
    refine's interpolated corrections alone 2.0 px median, up to 33: the check), added to transforms.json for the splat:
    `docs/todo_register_more.md`.
@@ -714,6 +715,23 @@ Multiple sources:
   altitudes, median(`abs_alt` − `rel_alt`). On the sample clip that value is
   −31.011 m with zero spread, i.e. constant per flight. Pieces of the same
   flight get 0.
+  - **Refused when implausible** (2026-10-25, `ingest.takeoff_offset`): takeoffs (each clip's lowest sample, if
+    rel_alt < 3 m) within 100 m horizontally and |offset| > 20 m + half that distance → 0 + an Ingest warning. karlak3
+    (NEO2, taking off 10 m from karlak_1) read abs_alt 240 m low: it was put 240 m under the other flights (no
+    cross-flight pairs). karlak's poses were corrected in place (backup `previous/altfix_20261025/`).
+  - **By hand:** Ingest tab → source → "Altitude offset [m]" (auto or metres; `Source.alt_offset`).
+  - **Pairs no longer depend on the offset** (2026-10-25, `pairs` module doc): each flight's look-ats use its own
+    takeoff height, flights are compared horizontally. On karlak with the wrong −240 m: before 0 pairs to karlak3,
+    now exactly the pairs of the corrected poses. The refine's split-point offset then recovers any size (synthetic
+    shift of 100x the scene scale: 5 mm in round 0; `test_source_offset_is_recovered`).
+  - **Check flight alignment** (`modelforge/dji/flight_check.py`; Ingest tab → Flight alignment, stage
+    `flightcheck`; Run full pipeline runs it before extracting a multi-flight DJI project and applies the trusted
+    offsets to sources on auto): look-at cells (25 m) shared by 2+ flights, runs of 3 frames 10 apart per cell,
+    42 photos per flight → `PROJECT/flight_check/` (extract, features, every pair, match, refine with **vertical-only**
+    per-flight offsets, 6 rounds) → result.json; trusted = >= 50 points shared and the last round moved < 1 m.
+    karlak (karlak3 started at −240.04): karlak3 → +1.59 m, karlak_2 1.67 → 0.78 m (full SfM said ≈ 3.2), copies
+    <= 1 m apart, 536 s. Single frames per cell (first version) left horizontal offsets swinging by tens of metres;
+    free horizontal offsets swung too (near-horizontal views: far points, depth error horizontal).
 - **One spacing for all.** S_total over all sources / N, so images spread in
   proportion to each piece's distance + rotation. w is one value for the
   project.
@@ -740,6 +758,11 @@ How the extractor works (per video):
     π/180, assuming flat ground at takeoff height. `--rot-weight 0` gives pure
     distance.
   - `--sampling time` uses the same N/spacing interface on video time.
+- **A range late in a clip is seeked to** (`extract.decode_from`, 2026-10-25): an accurate input seek to half a frame
+  before the first wanted frame's time (DJI: the djmd times, equal to the video's; video kind: the packets' times,
+  `frame_times`). Before, every frame up to it was decoded: kladno_dopravnik's range at 975 s of the 4K dira.MP4
+  wrote no image in 10+ min; now 150 images in 48 s, frames byte-identical (`tests/test_extract_seek.py`). Stop now
+  also ends the decoder (it was left running).
 - Camera attitude = yaw from the aircraft + pitch/roll from the gimbal.
   `--yaw-source gimbal` exists only for models whose gimbal can yaw.
 
@@ -1702,8 +1725,9 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
   vertices (`sfmmesh/mesh.ply`, patched if done; ~0.11 m spacing on kladno_dira) instead of the SfM points: the
   lidar-data dataparser's `--depth-ply` (`splat.train_command(depth_cloud=)`, `splat.run / resume`,
   `splat_tiles.run`: the whole mesh for every tile; stored in resume.json / tiles.json). Ticking the prior (by itself
-  or by hand) sets Depth weight to 0.2 when it is 0 (`App._mesh_prior_weight`; the user asked for 0.2 as the prior's
-  default); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags.
+  or by hand) sets Depth weight to `splat.DEFAULT_LIDAR_DEPTH` when it is 0 (`App._mesh_prior_weight`; **0.1 since
+  2026-10-25**, the user's choice; 0.2 before); without a mesh the weight stays 0 (no depth loss) except for ROS 2 bags
+  (0.1 too). **No needles default 0.01** since 2026-10-25 (the user's choice; `splat.NEEDLE`, was off).
 - **Starting Gaussians from the SfM mesh** (the user asked, 2026-10-22: single-pass flat ground stayed empty; Splat
   tab "Start from the SfM mesh too", default on when the mesh exists; CLI `--seed-mesh`; `splat.run(seed_mesh=)`,
   also tiles / resume): `sfm_mesh.seed_points` spreads points evenly over the mesh (holes patched; spacing = its SfM

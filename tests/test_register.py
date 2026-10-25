@@ -54,3 +54,23 @@ def test_registered_poses_match_the_model(tmp_path):
     register.remove(str(p))
     assert len(json.load(open(p / "transforms.json"))["frames"]) == len(t0["frames"])
     assert not (p / register.DIR).exists()
+
+
+def test_candidates_from_a_selection(tmp_path):
+    """The Images used choices over the whole pool (the user asked, 2026-10-25), minus the photos in use."""
+    from modelforge.sfm import register
+    p = tmp_path / "proj"
+    (p / "images").mkdir(parents=True)
+    (p / "extracted").mkdir()
+    recs = [{"image": f"a_{k:03d}.jpg", "source": 0, "time_s": float(k)} for k in range(20)]
+    json.dump({"images": recs}, open(p / "extracted" / "poses.json", "w"))
+    for k in range(0, 20, 2):  # every second photo in use
+        (p / "images" / recs[k]["image"]).touch()
+    names = lambda rs: [r["image"] for r in rs]  # noqa: E731
+    assert len(register.candidates(str(p))) == 10  # all unused
+    assert names(register.candidates(str(p), selection={"every": 1})) == [f"a_{k:03d}.jpg" for k in range(1, 20, 2)]
+    assert register.candidates(str(p), selection={"every": 2}) == []  # the same photos as in use
+    assert names(register.candidates(str(p), selection={"every": 3, "offset": 1, "start": 0, "end": 10})) == \
+        ["a_001.jpg", "a_007.jpg"]  # 1, 4, 7, 10 chosen; 4 and 10 in use
+    assert names(register.candidates(str(p), selection={"names": ["a_002.jpg", "a_003.jpg", "zz.jpg"]})) == \
+        ["a_003.jpg"]

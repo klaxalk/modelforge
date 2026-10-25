@@ -37,13 +37,24 @@ def _model_key(project):
     return {"size": st.st_size, "mtime": st.st_mtime}
 
 
-def candidates(project, every=1):
-    """Pool records (extracted/poses.json images) not in use, every `every`-th per source in capture order."""
+def candidates(project, every=1, selection=None):
+    """Pool records (extracted/poses.json images) not in use, every `every`-th per source in capture order. With
+    selection, a choice over the whole pool as Sparse tab → Images used makes it (the user asked, 2026-10-25):
+    {"names": [...]} (keyframes at a density, overlap.select_keyframes) or {"every", "offset", "start", "end"}
+    (projects.subsample_selection); its photos not in use."""
     pool = os.path.join(project, "extracted", "poses.json")
     if not os.path.exists(pool):
         return []
     used = set(os.listdir(os.path.join(project, "images")))
-    recs = [r for r in json.load(open(pool))["images"] if r["image"] not in used]
+    allr = json.load(open(pool))["images"]
+    if selection is not None:
+        from modelforge import projects
+        if "names" in selection:
+            pick = set(selection["names"])
+            return [r for r in allr if r["image"] in pick and r["image"] not in used]
+        keep = projects.subsample_selection(allr, **selection)
+        return [allr[k] for k in keep if allr[k]["image"] not in used]
+    recs = [r for r in allr if r["image"] not in used]
     out = []
     for s in sorted({r.get("source", 0) for r in recs}):
         rs = sorted((r for r in recs if r.get("source", 0) == s), key=lambda r: r.get("time_s", 0.0))
@@ -61,13 +72,14 @@ def load(project):
         return None
 
 
-def run(project, every=1, on_line=print, on_progress=None, token=None):
-    """Register every `every`-th unused pool photo into PROJECT's refined model. Returns the stats."""
+def run(project, every=1, on_line=print, on_progress=None, token=None, selection=None, describe=None):
+    """Register every `every`-th unused pool photo (or those of `selection`, see candidates) into PROJECT's refined
+    model. Returns the stats."""
     from modelforge import evaluate
     t0 = time.time()
-    cands = candidates(project, every)
+    cands = candidates(project, every, selection)
     if not cands:
-        raise RuntimeError("no extracted photos outside the ones in use (Images used: all of them are in use)")
+        raise RuntimeError("no extracted photos to register: the selection holds only photos in use")
     on_line(f"register: {len(cands)} photos of the extracted pool into the model")
     out_dir = os.path.join(project, DIR)
     located = evaluate.locate(project, os.path.join(project, "extracted", "images"), cands,
@@ -106,7 +118,7 @@ def run(project, every=1, on_line=print, on_progress=None, token=None):
             except OSError:
                 shutil.copy2(os.path.join(project, "extracted", "images", n), dst)
     inl = [v["inliers"] for v in imgs.values()]
-    stats = {"tried": len(cands), "registered": len(imgs), "every": int(every),
+    stats = {"tried": len(cands), "registered": len(imgs), "every": int(every), "selection": describe,
              "not_located": len(cands) - len(located), "off_trajectory": len(far),
              "inliers_median": int(np.median(inl)) if inl else 0,
              "error_px_median": round(float(np.median([v["error_px"] for v in imgs.values()

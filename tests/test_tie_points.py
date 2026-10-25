@@ -46,7 +46,10 @@ def test_tab_records_a_spot(tmp_path):
         tpp = app.tiepoints
         tpp.on_pick(X)
         assert len(tpp.candidates) >= 2 and tpp.g_photos.value == tpp.candidates[0][0]
+        assert app.photo_panel_tab == "Photo"
         tpp._photo_button("Open photo")
+        # the Tie point view is a tab of the Photo window: the browsers are asked to switch to it (page script)
+        assert app.photo_panel_tab == "Tie point" and 'data-tab="1|Tie point"' in app.g_status_html.content
         name = tpp.view["name"]
         iid = next(i for i in rec.reg_image_ids() if rec.image(i).name == name)
         q = tp.project(rec, iid, X)
@@ -62,5 +65,8 @@ def test_tab_records_a_spot(tmp_path):
         assert 'data-mf-click="' in tpp.g_img.content
         tpp._photo_button("▶")
         assert tpp.view["name"] != name
+        app.photo_tab()  # Close: back to the flight's Photo tab
+        assert app.photo_panel_tab == "Photo" and 'data-tab="' in app.g_status_html.content
+        assert '|Photo"' in app.g_status_html.content
     finally:
         app.server.stop()

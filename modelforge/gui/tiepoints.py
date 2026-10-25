@@ -1,8 +1,8 @@
 """Tie points tab and window (the user asked, 2026-10-25: human in the loop SfM; modelforge/sfm/tie_points.py).
 
 Workflow: after a first SfM, find a spot where flights did not merge; Ctrl + click it in the 3D view: the photos that
-see it are listed, nearest first, by flight; open one: the Tie point window shows it whole, a click zooms in around
-that spot (ZOOM x), a second click records the spot's pixel. Two or more clicks per flight (or pass) on the same
+see it are listed, nearest first, by flight; open one: the Photo window's Tie point tab shows it whole, a click
+zooms in around that spot (ZOOM x), a second click records the spot's pixel. Two or more clicks per flight (or pass) on the same
 physical spot make the tie point; Refine again (refine + export) uses them. Markers: yellow = the Ctrl + clicked
 spot, cyan = where the tie point's clicks so far put it, green = this photo's own click.
 
@@ -20,7 +20,8 @@ import viser
 
 from modelforge.sfm import tie_points as tp
 
-WINDOW_WIDTH = 960  # px of the Tie point window
+WINDOW_WIDTH = 960  # px of the Photo window while it shows the Tie point tab
+TAB = "Tie point"  # its tab in the Photo window
 ZOOM = 5  # the zoomed view shows 1 / ZOOM of the photo's width
 PER_FLIGHT = 8  # candidate photos listed per flight
 
@@ -50,7 +51,7 @@ class TiePointsPanel:
                                          hint="The registered photos the Ctrl + clicked spot (or the tie point) "
                                               "projects into, nearest first, per flight.")
         row = gui.add_button_group("", options=("◀", "Open photo", "▶"),
-                                   hint="Open the photo in the Tie point window; ◀ ▶ the previous / next one.")
+                                   hint="Open the photo in the Photo window (its Tie point tab); ◀ ▶ the previous / next one.")
         row.on_click(lambda e: self._photo_button(e.target.value))
         b = gui.add_button("Refine again (refine + export)", icon=viser.Icon.REFRESH,
                            hint="Run the refine with the tie points (features and matches are kept), then the export. "
@@ -60,20 +61,19 @@ class TiePointsPanel:
         self.panel = None
         self.refresh()
 
-    def make_window(self):
-        """The floating Tie point window (top level: App calls it outside the left panel's tabs)."""
+    def make_window(self, panel):
+        """The Tie point view: a tab of the Photo window (App.photo_panel, the user asked, 2026-10-25; it was a
+        window of its own). App calls it outside the left panel's tabs."""
         app = self.app
-        self.panel = app.server.gui.add_panel()
-        with self.panel.add_tab("Tie point", viser.Icon.TARGET):
+        self.panel = panel
+        with panel.add_tab(TAB, viser.Icon.TARGET):
             self.g_img = app.server.gui.add_html("")
             self.g_info = app.server.gui.add_markdown("")
             row = app.server.gui.add_button_group("", options=("Zoom out", "Remove this click", "Close"))
             row.on_click(lambda e: {"Zoom out": self._zoom_out, "Remove this click": self._remove_click,
-                                    "Close": self.panel.minimize}[e.target.value]())
+                                    "Close": self.app.photo_tab}[e.target.value]())
             self.g_click = app.server.gui.add_text("tie click", initial_value="", visible=False)
             self.g_click.on_update(lambda e: self._clicked(e.target.value))
-        self.panel.float(x=460, y=160, width=WINDOW_WIDTH + 24, height=round(WINDOW_WIDTH * 9 / 16) + 150)
-        self.panel.minimize()
 
     # --- state ------------------------------------------------------------------------------------------------
     def _project(self):
@@ -254,6 +254,10 @@ class TiePointsPanel:
                                + ("zoomed in: click the spot to record it" if zoomed else
                                   "click the spot to zoom in there")
                                + (f" · already clicked here ({own['x']:.0f}, {own['y']:.0f})" if own else ""))
+        if self.app.photo_panel_tab != TAB:  # the Photo window at the tie point size (kept while it stays here)
+            self.panel.set_width(WINDOW_WIDTH + 24)
+            self.panel.set_height(round(WINDOW_WIDTH * 9 / 16) + 150)
+        self.app.show_tab(TAB)  # also when the user went to the Photo tab meanwhile
         self.panel.expand()
 
     def _clicked(self, value):

@@ -41,8 +41,10 @@ def make_two_source_scene(tmp_path, offset, seed=0, n=40):
     return db_path, str(tmp_path / "images"), priors, gt
 
 
-def test_source_offset_is_recovered(tmp_path):
-    offset = np.array([0.6, -0.4, 0.3])  # cameras are ~5 units from the points
+@pytest.mark.parametrize("offset", [(0.6, -0.4, 0.3),  # cameras are ~5 units from the points
+                                    (0.0, 0.0, -100.0)])  # a wrong altitude offset: karlak3, 240 m at ~10 m flying
+def test_source_offset_is_recovered(tmp_path, offset):
+    offset = np.array(offset)
     db_path, image_path, pri, gt = make_two_source_scene(tmp_path, offset)
     model = robust.PriorModel(abs_sigmas=PriorSigmas(0.05, 0.05, 0.2, 0.2), calibrate=False,
                               estimate_systematic=False)
@@ -89,6 +91,27 @@ def test_pairs_and_relative_links_stay_within_sources():
     assert any(pri[a].source != pri[b].source for a, b in both)  # overlap still pairs the videos
     rel = robust.consecutive_pairs(pri, list(pri))
     assert len(rel) == 18 and all(pri[a].source == pri[b].source for a, b in rel)
+
+
+def test_pairs_ignore_a_wrong_altitude_offset():
+    """Two flights over the same ground at 10 m, the second put 240 m too low by a wrong altitude offset (karlak3;
+    before, its look-ats landed far from the first's and no pair joined the flights): with each flight's own
+    takeoff height as its ground (its offset applied) and the horizontal distance across flights, they are paired
+    exactly as with the right offset (the refine then measures it)."""
+    R = np.diag([1.0, -1.0, -1.0])  # looking down
+    pri = {}
+    for k in range(20):
+        src = k // 10
+        C = np.array([(k % 10) * 1.0, 0.0, 10.0 - (240.0 if src else 0.0)])
+        pri[f"v{src}_{k}"] = Prior.from_pose(f"v{src}_{k}", k % 10, float(k % 10), R, C, source=src, order=k)
+    cross = lambda pp: [(a, b) for a, b in pp if pri[a].source != pri[b].source]  # noqa: E731
+    ok = cross(pairs.select(pri, ground_z={0: 0.0, 1: -240.0}, seq_neighbors=1))
+    right = {}
+    for n, p in pri.items():  # the same flights with the right offset
+        right[n] = Prior.from_pose(n, p.order % 10, float(p.order % 10), R, p.center + [0, 0, 240.0 if p.source else 0],
+                                   source=p.source, order=p.order)
+    assert len(ok) >= 10 and sorted(ok) == sorted((a, b) for a, b in pairs.select(right, ground_z=0.0, seq_neighbors=1)
+                                                  if pri[a].source != pri[b].source)
 
 
 def test_terrain_look_ats_pair_views_into_a_pit():

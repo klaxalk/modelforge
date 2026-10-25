@@ -7,7 +7,7 @@ import numpy as np
 import plyfile
 import pytest
 
-from modelforge import sfm_mesh
+from modelforge import sfm_mesh, splat
 from modelforge.gui import data as gdata
 
 REAL = os.environ.get("MODELFORGE_TEST_PROJECT", os.path.join(os.path.dirname(__file__), "..", "data", "fullrun_test"))
@@ -81,7 +81,7 @@ def test_gui_ticks_the_mesh_prior_when_a_mesh_appears(tmp_path):
         sfm_mesh.run(str(p), on_line=lambda m: None)
         app._refresh_dense()
         assert app.g_splat_mesh_prior.value and not app.g_splat_mesh_prior.disabled
-        assert app.g_splat_depth.value == 0.2  # the prior's default weight
+        assert app.g_splat_depth.value == splat.DEFAULT_LIDAR_DEPTH  # the prior's default weight (0.1)
         assert "sfm" in app.g_mesh.options
         app.g_splat_mesh_prior.value = False  # the user's choice holds while the mesh stays
         app._refresh_dense()
