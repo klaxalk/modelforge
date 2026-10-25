@@ -1,6 +1,6 @@
 # TODO: cheap splat quality fixes
 
-Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off; tile masks on by default (berlin A/B); depth outlier gate on by default and the seams of masked tiles checked (2026-10-24)** (see the end). Still open: the "Also open" list below (SH degree 1, 4K with a lower split threshold, Difix3D+). Both are flags or small changes plus an A/B run;
+Priority: **medium**. Status: implemented 2026-10-23, **A/B on karlak 2026-10-24: exposure on by default, bilateral grid and anti-aliasing off; tile masks on by default (berlin A/B); depth outlier gate on by default and the seams of masked tiles checked (2026-10-24)** (see the end). Still open: 4K with a lower split threshold (SH degree 1 dropped, Difix3D tried and not integrated, 2026-10-25; see the end). Both are flags or small changes plus an A/B run;
 validate on a small project first (fullrun_test, karlak; held-out scoring as in `build/splat_exp.py`), not on
 kladno_dira.
 
@@ -194,3 +194,40 @@ needle`, 18k steps, exposure on, vs the exposure arm):
 
 The needles go, held-out PSNR stays, LPIPS loses 0.015: on views from the flight path they carry some detail. Their
 cost shows off the path, which these held-out photos cannot measure; left as an option to judge visually.
+
+## SH degree 1, split threshold, Difix3D (2026-10-25)
+
+**On-path held-out photos** (karlak, `build/quality_ab.py sh1 split`, 18000 steps x2, exposure on, vs the exposure arm):
+
+| arm | PSNR | SSIM | LPIPS | Gaussians | train |
+|---|---|---|---|---|---|
+| exposure (default) | 22.59 | 0.681 | 0.338 | 1.90M | 842 s |
+| SH degree 1 | 22.10 | 0.665 | 0.353 | 1.88M | 670 s |
+| split gradient 0.0005 | 22.62 | 0.684 | 0.321 | 3.16M | 1040 s |
+
+**Off the path** (`build/difix/difix_ab.py`, workspace `build/karlak_difix`): 3 stretches of 16 consecutive keyframes
+held out (50-90 % of their points also seen by other passes), the splat trained without them (as above), scored at
+their exact poses:
+
+| arm | PSNR | PSNR cc | SSIM | LPIPS | PSNR p10 |
+|---|---|---|---|---|---|
+| base | 20.00 | 21.12 | 0.741 | 0.309 | 13.80 |
+| SH degree 1 base | 19.79 | 21.05 | 0.734 | 0.319 | 13.24 |
+| control: + 3000 steps on the photos | 20.10 | 21.25 | 0.747 | 0.297 | 13.83 |
+| Difix, pseudo views towards the held-out poses (as the paper) | 20.75 | 22.42 | 0.755 | 0.260 | 15.62 |
+| same, Difix at 1024 x 576 | 20.77 | 22.45 | 0.748 | 0.293 | 15.62 |
+| Difix, pseudo views chosen without them (96 cameras shifted 6 m sideways / 5 m up / 4 m down) | 20.09 | 21.26 | 0.747 | 0.300 | 13.85 |
+
+- **SH degree 1: dropped** (worse on and off the path).
+- **Split threshold 0.0005 at x2**: LPIPS -0.017 on the path for 1.7x the Gaussians, +24 % training; the full-4K arm
+  with it (40-60 min) is the open question.
+- **Difix3D** (nvidia/difix_ref, NVIDIA license: non-commercial, accepted by the user): prototype
+  `build/difix/difix_tune.py` (nerfstudio venv + `build/difix_pkgs`: diffusers 0.25.1, transformers 4.38, peft 0.9,
+  accelerate 0.27, einops; weights 5.2 GB in build/hf_cache; Difix runs at its input size, half precision: 15 GB at
+  1920 x 1080, 3.6 s per view; 1 s at 1024 x 576): a fine-tune from the trained splat, every 750 of 3000 steps the
+  pseudo views move 3 m towards their targets, are rendered, cleaned (the nearest training photo as reference, at the
+  median exposure) and trained on with p 0.3, weight 0.3, masked to alpha > 0.5; no densification.
+  Steered at the held-out poses it is a clear gain (+0.65 dB, LPIPS -0.04, the worst views +1.8 dB; renders visibly
+  cleaner: `build/difix/compare.jpg`), but with targets picked without them it equals the control: the gain is
+  learning those viewpoints, not the scene in general. **Not integrated.** Ideas if wanted: pseudo views where a
+  viewer will look (the saved views, a Fly path), or Difix on rendered stills / videos (3.6 s per 1080p frame).
