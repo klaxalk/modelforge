@@ -37,4 +37,7 @@ can use any denser subset without running SfM again.
   `register`, a job process), Remove registered photos, status (registered / stale after a new refine).
 - Tests: `tests/test_register.py` (fullrun_test, half in use: registering photos the model also holds gives its own
   poses within 3 cm / 0.05°; transforms.json; export / Remove).
-- Open: a splat A/B (with / without registered photos) on held-out photos.
+- Splat A/B (`build/reg_ab.py`, kladno_dopravnik copy, 6000 steps x2, 8 held-out registered photos): 56 model
+  photos 22.28 dB / SSIM 0.595 / LPIPS 0.372 vs + 16 registered 22.34 / 0.590 / 0.386: no gain where the keyframes
+  are already dense (as the keyframe calibration found); the value is SfM time (SfM on keyframes only) and thin
+  stretches (fast turns, low passes), untested.
