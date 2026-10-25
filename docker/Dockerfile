@@ -108,6 +108,16 @@ RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
         huggingface_hub==0.36.2 hf-xet==1.7.0 regex==2026.9.29 sentencepiece==0.2.2 plyfile==1.1.5; \
     fi
 
+# Difix (modelforge/difix.py, the Difix tab), CUDA image only: its pipeline code from the Difix3D repository (NVIDIA
+# license, non-commercial) and the old diffusers / transformers it pins, in their own folder (they clash with the RADIO
+# packages and nerfstudio's). Weights (nvidia/difix_ref, 5.2 GB) download on first use into the model cache.
+RUN if [ "${NERFSTUDIO}" = "ON" ]; then \
+      git clone -q https://github.com/nv-tlabs/Difix3D.git /opt/difix3d && git -C /opt/difix3d checkout -q c76edc5 && \
+      /opt/nerfstudio/bin/python -m pip install --no-cache-dir --no-deps --target /opt/difix-pkgs \
+        diffusers==0.25.1 transformers==4.38.0 huggingface-hub==0.25.1 peft==0.9.0 accelerate==0.27.2 \
+        tokenizers==0.15.2 safetensors==0.4.5 regex==2024.11.6 einops==0.8.2; \
+    fi
+
 # Browser tab of the GUI: title and icon (viser hardcodes its own), and the title / icon following the run state.
 COPY docker/patch_viser_page.py docker/favicon.svg /tmp/
 RUN python /tmp/patch_viser_page.py \

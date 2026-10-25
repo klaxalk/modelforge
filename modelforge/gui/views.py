@@ -13,23 +13,24 @@ FILE = "views.json"
 MAX_ROWS = 200
 
 
-def path(project):
-    return os.path.join(project, FILE)
+def path(project, file=FILE):
+    return os.path.join(project, file)
 
 
-def load(project):
-    """The project's saved views, in the order saved: [{"name", "position", "look_at", "up", "fov", "saved"}]."""
+def load(project, file=FILE):
+    """The project's saved views, in the order saved: [{"name", "position", "look_at", "up", "fov", "saved"}].
+    file: another list (the Difix tab's targets, difix.VIEWS_FILE)."""
     try:
-        views = json.load(open(path(project))).get("views", [])
+        views = json.load(open(path(project, file))).get("views", [])
     except (OSError, ValueError, AttributeError):
         return []
     return [v for v in views if isinstance(v, dict) and "name" in v and "position" in v and "look_at" in v]
 
 
-def _save(project, views):
-    tmp = path(project) + ".part"
+def _save(project, views, file=FILE):
+    tmp = path(project, file) + ".part"
     json.dump({"views": views}, open(tmp, "w"), indent=1)
-    os.replace(tmp, path(project))
+    os.replace(tmp, path(project, file))
 
 
 def _unique(views, name, skip=None):
@@ -51,28 +52,28 @@ def pose(position, look_at, up=(0.0, 0.0, 1.0), fov=None):
     return out
 
 
-def add(project, name, cam):
+def add(project, name, cam, file=FILE):
     """Save `cam` (pose()) as a new view; an empty name becomes "View N", a taken one gets " (2)". Returns its name."""
-    views = load(project)
+    views = load(project, file)
     name = _unique(views, (name or "").strip() or f"View {len(views) + 1}")
     views.append({"name": name, **cam, "saved": datetime.datetime.now().isoformat(timespec="seconds")})
-    _save(project, views)
+    _save(project, views, file)
     return name
 
 
-def update(project, name, cam):
+def update(project, name, cam, file=FILE):
     """The view `name` takes the camera `cam`."""
-    views = load(project)
+    views = load(project, file)
     for v in views:
         if v["name"] == name:
             v.update(cam, saved=datetime.datetime.now().isoformat(timespec="seconds"))
-            _save(project, views)
+            _save(project, views, file)
             return
     raise KeyError(name)
 
 
-def rename(project, name, new):
-    views = load(project)
+def rename(project, name, new, file=FILE):
+    views = load(project, file)
     v = next((v for v in views if v["name"] == name), None)
     if v is None:
         raise KeyError(name)
@@ -80,33 +81,34 @@ def rename(project, name, new):
     if not new:
         raise ValueError("the name is empty")
     v["name"] = _unique(views, new, skip=v)
-    _save(project, views)
+    _save(project, views, file)
     return v["name"]
 
 
-def delete(project, name):
-    views = load(project)
+def delete(project, name, file=FILE):
+    views = load(project, file)
     keep = [v for v in views if v["name"] != name]
     if len(keep) == len(views):
         raise KeyError(name)
-    _save(project, keep)
+    _save(project, keep, file)
 
 
 class ViewsPanel:
-    """The Views tab: Name + Save current view, then one row per saved view: [▶ name][⟳][✏][🗑]."""
+    """The Views tab: Name + Save current view, then one row per saved view: [▶ name][⟳][✏][🗑].
+    file / intro / folder: another list (the Difix tab's targets)."""
 
-    def __init__(self, app, gui):
-        self.app, self.gui = app, gui
+    def __init__(self, app, gui, file=FILE, intro=None, folder="Saved views"):
+        self.app, self.gui, self.file = app, gui, file
         self._rows, self._lock = [], threading.RLock()
-        gui.add_markdown("Save the camera of this browser under a name and come back to it later. Kept per project "
-                         f"(`{FILE}` in the project folder).")
+        gui.add_markdown(intro or "Save the camera of this browser under a name and come back to it later. Kept per "
+                         f"project (`{file}` in the project folder).")
         self.g_name = gui.add_text("Name", initial_value="",
                                    hint="Name of the view to save; empty: View 1, View 2, …")
         b = gui.add_button("Save current view", icon=viser.Icon.DEVICE_FLOPPY,
                            hint="Store where this browser's camera is, where it looks and its field of view.")
         b.on_click(lambda e: self.save(e.client))
         self.g_msg = gui.add_markdown("")
-        self.g_list = gui.add_folder("Saved views")
+        self.g_list = gui.add_folder(folder)
         self.refresh()
 
     def _project(self):
@@ -116,13 +118,13 @@ class ViewsPanel:
         if client is None or self._project() is None:
             return
         c = client.camera
-        name = add(self._project(), self.g_name.value, pose(c.position, c.look_at, c.up_direction, c.fov))
+        name = add(self._project(), self.g_name.value, pose(c.position, c.look_at, c.up_direction, c.fov), self.file)
         self.g_name.value = ""
         self.g_msg.content = f"✅ saved **{name}**"
         self.refresh()
 
     def go(self, name, client):
-        v = next((v for v in load(self._project() or "") if v["name"] == name), None)
+        v = next((v for v in load(self._project() or "", self.file) if v["name"] == name), None)
         if v is None or client is None:
             return
         self.app.glide_to(client, v["position"], v["look_at"], up=v.get("up"), fov=v.get("fov"))
@@ -131,7 +133,7 @@ class ViewsPanel:
     def refresh(self):
         """Rebuild the list (on start, a project switch and every change)."""
         project = self._project()
-        views = load(project) if project else []
+        views = load(project, self.file) if project else []
         with self._lock:
             for r in self._rows:
                 r.remove()
@@ -159,7 +161,7 @@ class ViewsPanel:
                 self.go(name, client)
             elif value == "⟳" and client is not None:
                 c = client.camera
-                update(project, name, pose(c.position, c.look_at, c.up_direction, c.fov))
+                update(project, name, pose(c.position, c.look_at, c.up_direction, c.fov), self.file)
                 self.g_msg.content = f"✅ **{name}** now shows the current camera"
             elif value == "✏":
                 self.ask_rename(name, client)
@@ -180,7 +182,7 @@ class ViewsPanel:
             m.close()
             if ev.target.value == "Rename":
                 try:
-                    self.g_msg.content = f"✅ renamed to **{rename(self._project(), name, new.value)}**"
+                    self.g_msg.content = f"✅ renamed to **{rename(self._project(), name, new.value, self.file)}**"
                 except (KeyError, ValueError) as e:
                     self.g_msg.content = f"❌ {e}"
                 self.refresh()
@@ -197,9 +199,28 @@ class ViewsPanel:
             m.close()
             if ev.target.value == "Delete":
                 try:
-                    delete(self._project(), name)
+                    delete(self._project(), name, self.file)
                     self.g_msg.content = f"🗑 deleted **{name}**"
                 except KeyError:
                     pass
                 self.refresh()
         row.on_click(done)
+
+    def views(self):
+        """This list's views (the open project's)."""
+        return load(self._project(), self.file) if self._project() else []
+
+    def add_from(self, file):
+        """Copy the views of another list (e.g. the Views tab's) into this one; names already here are skipped."""
+        project = self._project()
+        if project is None:
+            return 0
+        have = {v["name"] for v in load(project, self.file)}
+        n = 0
+        for v in load(project, file):
+            if v["name"] not in have:
+                add(project, v["name"], {k: v[k] for k in ("position", "look_at", "up", "fov") if k in v}, self.file)
+                n += 1
+        self.g_msg.content = f"✅ {n} views copied" if n else "⚪ nothing new to copy"
+        self.refresh()
+        return n

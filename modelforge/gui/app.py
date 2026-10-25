@@ -18,7 +18,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, jobs, memory, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, difix, jobs, memory, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, reconstruct
@@ -33,6 +33,7 @@ from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
 from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.subset import SubsetPanel
+from modelforge.gui import views as views_mod
 from modelforge.gui.views import ViewsPanel
 
 SFM_BUTTONS = ("features", "pairs", "match", "refine", "reconstruct", "export")  # sparse stages of both kinds
@@ -87,6 +88,9 @@ STAGE_HINTS = {
                       "and head-on views weighted most. Writes a separate coloured copy and a denser preview (≤ 1M "
                       "faces); the splat's depth prior keeps using the mesh as it is. Needs nerfstudio's "
                       "environment. A few minutes for thousands of photos.",
+    "difix": "Refine the finished splat towards the Difix tab's target views: renders moved step by step from the "
+             "nearest photo towards each target, cleaned by Difix (a diffusion model), trained on together with the "
+             "photos. Better from those views and near them; the splat before the first refinement is kept (Undo).",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → "
@@ -107,6 +111,7 @@ NEXT_STEP = {
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab; optional: **Patch holes**",
+    "difix": "View tab → Dense / splat → **Splat**: look from the target views; Difix tab → **Undo** restores the splat",
     "splatmesh-fill": "View tab → Dense / splat → Mesh **splat** (patched); Export tab",
     "sfmmesh": "View tab → Dense / splat → Mesh **sfm**; next (optional): **Patch holes**",
     "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour from the photos**",
@@ -226,6 +231,7 @@ class App:
         self.server.scene.on_click(modifier="cmd/ctrl")(self._pivot_click)  # Ctrl + click: orbit / zoom about there
         threading.Thread(target=self._watch_uploads, daemon=True).start()
         self._apply_sky()
+        self._refresh_difix()
         threading.Thread(target=self._watch_status, daemon=True).start()
 
     # ---------------------------------------------------------------- GUI
@@ -766,6 +772,50 @@ class App:
                            "splat/splat_enu.ply, e.g. after scripts/splat finished.").on_click(
                 lambda _: self._refresh_dense())
 
+        with tabs.add_tab("Difix", viser.Icon.WAND):  # refine the splat towards chosen views (modelforge/difix.py)
+            gui.add_markdown(
+                "Make the finished splat look better **from chosen viewpoints**, e.g. where you will look from or "
+                "fly through. Renders are moved step by step from the nearest photo towards each target view, "
+                "cleaned by **Difix** (NVIDIA's single-step diffusion model; non-commercial license) and trained "
+                "on together with the photos. The views it aims at and their surroundings improve (karlak: +0.65 dB, "
+                "visibly cleaner); views far from every target stay as they were. "
+                + (f"_Not available here: {difix.available()}._" if difix.available() else ""))
+            self.difix_views = ViewsPanel(
+                self, gui, file=difix.VIEWS_FILE, folder="Target views",
+                intro="**Target views** (their own list, not the Views tab's): look where the splat should "
+                      f"improve, then Save current view. Kept per project (`{difix.VIEWS_FILE}`).")
+            b = gui.add_button("Copy the Views tab's views", icon=viser.Icon.COPY,
+                               hint="Add every view saved in the left panel's Views tab to the targets (names "
+                                    "already here are skipped).")
+            b.on_click(lambda _: self.difix_views.add_from(views_mod.FILE))
+            with gui.add_folder("Settings", expand_by_default=False):
+                self.g_difix_steps = gui.add_number(
+                    "Fine-tune steps", initial_value=difix.STEPS, min=500, max=50000, step=500,
+                    hint="Training steps on the photos + cleaned views (karlak: 3000 steps, ~2 min of training).")
+                self.g_difix_rounds = gui.add_number(
+                    "Rounds", initial_value=difix.ROUNDS, min=1, max=20, step=1,
+                    hint="How often the renders move closer to their targets and are cleaned again (each round: "
+                         "~3.6 s per target view at 1920 px, ~1 s at 1024 px).")
+                self.g_difix_shift = gui.add_number(
+                    "Step towards the target (m)", initial_value=difix.SHIFT_M, min=0.5, max=50.0, step=0.5,
+                    hint="How far the renders move per round, from the nearest photo's camera towards each target "
+                         "(turns count 10 m per radian). A target farther than rounds x step from every photo is "
+                         "not reached: Difix can only fix renders that still resemble the photos.")
+                self.g_difix_width = gui.add_dropdown(
+                    "Difix resolution", options=tuple(difix.WIDTHS), initial_value="training size",
+                    hint="Difix runs at its input size: the training size is best (karlak: LPIPS 0.260 vs 0.293) "
+                         "but needs ~15 GB of GPU memory at 1920 x 1080; 1024 px needs ~5 GB and is 3.5x faster.")
+            b = gui.add_button("Refine splat with Difix", icon=viser.Icon.WAND, hint=STAGE_HINTS["difix"],
+                               disabled=difix.available() is not None)
+            b.on_click(lambda _: self.run_stage("difix"))
+            self.g_buttons["difix"] = b
+            self.g_difix_undo = gui.add_button(
+                "Undo: the splat before Difix", icon=viser.Icon.ARROW_BACK_UP, disabled=True,
+                hint="Restore the splat as it was before the first Difix refinement (refining again starts from the "
+                     "current one).")
+            self.g_difix_undo.on_click(lambda _: self._difix_undo())
+            self.g_difix_md = gui.add_markdown("")
+
         with tabs.add_tab("Splat mesh", viser.Icon.CUBE):
             gui.add_markdown(
                 "An alternative to the Dense tab's COLMAP mesh: a mesh **from the finished splat**. Depth and "
@@ -1049,6 +1099,8 @@ class App:
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.semantic.clear_for_switch()  # the old project's search markers and results
             self.views.refresh()  # this project's saved views
+            self.difix_views.refresh()
+            self._refresh_difix()
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self._show_project()
@@ -1093,6 +1145,31 @@ class App:
             except Exception as e:  # noqa: BLE001 - the view without a sky, not a broken GUI
                 self.g_sky_md.content = f"❌ sky box: {e}"
         threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_difix(self):
+        """The Difix tab's status line and Undo (after a refinement, on a project switch)."""
+        if not self.path:
+            return
+        r = difix.refined(self.path)
+        self.g_difix_undo.disabled = not r["backup"]
+        i = r["info"]
+        self.g_difix_md.content = (
+            f"Last refinement {i.get('time', '')}: towards {i['targets']} views ({', '.join(i.get('views', [])[:6])}"
+            f"{' …' if len(i.get('views', [])) > 6 else ''}), {i['rounds']} rounds, {i['steps']:,} steps, "
+            f"{_fmt_s(i['seconds'])}; renders before / after Difix in `{i.get('previews', difix.WORK)}`"
+            if i else ("The splat has been refined before (Undo restores the original)." if r["backup"] else ""))
+
+    def _difix_undo(self):
+        if self.running:
+            self.g_difix_md.content = "⚪ a job is running: undo after it"
+            return
+        try:
+            difix.undo(self.path)
+            self._refresh_difix()
+            self._refresh_dense()
+            self.g_difix_md.content = "↩ the splat from before Difix is back"
+        except Exception as e:  # noqa: BLE001
+            self.g_difix_md.content = f"❌ {e}"
 
     def _watch_uploads(self):
         """Progress of browser uploads still arriving (viser delivers them only when complete)."""
@@ -1764,7 +1841,7 @@ class App:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
                 seq = sfm if stage == "sfm" else (stage,)
-            elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh",
+            elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix",
                            "sfmmesh-fill", "sfmmesh-colour"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
@@ -1873,6 +1950,14 @@ class App:
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
+                elif st == "difix":
+                    difix.run(project, self.difix_views.views(), steps=int(self.g_difix_steps.value),
+                              rounds=int(self.g_difix_rounds.value), shift_m=float(self.g_difix_shift.value),
+                              difix_width=difix.WIDTHS[self.g_difix_width.value], on_line=self._on_log,
+                              job=self._token, on_progress=lambda ph, k, n: self._on_count_progress("difix", ph, k, n))
+                    report = pipeline.Report(project)
+                    self._refresh_dense()
+                    self._refresh_difix()
                 elif st in ("splatmesh", "splatmesh-fill"):
                     if st == "splatmesh":
                         self._run_splat_mesh(project)
@@ -1936,6 +2021,7 @@ class App:
                        "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
                        "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
                        "splatmesh": splat_mesh.available() is not None,
+                       "difix": difix.available() is not None,
                        "refine-resume": not self._refine_checkpoint()}
         for name, b in self.g_buttons.items():
             b.disabled = unavailable.get(name, False)
@@ -2780,6 +2866,10 @@ class App:
                 r = rep["splat_mesh"]["fill"]
                 return (f"{r['holes']:,} holes closed (up to {r['max_hole']:.2f} across, largest "
                         f"{r['largest_patched']:.2f}) with {r['faces_added']:,} faces; mesh {r['faces']:,} faces")
+            if st == "difix":
+                r = rep["difix"]
+                return (f"towards {r['targets']} views, {r['rounds']} rounds, {r['steps']:,} steps, Difix at "
+                        f"{r['difix_width']}")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "

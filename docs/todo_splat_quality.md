@@ -231,3 +231,21 @@ their exact poses:
   cleaner: `build/difix/compare.jpg`), but with targets picked without them it equals the control: the gain is
   learning those viewpoints, not the scene in general. **Not integrated.** Ideas if wanted: pseudo views where a
   viewer will look (the saved views, a Fly path), or Difix on rendered stills / videos (3.6 s per 1080p frame).
+
+### Difix in the GUI (2026-10-25; the user: refine an already trained splat, with its own list of views)
+
+Right panel → **Difix** (after Splat): **Target views** (its own list, `PROJECT/difix_views.json`: Save current view,
+▶ / ⟳ / ✏ / 🗑 as the Views tab; **Copy the Views tab's views**), Settings (fine-tune steps 3000, rounds 4, step
+towards the target 3 m, Difix resolution training size / 1024 px), **Refine splat with Difix** (stage `difix`),
+**Undo** (the splat before the first refinement, `splat/splat_enu.pre_difix.ply`).
+- `modelforge/difix.py` (paths, `run`, `undo`, `write_splat`: the refined Gaussians written into the original ply's
+  layout) + `modelforge/export/difix_refine.py` (the prototype made general: photos read from disk with an LRU cache
+  of 4 GB, so thousands of photos fit; sky masks kept out of the photo loss; each pseudo view rendered with its
+  reference camera's intrinsics (several cameras); progress "difix round k / n: view i / m", "fine-tune: step").
+  Renders before / after Difix per round in `splat/difix/round<k>/`. Report `difix`; History line.
+- Packages: `/opt/difix-pkgs` + `/opt/difix3d` (Dockerfile layer; not yet built) or `build/difix_pkgs` +
+  `build/difix/Difix3D` (installed by hand, used now).
+- End to end on karlak (the baseline without the held-out stretches, the 48 held-out poses as targets, 1024 px):
+  20.77 dB / LPIPS 0.293, as the prototype's arm; 342 s. Tests: `tests/test_difix.py`.
+- Not done: densification during the refinement; the target view's own field of view (renders use the nearest
+  photo's camera); a tiled splat's per-tile semantic features go stale (the merged file changed).
