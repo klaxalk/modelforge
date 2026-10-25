@@ -232,7 +232,7 @@ class IngestPanel:
                                                "summary shows which one each clip uses.")
             for h in (self.g_sampling, self.g_num, self.g_spacing, self.g_rotw, self.g_window, self.g_yaw):
                 h.on_update(lambda _: self._settings_changed())
-        self.g_fc = gui.add_folder("Flight alignment (several flights)", expand_by_default=False)
+        self.g_fc = gui.add_folder("Flight alignment (several flights)")
         with self.g_fc:
             gui.add_markdown(
                 "The flights' altitude offsets come from the drones' absolute altitude, which can be wrong (karlak3: "
