@@ -77,6 +77,8 @@ def export(rec, project, image_dir="images", ply_name="sparse_pc.ply", extra=Non
     if per_frame:  # nerfstudio takes a top-level key over the frames' own: only the (shared) model stays at the top
         out = {k: v for k, v in out.items() if k == "camera_model" or k not in intr and k not in ("w", "h")}
         out["mf_cameras"] = len(ids)  # modelforge reads the intrinsics through export/frame_camera.py
+        # one common training resolution: the largest camera sets it (frame_camera.train_scale)
+        out["mf_long_side"] = max(max(int(c.width), int(c.height)) for c in rec.cameras.values())
     if os.path.exists(os.path.join(project, lidar_mod.CLOUD)):  # for splatfacto-lidar's depth loss (modelforge/nsplugin)
         out["lidar_ply_file_path"] = lidar_mod.CLOUD.replace(os.sep, "/")
     extra = {**(extra or {}), **({"lidar_points_in_ply": n_lidar} if n_lidar else {})}

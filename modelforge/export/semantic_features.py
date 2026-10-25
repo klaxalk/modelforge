@@ -95,14 +95,11 @@ def main():
     t0 = time.time()
     d = np.load(inp)
     dev = torch.device("cuda")
-    W0, H0 = int(d["width"]), int(d["height"])
     model = load_model(params["version"], params["adaptor"])
     head = DenseHead(params["adaptor"])
     ps = model.patch_size
-    W = min(int(params["width"]), 2048) // ps * ps
-    H = int(round(H0 * W / W0 / ps)) * ps
-    K0 = d["K"].astype(np.float64)
-    maps = cv2.initUndistortRectifyMap(K0, d["dist"], None, K0, (W0, H0), cv2.CV_32FC1)
+    cams = camera_setups(d, int(params["width"]), ps)
+    W, H = cams[0]["size"]
     paths = d["paths"]
     n = len(paths)
     print(f"[semantic] {params['version']} at {W}x{H} ({W // ps}x{H // ps} patches), {n} photos"
@@ -113,7 +110,7 @@ def main():
         mean, basis = torch.tensor(p["pca_mean"], device=dev), torch.tensor(p["pca_basis"], device=dev)
         explained = float(p["explained"])
     else:
-        mean, basis, explained = pca(model, params, head, paths, maps, (W, H), dims, dev)
+        mean, basis, explained = pca(model, params, head, paths, cams, dims, dev)
     if params.get("pca_out"):
         np.savez(params["pca_out"], pca_mean=mean.cpu().numpy().astype(np.float32),
                  pca_basis=basis.cpu().numpy().astype(np.float32), explained=np.float32(explained))
@@ -126,16 +123,36 @@ def main():
          "scales": torch.exp(torch.tensor(d["scales"], device=dev, dtype=torch.float32)), "opacities": opac,
          "colors": torch.tensor(d["sh"], device=dev, dtype=torch.float32)}
     sh_degree = int(round(np.sqrt(k))) - 1
-    back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, maps, (W, H), K0, out_dir, t0)
+    back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, cams, out_dir, t0)
 
 
-def pca(model, params, head, paths, maps, size, dims, dev):
+def camera_setups(d, width, ps):
+    """Per camera of the input (K (C, 3, 3) or one (3, 3)): K0, the undistortion maps, the photo size, the RADIO input
+    size (width x the camera's aspect, multiples of the patch size) and "of": the camera of each photo."""
+    K = d["K"].astype(np.float64)
+    K = K[None] if K.ndim == 2 else K
+    dist = np.atleast_2d(d["dist"]).astype(np.float64)
+    ws, hs = np.atleast_1d(d["width"]), np.atleast_1d(d["height"])
+    of = d["camera"] if "camera" in d.files else np.zeros(len(d["paths"]), int)
+    out = []
+    for c in range(len(K)):
+        W0, H0 = int(ws[c]), int(hs[c])
+        W = min(width, 2048) // ps * ps
+        out.append({"K0": K[c], "W0": W0, "H0": H0, "size": (W, int(round(H0 * W / W0 / ps)) * ps),
+                    "maps": cv2.initUndistortRectifyMap(K[c], dist[c], None, K[c], (W0, H0), cv2.CV_32FC1)})
+    for c in out:
+        c["of"] = of
+    return out
+
+
+def pca(model, params, head, paths, cams, dims, dev):
     """2. PCA basis (mean, basis (D, dims), explained share) from a sample of patches."""
     n = len(paths)
     pick = np.unique(np.linspace(0, n - 1, min(n, int(params["pca_images"]))).round().astype(int))
     sample, rng = [], np.random.default_rng(0)
     for j, i in enumerate(pick):
-        f = features(model, params["adaptor"], photo(paths[i], maps, size), head)
+        c = cams[int(cams[0]["of"][i])]
+        f = features(model, params["adaptor"], photo(paths[i], c["maps"], c["size"]), head)
         f = f.reshape(-1, f.shape[-1])
         sample.append(f[torch.from_numpy(rng.choice(len(f), min(len(f), 4000), replace=False)).to(dev)])
         print(f"[semantic] pca {j + 1} / {len(pick)}", flush=True)
@@ -148,24 +165,28 @@ def pca(model, params, head, paths, maps, size, dims, dev):
     return mean, basis, explained
 
 
-def back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, maps, size, K0, out_dir, t0):
+def back_project(model, params, head, d, g, opac, sh_degree, mean, basis, explained, cams, out_dir, t0):
     """3. back-projection with an occlusion test against the rendered depth -> OUT_DIR/features.npz, stats.json."""
-    W, H = size
-    W0, H0 = int(d["width"]), int(d["height"])
-    sx, sy = W / W0, H / H0
+    W, H = cams[0]["size"]
     dev, means, dims = g["means"].device, g["means"], basis.shape[1]
     viewmats, paths = d["viewmats"], d["paths"]
     n = len(paths)
     acc = torch.zeros((len(means), dims), device=dev)
     wsum = torch.zeros(len(means), device=dev)
     dd = int(params["depth_div"])
-    Wd, Hd = max(1, W // dd), max(1, H // dd)
-    Kd = torch.tensor([[K0[0, 0] * sx / dd, 0, K0[0, 2] * sx / dd], [0, K0[1, 1] * sy / dd, K0[1, 2] * sy / dd],
-                       [0, 0, 1]], device=dev, dtype=torch.float32)
+    for c in cams:  # the depth render per camera: its RADIO input size / depth_div
+        (cw, ch), K0 = c["size"], c["K0"]
+        sx, sy = cw / c["W0"], ch / c["H0"]
+        c["Wd"], c["Hd"] = max(1, cw // dd), max(1, ch // dd)
+        c["Kd"] = torch.tensor([[K0[0, 0] * sx / dd, 0, K0[0, 2] * sx / dd],
+                                [0, K0[1, 1] * sy / dd, K0[1, 2] * sy / dd], [0, 0, 1]], device=dev,
+                               dtype=torch.float32)
     tol = float(params["depth_tol"])
     ones = torch.ones((len(means), 1), device=dev)
     for i in range(n):
-        f = features(model, params["adaptor"], photo(paths[i], maps, (W, H)), head)
+        c = cams[int(cams[0]["of"][i])]
+        Wd, Hd, Kd = c["Wd"], c["Hd"], c["Kd"]
+        f = features(model, params["adaptor"], photo(paths[i], c["maps"], c["size"]), head)
         fr = ((f - mean) @ basis).permute(2, 0, 1)[None]  # (1, dims, h, w)
         V = torch.tensor(viewmats[i], device=dev, dtype=torch.float32)
         with torch.no_grad():

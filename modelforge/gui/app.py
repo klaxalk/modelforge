@@ -180,6 +180,12 @@ def rot_dev_deg(Ra, Rb):
     return np.degrees(np.arccos(np.clip(c, -1, 1)))
 
 
+def _fov_aspect(intr):
+    """Vertical field of view and aspect of a camera ({"model", "width", "height", "params"}) for its frustum."""
+    fy = intr["params"][1] if intr["model"] in ("OPENCV", "PINHOLE") else intr["params"][0]
+    return 2 * np.arctan(intr["height"] / 2 / fy), intr["width"] / intr["height"]
+
+
 class App:
     def __init__(self, project_path, port=8080, root=None):
         self.path = project_path
@@ -1415,10 +1421,7 @@ class App:
         with self.lock:
             self.snap = self.project.load_snapshot(name)
             if self.snap.intrinsics:
-                intr = self.snap.intrinsics
-                fy = intr["params"][1] if intr["model"] in ("OPENCV", "PINHOLE") else intr["params"][0]
-                self.fov = 2 * np.arctan(intr["height"] / 2 / fy)
-                self.aspect = intr["width"] / intr["height"]
+                self.fov, self.aspect = _fov_aspect(self.snap.intrinsics)
             self._draw_points()
             self._draw_cameras()
             self._draw_lines()
@@ -1496,11 +1499,15 @@ class App:
             s, n = self.snap, len(self.project.names)
             colors = self._camera_colors()
             scale = 0.6 * self.g_scale.value
+            intr = s.intrinsics or {}
+            shapes = {cid: _fov_aspect(c) for cid, c in intr.get("cameras", {}).items()}  # several cameras: each its own
             for i in range(n):
                 show = self.g_cams.value and s.cams.valid[i]
+                fov, aspect = shapes.get(int(intr["by_image"][i]), (self.fov, self.aspect)) if shapes else \
+                    (self.fov, self.aspect)
                 color = SELECTED_COLOR if i == self.selected else tuple(int(c) for c in colors[i])
                 h = self.server.scene.add_camera_frustum(
-                    f"/cams/{i}", fov=self.fov, aspect=self.aspect, scale=scale, color=color,
+                    f"/cams/{i}", fov=fov, aspect=aspect, scale=scale, color=color,
                     image=self.project.thumbnail(i) if (show and self.g_thumbs.value) else None,
                     wxyz=s.cams.wxyz(i) if s.cams.valid[i] else (1, 0, 0, 0),
                     position=s.cams.centers[i] if s.cams.valid[i] else (0, 0, 0), visible=bool(show))
@@ -1510,7 +1517,7 @@ class App:
                 if not pc.valid[i]:  # video without metadata: no prior pose to show
                     continue
                 ph = self.server.scene.add_camera_frustum(
-                    f"/priors/{i}", fov=self.fov, aspect=self.aspect, scale=scale * 0.8, color=PRIOR_COLOR,
+                    f"/priors/{i}", fov=fov, aspect=aspect, scale=scale * 0.8, color=PRIOR_COLOR,
                     wxyz=pc.wxyz(i), position=pc.centers[i], visible=bool(self.g_priors.value))
                 self.prior_handles[i] = ph
 

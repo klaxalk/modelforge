@@ -63,12 +63,12 @@ def masks(project, downscale, on_line=print, job=None, on_count=None):
     t = json.load(open(os.path.join(project, "transforms.json")))
     todo = []
     for f in t["frames"]:
-        cam = frame_camera.camera(t, f)
+        cam = frame_camera.train_camera(t, frame_camera.camera(t, f), downscale)  # the training images' size
         name = os.path.basename(f["file_path"])
         dst = os.path.join(out, name + ".png")
         if not os.path.exists(dst):
             todo.append({"src": os.path.realpath(os.path.join(project, f["file_path"])), "dst": dst,
-                         "w": int(cam["w"]) // int(downscale), "h": int(cam["h"]) // int(downscale)})
+                         "w": int(cam["w"]), "h": int(cam["h"])})
     n = len(t["frames"])
     if not todo:
         on_line(f"sky masks: {n} photos, all made already")

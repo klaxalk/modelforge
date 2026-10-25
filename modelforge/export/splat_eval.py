@@ -39,22 +39,19 @@ def main():
          "scales": torch.exp(torch.tensor(d["scales"], device=dev, dtype=torch.float32)),
          "opacities": torch.sigmoid(torch.tensor(d["opacities"], device=dev, dtype=torch.float32)),
          "colors": torch.tensor(d["sh"], device=dev, dtype=torch.float32)}
-    W0, H0 = int(d["width"]), int(d["height"])
-    s = min(1.0, int(d["render_width"]) / W0)
-    W, H = int(round(W0 * s)), int(round(H0 * s))
-    K0 = d["K"].astype(np.float64)
-    K = K0.copy()
-    K[:2] *= s
+    cams = setups(d)
     try:
         from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
         lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(dev)
     except Exception as e:  # noqa: BLE001 - LPIPS is optional
         print(f"[eval] LPIPS unavailable: {e}", flush=True)
         lpips = None
-    maps = cv2.initUndistortRectifyMap(K0, d["dist"], None, K0, (W0, H0), cv2.CV_32FC1)
+    of = d["camera"] if "camera" in d.files else np.zeros(len(d["paths"]), int)
     per, t0 = [], time.time()
     with torch.no_grad():
         for i, path in enumerate(d["paths"]):
+            c = cams[int(of[i])]
+            maps, K, (W, H) = c["maps"], c["K"], c["size"]
             img = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
             img = cv2.remap(img, maps[0], maps[1], cv2.INTER_LINEAR)
             img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
@@ -87,8 +84,26 @@ def main():
     keys = per[0].keys() if per else ()
     res = {k: round(float(np.mean([p[k] for p in per])), 4) for k in keys}
     res.update({"psnr_p10": round(float(np.percentile([p["psnr"] for p in per], 10)), 3) if per else None,
-                "views": len(per), "render": [W, H], "per_image": per, "eval_seconds": round(time.time() - t0, 1)})
+                "views": len(per), "render": list(cams[0]["size"]), "per_image": per, "eval_seconds": round(time.time() - t0, 1)})
     json.dump(res, open(out, "w"), indent=1)
+
+
+def setups(d):
+    """Per camera (K (C, 3, 3) or one (3, 3), dist, width, height): the undistortion maps, the pinhole K at the
+    render size (render_width wide, never upscaled) and that size."""
+    K0s = d["K"].astype(np.float64)
+    K0s = K0s[None] if K0s.ndim == 2 else K0s
+    dist = np.atleast_2d(d["dist"]).astype(np.float64)
+    ws, hs = np.atleast_1d(d["width"]), np.atleast_1d(d["height"])
+    out = []
+    for c, K0 in enumerate(K0s):
+        W0, H0 = int(ws[c]), int(hs[c])
+        s = min(1.0, int(d["render_width"]) / W0)
+        K = K0.copy()
+        K[:2] *= s
+        out.append({"maps": cv2.initUndistortRectifyMap(K0, dist[c], None, K0, (W0, H0), cv2.CV_32FC1), "K": K,
+                    "size": (int(round(W0 * s)), int(round(H0 * s)))})
+    return out
 
 
 if __name__ == "__main__":

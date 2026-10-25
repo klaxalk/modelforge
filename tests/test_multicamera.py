@@ -96,3 +96,58 @@ def test_frame_camera():
     cams, index = frame_camera.cameras(t)
     assert index == [0, 1, 0] and cams[1] == {"fl_x": 50.0, "w": 100, "h": 100}
     assert frame_camera.largest(t)["w"] == 200
+    # one common training resolution: the largest camera at 1 / N, the others at that long side, never upscaled
+    t = {"camera_model": "OPENCV", "frames": [
+        {"file_path": "images/a.jpg", "fl_x": 400.0, "fl_y": 400.0, "cx": 200.0, "cy": 100.0, "w": 400, "h": 200},
+        {"file_path": "images/b.jpg", "fl_x": 150.0, "fl_y": 150.0, "cx": 100.0, "cy": 50.0, "w": 200, "h": 100}]}
+    a, b = (frame_camera.camera(t, f) for f in t["frames"])
+    assert frame_camera.long_side(t) == 400
+    assert frame_camera.train_scale(t, a, 2) == 0.5 and frame_camera.train_scale(t, b, 2) == 1.0
+    assert frame_camera.train_scale(t, b, 4) == 0.5 and frame_camera.train_scale(t, b, 1) == 1.0
+    tb = frame_camera.train_camera(t, b, 4)
+    assert (tb["w"], tb["h"], tb["fl_x"], tb["cx"]) == (100, 50, 75.0, 50.0)
+    assert frame_camera.train_scale(dict(t, mf_long_side=800), a, 4) == 0.5  # a tile without the largest camera
+
+
+def test_training_data_at_one_resolution(tmp_path):
+    """Several cameras: transforms_x<N>.json with every frame's camera at its training size, images_<N>/ for the
+    photos that shrink, the others read from images/; one camera: the project and nerfstudio's factor."""
+    from PIL import Image
+    from modelforge import splat
+    from modelforge.export import frame_camera
+    (tmp_path / "images").mkdir()
+    frames = []
+    for k, (w, h) in enumerate([(400, 200), (200, 100), (400, 200)]):
+        Image.new("RGB", (w, h), (k * 50, 90, 30)).save(tmp_path / "images" / f"p{k}.jpg")
+        frames.append({"file_path": f"images/p{k}.jpg", "transform_matrix": np.eye(4).tolist(), "fl_x": w * 1.0,
+                       "fl_y": w * 1.0, "cx": w / 2, "cy": h / 2, "w": w, "h": h})
+    json.dump({"camera_model": "OPENCV", "frames": frames, "mf_cameras": 2, "mf_long_side": 400},
+              open(tmp_path / "transforms.json", "w"))
+    p = str(tmp_path)
+    splat.prepare_downscaled(p, 4, on_line=lambda m: None)
+    assert sorted(os.listdir(tmp_path / "images_4")) == ["p0.jpg", "p1.jpg", "p2.jpg"]
+    assert Image.open(tmp_path / "images_4" / "p0.jpg").size == (100, 50)
+    assert Image.open(tmp_path / "images_4" / "p1.jpg").size == (100, 50)
+    data, factor = splat.training_data(p, 4)
+    t = json.load(open(data))
+    assert factor == 1 and os.path.basename(data) == "transforms_x4.json"
+    assert [(f["w"], f["h"], f["fl_x"]) for f in t["frames"]] == [(100, 50, 100.0)] * 3
+    assert all(f["file_path"].startswith("images_4/") for f in t["frames"])
+    shutil.rmtree(tmp_path / "images_2", ignore_errors=True)
+    splat.prepare_downscaled(p, 2, on_line=lambda m: None)
+    assert sorted(os.listdir(tmp_path / "images_2")) == ["p0.jpg", "p2.jpg"]  # p1 trains at full size
+    t = json.load(open(splat.training_data(p, 2)[0]))
+    assert [f["file_path"] for f in t["frames"]] == ["images_2/p0.jpg", "images/p1.jpg", "images_2/p2.jpg"]
+    assert all((f["w"], f["h"]) == (200, 100) for f in t["frames"])
+    cmd = splat.train_command(p, data=splat.training_data(p, 2)[0], downscale=1)
+    assert cmd[cmd.index("--data") + 1].endswith("transforms_x2.json") and cmd[-1] == "1"
+    one = dict(json.load(open(tmp_path / "transforms.json")), frames=[frames[0], frames[2]])
+    json.dump(one, open(tmp_path / "transforms.json", "w"))
+    assert splat.training_data(p, 2) == (p, 2)
+    # the readers: semantic features take each photo's camera
+    from modelforge import semantic
+    json.dump(dict(one, frames=frames), open(tmp_path / "transforms.json", "w"))
+    views, K, dist, w, h, cam, paths = semantic._cameras(p)
+    assert list(w) == [400, 200] and list(cam) == [0, 1, 0] and K.shape == (2, 3, 3)
+    assert frame_camera.long_side(json.load(open(tmp_path / "transforms.json"))) == 400
+

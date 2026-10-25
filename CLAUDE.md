@@ -148,7 +148,7 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 5. **TODO: multi-camera DJI projects** (several drones / lenses in one project; zooming clips refused; one
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
-   too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; open: one common training resolution, semantic / evaluation per camera. Plan and decisions: `docs/todo_multicamera.md`.
+   too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; **done 2026-10-25:** one common training resolution (the largest camera at 1 / N, the others at that long side: `splat.training_data` → `transforms_x<N>.json`), semantic features and held-out evaluation per camera, frustums per camera; open: a real mixed-drone or zooming clip. Plan and decisions: `docs/todo_multicamera.md`.
 6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget" 2M):
    k-d cells of <= 100k Gaussians, levels of 1/4 merged per voxel by moment matching (`modelforge/splat_lod.py`,
    `splat/lod/`, built in the background when first shown: kladno_dira 5.77M in 48 s), a cut per camera (2 px per

@@ -69,8 +69,8 @@ def auto_cache(project, downscale=1):
     from modelforge import splat_plan
     from modelforge.export import frame_camera
     t = json.load(open(os.path.join(project, "transforms.json")))
-    gb = sum((c["w"] // downscale) * (c["h"] // downscale) * 3 for c in map(lambda f: frame_camera.camera(t, f),
-                                                                          t["frames"])) / 1e9
+    gb = sum(c["w"] * c["h"] * 3 for c in (frame_camera.train_camera(t, frame_camera.camera(t, f), downscale)
+                                            for f in t["frames"])) / 1e9
     vram = splat_plan.vram_gb() or splat_plan.DEFAULT_VRAM_GB
     try:
         avail = next(int(line.split()[1]) for line in open("/proc/meminfo")
@@ -194,7 +194,7 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
-                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None):
+                  depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None, data=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
     (strategy, max_gaussians, stop_split_at, reset_alpha_every, camera_opt). load_dir: continue from the
@@ -208,12 +208,13 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
     lidar-data only. loss_masks: a folder of per-image masks at the undistorted training camera (splat_tiles.loss_masks:
     a tile's pixels outside it are left out of the losses); lidar-data only. sky_masks: a folder of sky masks
     (modelforge/sky.py; regularize["sky"]): left out of the photometric loss, their rendered opacity pulled to 0;
-    lidar-data only."""
+    lidar-data only. data: the dataset nerfstudio reads (training_data: a multi-camera project's transforms at the
+    training size, with downscale 1), else PROJECT."""
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}")
     if cache not in CACHE_MODES:
         raise ValueError(f"cache must be one of {CACHE_MODES}")
-    cmd = [os.path.join(NS_BIN, "ns-train"), ns_method(method, lidar_depth), "--data", project,
+    cmd = [os.path.join(NS_BIN, "ns-train"), ns_method(method, lidar_depth), "--data", data or project,
            "--output-dir", os.path.join(project, "nerfstudio"),
            "--viewer.quit-on-train-completion", "True", "--viewer.websocket-port", str(VIEWER_PORT),
            "--pipeline.datamanager.cache-images", cache,
@@ -304,9 +305,36 @@ def mesh_depth_maps(project, mesh, downscale, on_line=print, job=None, on_count=
     return out
 
 
+TRAIN_TRANSFORMS = "transforms_x{}.json"  # a multi-camera project's dataset at the training size (training_data)
+
+
+def training_data(project, downscale):
+    """(dataset for nerfstudio's --data, its --downscale-factor). One camera: PROJECT and the factor, nerfstudio scales.
+    Several cameras: one common training resolution (frame_camera.train_scale), which nerfstudio's single integer
+    factor cannot give, so PROJECT/transforms_x<N>.json carries every frame's camera at its training size and its
+    photo in images_<N>/ (images/ where it trains at full size), read at factor 1."""
+    from modelforge.export import frame_camera
+    t = json.load(open(os.path.join(project, "transforms.json")))
+    cams, _ = frame_camera.cameras(t)
+    if len(cams) < 2:
+        return project, int(downscale)
+    frames = []
+    for f in t["frames"]:
+        cam = frame_camera.camera(t, f)
+        tc = frame_camera.train_camera(t, cam, downscale)
+        name = os.path.basename(f["file_path"])
+        path = f["file_path"] if frame_camera.train_scale(t, cam, downscale) >= 1 else f"images_{int(downscale)}/{name}"
+        frames.append({**f, **{k: v for k, v in tc.items() if k != "camera_model"}, "file_path": path})
+    out = os.path.join(project, TRAIN_TRANSFORMS.format(int(downscale)))
+    json.dump({**t, "frames": frames}, open(out + ".part", "w"), indent=1)
+    os.replace(out + ".part", out)
+    return out, 1
+
+
 def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, workers=8):
     """PROJECT/images_<factor>/<name> for every transforms.json frame (nerfstudio's layout for
-    --downscale-factor). Sizes are floor(w / factor), as nerfstudio rescales the cameras.
+    --downscale-factor). Sizes are floor(w / factor), as nerfstudio rescales the cameras; with several cameras each
+    at its training size (frame_camera.train_camera), photos that train at full size skipped.
 
     JPEGs are decoded at reduced size (PIL draft: the DCT scales by 1/2, 1/4, 1/8 directly) in
     `workers` threads; on_count(done, total) reports progress and `job` (jobs.Token) is checked
@@ -319,14 +347,22 @@ def prepare_downscaled(project, factor, on_line=print, job=None, on_count=None, 
         return None
     out = os.path.join(project, f"images_{factor}")
     os.makedirs(out, exist_ok=True)
-    frames = json.load(open(os.path.join(project, "transforms.json")))["frames"]
+    from modelforge.export import frame_camera
+    t = json.load(open(os.path.join(project, "transforms.json")))
+    frames = t["frames"]
+    several = len(frame_camera.cameras(t)[0]) > 1
 
     def one(f):
         jobs.check(job)
         src = os.path.join(project, f["file_path"])
         dst = os.path.join(out, os.path.basename(f["file_path"]))
+        if several:
+            cam = frame_camera.camera(t, f)
+            if frame_camera.train_scale(t, cam, factor) >= 1:
+                return 0  # trains at full size, from images/
+            tc = frame_camera.train_camera(t, cam, factor)
         with Image.open(src) as im:
-            size = (im.width // factor, im.height // factor)
+            size = (tc["w"], tc["h"]) if several else (im.width // factor, im.height // factor)
             if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
                 with Image.open(dst) as old:
                     if old.size == size:
@@ -473,6 +509,13 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
     if load_dir is None:
         _remove(os.path.join(project, RESUME))  # a new run replaces the paused one
     prepare_downscaled(project, int(downscale), on_line, job=job, on_count=on_prepare)
+    data, factor = training_data(project, downscale)
+    if data != project:
+        from modelforge.export import frame_camera
+        t = json.load(open(os.path.join(project, "transforms.json")))
+        on_line("splat: one training resolution for " + ", ".join(
+            f"{c['w']}x{c['h']} -> {frame_camera.train_camera(t, c, downscale)['w']}x"
+            f"{frame_camera.train_camera(t, c, downscale)['h']}" for c in frame_camera.cameras(t)[0]))
     on_line(("splat: resuming " if load_dir else "splat: training ")
             + f"{method_dir}, cache {cache}, downscale {downscale}"
             + (f", depth weight {lidar_depth} ({('SfM mesh, dense' if depth_dense else 'SfM mesh vertices') if depth_cloud else depth_source(project)})"
@@ -515,8 +558,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         sfm_mesh.seed_points(seed_mesh, os.path.join(project, t.get("ply_file_path", "sparse_pc.ply")), seeds,
                              on_line=on_line)
         seeds = os.path.abspath(seeds)
-    cmd = train_command(project, method, iterations, extra, cache, downscale, preview_every if on_snapshot else None,
-                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks, skies)
+    cmd = train_command(project, method, iterations, extra, cache, factor, preview_every if on_snapshot else None,
+                        lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks, skies,
+                        data=None if data == project else data)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 

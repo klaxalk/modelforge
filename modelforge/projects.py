@@ -49,6 +49,7 @@ INTERMEDIATE = (
     ("nerfstudio", "splatfacto training runs"),
     ("tiles", "splat tiles (per-tile datasets and training runs; the merged splat is splat/splat_enu.ply)"),
     ("images_*", "downscaled frames for splat training"),
+    ("transforms_x*.json", "multi-camera training datasets (cameras at the training size)"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("splat/lod", "splat level of detail (View; built again when shown)"),
     ("sky", "sky masks for splat training"),

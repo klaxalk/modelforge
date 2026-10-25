@@ -153,7 +153,7 @@ def _cache_gb(project, settings):
     if cache in (None, "auto"):
         cache, gb = splat.auto_cache(project, down)
     else:
-        gb = sum((c["w"] // down) * (c["h"] // down) * 3 for c in cams) / 1e9
+        gb = sum(c["w"] * c["h"] * 3 for c in (frame_camera.train_camera(t, c, down) for c in cams)) / 1e9
     return gb if cache == "cpu" else 0.0
 
 

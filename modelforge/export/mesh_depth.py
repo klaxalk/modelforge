@@ -33,9 +33,12 @@ def _load_frame_camera():
 frame_camera = _load_frame_camera()
 
 
-def undistorted_camera(t, downscale):
+def undistorted_camera(t, downscale=1, dataset=None):
     """(K, width, height) of the undistorted, cropped training image (nerfstudio's datamanager); t = a camera's
-    intrinsics (frame_camera.camera, or a transforms.json with one camera)."""
+    intrinsics (frame_camera.camera, or a transforms.json with one camera). With the dataset's transforms: the
+    camera at its training size there (frame_camera.train_camera: one common resolution for several cameras)."""
+    if dataset is not None:
+        t, downscale = frame_camera.train_camera(dataset, t, downscale), 1
     s = 1.0 / downscale
     w, h = int(t["w"] * s), int(t["h"] * s)
     K = np.array([[t["fl_x"] * s, 0, t["cx"] * s], [0, t["fl_y"] * s, t["cy"] * s], [0, 0, 1.0]])
@@ -64,7 +67,7 @@ def main():
     cams, index = frame_camera.cameras(t)
     if any(c.get("camera_model", "OPENCV") != "OPENCV" for c in cams):
         raise SystemExit("mesh depth: only OPENCV cameras are supported")
-    und = [undistorted_camera(c, a.downscale) for c in cams]  # (K, w, h) per camera
+    und = [undistorted_camera(c, a.downscale, t) for c in cams]  # (K, w, h) per camera
     st = os.stat(a.mesh)
     key = {"mesh": os.path.realpath(a.mesh), "size": st.st_size,  # one cache whatever path reaches the mesh
            "mtime": st.st_mtime, "downscale": a.downscale,

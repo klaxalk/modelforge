@@ -31,3 +31,32 @@ def largest(t):
     """The camera with the widest image (the training plan's resolution rules use it)."""
     cams, _ = cameras(t)
     return max(cams, key=lambda c: c.get("w", 0)) if cams else {k: t[k] for k in KEYS if k in t}
+
+
+def long_side(t):
+    """The longest image side of the dataset's cameras: the export's (and a tile's) "mf_long_side" = the project's
+    largest camera, else the largest here."""
+    if t.get("mf_long_side"):
+        return int(t["mf_long_side"])
+    cams, _ = cameras(t)
+    return max((max(c["w"], c["h"]) for c in cams), default=max(t.get("w", 0), t.get("h", 0)))
+
+
+def train_scale(t, cam, downscale):
+    """One common training resolution (multi-camera projects): the largest camera trains at 1 / downscale, every
+    other camera at the largest size within that long side, never upscaled (a 1080p camera beside 4K ones at x2
+    trains at 1920, not 960). With one camera: 1 / downscale, as nerfstudio's --downscale-factor."""
+    top, lc = long_side(t), max(cam["w"], cam["h"])
+    return 1.0 / downscale if lc >= top else min(1.0, top / (downscale * lc))
+
+
+def train_camera(t, cam, downscale):
+    """The camera as it trains: intrinsics x train_scale, size int(w x scale) (nerfstudio's rescale_output_resolution
+    rounding; the same as floor(w / N) for the factors used)."""
+    s = train_scale(t, cam, downscale)
+    out = dict(cam)
+    for k in ("fl_x", "fl_y", "cx", "cy"):
+        if k in out:
+            out[k] = cam[k] * s
+    out["w"], out["h"] = int(cam["w"] * s), int(cam["h"] * s)
+    return out

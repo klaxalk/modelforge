@@ -46,33 +46,44 @@ def _features(db, name):
 
 
 def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
-    """{name: {"viewmat": 4x4 world -> OpenCV camera, "inliers": n}} for the held-out images that could be
-    located (others are reported and skipped)."""
+    """{name: {"viewmat": 4x4 world -> OpenCV camera, "inliers": n, "camera_id": COLMAP camera}} for the held-out
+    images that could be located (others are reported and skipped). A held-out image takes the camera of the model
+    images of its source nearest in time (a source is one camera), its features extracted with that camera."""
     import cv2
     import pycolmap
     rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    if len(rec.cameras) > 1:
-        raise RuntimeError("the held-out evaluation supports one camera per project for now (docs/todo_multicamera.md)")
-    cam = next(iter(rec.cameras.values()))
     report = json.load(open(os.path.join(project, "report.json")))
     upright = bool(report.get("features", {}).get("upright", True))
     ws = os.path.join(project, "evaluation")
     os.makedirs(ws, exist_ok=True)
-    names = [im["image"] for im in holdout["images"]]
-    hdb_path = os.path.join(ws, "holdout_features.db")
-    _sift(hdb_path, holdout["images_dir"], names, upright, cam.model.name, list(cam.params))
-    hdb = pycolmap.Database.open(hdb_path)
     mdb = pycolmap.Database.open(os.path.join(project, "features.db"))
     poses = json.load(open(os.path.join(project, "poses.json")))["images"]
     model_by_name = {im.name: im for im in rec.images.values() if im.has_pose}
     cands = [(p.get("source", 0), p.get("time_s", 0.0), p["image"]) for p in poses if p["image"] in model_by_name]
+
+    def nearest(h):
+        return sorted((c for c in cands if c[0] == h.get("source", 0)),
+                      key=lambda c: abs(c[1] - h.get("time_s", 0.0)))[:neighbors]
+    cam_of = {h["image"]: model_by_name[near[0][2]].camera_id for h in holdout["images"] for near in [nearest(h)]
+              if near}
+    hdbs = {}  # camera id -> held-out features (one database per camera: SINGLE mode, its intrinsics)
+    for cid in sorted(set(cam_of.values())):
+        cam = rec.cameras[cid]
+        path = os.path.join(ws, "holdout_features.db" if len(rec.cameras) == 1 else f"holdout_features_c{cid}.db")
+        _sift(path, holdout["images_dir"], [n for n, c in cam_of.items() if c == cid], upright, cam.model.name,
+              list(cam.params))
+        hdbs[cid] = pycolmap.Database.open(path)
     bf = cv2.BFMatcher(cv2.NORM_L2)
     out = {}
     try:
         for h in holdout["images"]:
+            if h["image"] not in cam_of:
+                log(f"evaluate: {h['image']} not located (no model image of its source)")
+                continue
+            cid = cam_of[h["image"]]
+            cam, hdb = rec.cameras[cid], hdbs[cid]
             kp, desc = _features(hdb, h["image"])
-            near = sorted((c for c in cands if c[0] == h.get("source", 0)),
-                          key=lambda c: abs(c[1] - h.get("time_s", 0.0)))[:neighbors]
+            near = nearest(h)
             p2d, p3d, seen = [], [], set()
             for _, _, mname in near:
                 img = model_by_name[mname]
@@ -94,9 +105,10 @@ def pose_holdout(project, holdout, neighbors=6, ratio=0.8, log=print):
                 continue
             m = np.eye(4)
             m[:3] = res["cam_from_world"].matrix()
-            out[h["image"]] = {"viewmat": m.tolist(), "inliers": int(res["num_inliers"])}
+            out[h["image"]] = {"viewmat": m.tolist(), "inliers": int(res["num_inliers"]), "camera_id": int(cid)}
     finally:
-        hdb.close()
+        for hdb in hdbs.values():
+            hdb.close()
         mdb.close()
     return out
 
@@ -115,19 +127,26 @@ def run(project, holdout, width=1920, log=print, splat_path=None, located=None, 
     if not located:
         raise RuntimeError("no held-out image could be located in the model")
     rec = pycolmap.Reconstruction(os.path.join(project, "sparse", "refined"))
-    cam = next(iter(rec.cameras.values()))
-    p = [float(x) for x in cam.params]
-    fx, fy, cx, cy = (p[0], p[0], p[1], p[2]) if cam.model.name in ("SIMPLE_RADIAL", "RADIAL", "SIMPLE_PINHOLE") \
-        else p[:4]
-    dist = p[4:8] if cam.model.name == "OPENCV" else ([p[3], p[4] if len(p) > 4 else 0.0, 0.0, 0.0]
-                                                     if cam.model.name in ("SIMPLE_RADIAL", "RADIAL") else [0.0] * 4)
     ws = os.path.join(project, "evaluation")
     names = list(located)
+    first = next(iter(rec.cameras))  # older located records carry no camera: a one-camera project
+    ids = sorted({int(located[n].get("camera_id", first)) for n in names})
+    Ks, dists = [], []
+    for cid in ids:
+        cam = rec.cameras[cid]
+        p = [float(x) for x in cam.params]
+        fx, fy, cx, cy = (p[0], p[0], p[1], p[2]) if cam.model.name in ("SIMPLE_RADIAL", "RADIAL", "SIMPLE_PINHOLE") \
+            else p[:4]
+        Ks.append([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+        dists.append(p[4:8] if cam.model.name == "OPENCV" else ([p[3], p[4] if len(p) > 4 else 0.0, 0.0, 0.0]
+                     if cam.model.name in ("SIMPLE_RADIAL", "RADIAL") else [0.0] * 4))
     inp = os.path.join(ws, "eval_input.npz")
     g = splat_mesh.load_splat(splat_path or os.path.join(project, "splat", "splat_enu.ply"))
     np.savez(inp, viewmats=np.array([located[n]["viewmat"] for n in names], np.float32),
-             K=np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], np.float64), dist=np.array(dist, np.float64),
-             width=cam.width, height=cam.height, render_width=int(width), rasterize_mode=rasterize_mode,
+             K=np.array(Ks, np.float64), dist=np.array(dists, np.float64),
+             width=np.array([rec.cameras[c].width for c in ids]), height=np.array([rec.cameras[c].height for c in ids]),
+             camera=np.array([ids.index(int(located[n].get("camera_id", first))) for n in names]),
+             render_width=int(width), rasterize_mode=rasterize_mode,
              paths=np.array([os.path.join(holdout["images_dir"], n) for n in names]),
              **({"gains": np.array([float(gains.get(n, 1.0)) for n in names])} if gains else {}), **g)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "splat_eval.py")

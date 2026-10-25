@@ -340,7 +340,7 @@ def loss_masks(project, k, tile, maps, on_line=print, job=None):
         cam = frame_camera.camera(t, f)
         ck = tuple(sorted(cam.items()))
         if ck not in rays_of:
-            K, W, H = undistorted_camera(cam, n_down)
+            K, W, H = undistorted_camera(cam, n_down, t)
             vs, us = np.mgrid[0:H:MASK_STRIDE, 0:W:MASK_STRIDE]
             rays_of[ck] = (np.stack([(us + 0.5 - K[0, 2]) / K[0, 0], (vs + 0.5 - K[1, 2]) / K[1, 1],
                                      np.ones(us.shape)], -1), W, H)
@@ -443,6 +443,9 @@ def write_tile(project, k, tile, downscale=1):
     out = tile_dir(project, k)
     os.makedirs(out, exist_ok=True)
     t = json.load(open(os.path.join(project, "transforms.json")))
+    from modelforge.export import frame_camera
+    if len(frame_camera.cameras(t)[0]) > 1:  # the project's training resolution, whichever cameras the tile has
+        t["mf_long_side"] = frame_camera.long_side(t)
     t["frames"] = [t["frames"][i] for i in tile["frames"]]
     ply = plyfile.PlyData.read(os.path.join(project, t.get("ply_file_path", "sparse_pc.ply")))
     v = ply["vertex"].data

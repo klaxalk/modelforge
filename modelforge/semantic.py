@@ -75,22 +75,23 @@ def status(project):
 
 
 def _cameras(project):
-    """World -> OpenCV view matrices of the transforms.json frames, K, distortion, size, image paths."""
+    """World -> OpenCV view matrices of the transforms.json frames, then per camera K (C, 3, 3), distortion (C, 4),
+    width (C,), height (C,), the camera of each frame, image paths (several cameras: each its own)."""
+    from modelforge.export import frame_camera
     t = json.load(open(os.path.join(project, "transforms.json")))
-    if t.get("mf_cameras", 1) > 1:
-        raise ValueError("semantic features support one camera per project for now (this one has "
-                         f"{t['mf_cameras']}: docs/todo_multicamera.md)")
-    if t.get("camera_model", "OPENCV") != "OPENCV":
-        raise ValueError(f"semantic features support OPENCV cameras, not {t.get('camera_model')}")
-    K = np.array([[t["fl_x"], 0, t["cx"]], [0, t["fl_y"], t["cy"]], [0, 0, 1]], float)
-    dist = np.array([t.get(k, 0.0) for k in ("k1", "k2", "p1", "p2")], float)
+    cams, index = frame_camera.cameras(t)
+    if any(c.get("camera_model", "OPENCV") != "OPENCV" for c in cams):
+        raise ValueError("semantic features support OPENCV cameras only")
+    K = np.array([[[c["fl_x"], 0, c["cx"]], [0, c["fl_y"], c["cy"]], [0, 0, 1]] for c in cams], float)
+    dist = np.array([[c.get(k, 0.0) for k in ("k1", "k2", "p1", "p2")] for c in cams], float)
     views, paths = [], []
     for f in t["frames"]:
         c2w = np.array(f["transform_matrix"], float)
         c2w[:3, 1:3] *= -1  # OpenGL -> OpenCV camera axes
         views.append(np.linalg.inv(c2w))
         paths.append(os.path.join(project, f["file_path"]))
-    return np.array(views, np.float32), K, dist, int(t["w"]), int(t["h"]), paths
+    return (np.array(views, np.float32), K, dist, np.array([int(c["w"]) for c in cams]),
+            np.array([int(c["h"]) for c in cams]), np.array(index, np.int32), paths)
 
 
 def _work(job, arrays, out_dir, params, line):
@@ -124,8 +125,8 @@ def _liner(on_line, on_progress, label=None):
 
 
 def _camera_arrays(project):
-    views, K, dist, w, h, paths = _cameras(project)
-    return dict(viewmats=views, K=K, dist=dist, width=w, height=h, paths=np.array(paths))
+    views, K, dist, w, h, cam, paths = _cameras(project)
+    return dict(viewmats=views, K=K, dist=dist, width=w, height=h, camera=cam, paths=np.array(paths))
 
 
 def run(project, width=WIDTH, dims=DIMS, version=VERSION, on_line=print, on_progress=None, job=None):

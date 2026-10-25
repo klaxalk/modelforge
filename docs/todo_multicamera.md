@@ -1,6 +1,6 @@
 # TODO: multi-camera DJI projects
 
-Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), **4–5 done the same day** except the common training resolution, semantic features and the held-out evaluation; **6 (GUI) done the same day**. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
+Priority: low. Status: planned 2026-10-23; **steps 1–3 done 2026-10-24** (SfM with several cameras), **4–5 done the same day** except the common training resolution, semantic features and the held-out evaluation; **6 (GUI) done the same day**; **the rest done 2026-10-25** (one common training resolution, semantic features and the held-out evaluation per camera, frustums per camera): nothing open but a real mixed-drone / zooming clip to check against. Scope: **DJI kind only** (every photo has a pose prior, so refine stays the
 prior BA). Today a project is one camera: `dji/ingest.py` refuses sources of different resolutions, features use
 `CameraMode.SINGLE`, transforms.json carries one global camera. Two drones that both record 4K pass the resolution
 check today and wrongly share one set of intrinsics.
@@ -106,3 +106,33 @@ Order: steps 1–3 + the berlin test (SfM with several cameras), then 4–5 (spl
   own camera (`Snapshot.intrinsics["cameras"]` / `["by_image"]`, both snapshot readers); the refine History line has a
   focal length per camera. On the two-camera copy Inspect gives 0.33 / 0.27 px median for a photo of each camera.
 - Not done: frustums sized per camera (they use each camera's pose only; the frustum shape is the first camera's).
+
+## Done 2026-10-25: the rest (the user asked: "implement the multi camera support")
+
+- **One common training resolution** (`export/frame_camera.py`: `long_side`, `train_scale`, `train_camera`): the
+  largest camera trains at 1 / N (the Splat tab's downscale, auto as before from the widest camera), every other camera
+  at the largest size within that long side, never upscaled (4K + 1080p at x2: both 1920 wide; before 1920 / 960).
+  One-camera projects train exactly as before (nerfstudio's --downscale-factor).
+  - nerfstudio's single integer factor cannot do it, so `splat.training_data` writes `PROJECT/transforms_x<N>.json`:
+    every frame's camera at its training size, its photo in `images_<N>/` (written by `prepare_downscaled` at that
+    size) or `images/` when it trains at full size; `--data` that file, factor 1 (nerfstudio-data and the lidar-data
+    dataparser read a json path). An intermediate (Clean), archived on re-extraction.
+  - The training size readers take it: mesh depth maps (`undistorted_camera(cam, N, dataset)`), sky masks, the
+    tiles' loss masks, `auto_cache`, the memory estimate. The export writes `mf_long_side`; `write_tile` copies the
+    project's, so a tile without the largest camera trains its photos at the project's size.
+- **Semantic features per camera**: `semantic._cameras` gives K / distortion / size per camera + the camera of each
+  photo; the worker (`semantic_features.camera_setups`) undistorts each photo with its own camera and renders its
+  depth with that camera's K (the RADIO input keeps the width, the camera's aspect).
+- **Held-out evaluation per camera**: a held-out photo takes the camera of its source's model images nearest in time
+  (a source is one camera); features per camera group (`holdout_features_c<id>.db`), PnP with that camera; located
+  records carry `camera_id`; `splat_eval.setups` renders each with its own pinhole (render width per camera).
+- **Frustums per camera** (View): each registered photo's frustum has its camera's field of view and aspect
+  (`app._fov_aspect`); unregistered ones the first camera's.
+- **Checked** on the two-camera fullrun_test copy (`build/multicam/ws`: 1920 + 1280 px; `train_res.py`,
+  `sem_eval.py`, `render_check_nosky.py`): x2, 1500 steps, dense mesh depth + sky masks: both cameras train at
+  960 x 540, images / sky masks / depth maps (539 x 959 after undistortion) agree for all 80, depth error 0.89 %
+  median; training views without the sky PSNR 20.2 (1920 px camera) / 20.5 (1280 px); semantic features 43 s;
+  8 held-out photos of the 1280 camera located with it (1.6k-5.3k inliers), renders line up. Tests:
+  `test_multicamera.py::test_frame_camera`, `test_training_data_at_one_resolution`.
+- Found: with sky masks the held-out PSNR counts the (black) sky against the photo's: 11-15 dB here vs 20 without
+  the sky. `evaluate` does not leave the sky out yet.
