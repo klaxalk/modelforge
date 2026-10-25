@@ -3,13 +3,11 @@ cell its own viser splat object at the level the camera needs (viser sorts all s
 blend correctly). The cut follows the browser that moved last: ~SETTLE s after its camera stops (every MOVING_EVERY s
 while it keeps moving), the changed cells are swapped in one atomic update.
 
-The number of Gaussians sent stays constant (a padding object of invisible Gaussians, PAD, takes up the rest of the
-cap): viser rebuilds its splat buffer when the total changes and draws nothing until its sort worker has ordered the
-new one (only its very first buffer starts in identity order), so every swap flashed; with the same total it updates
-the buffer in place and keeps drawing with the previous order (the user saw a flash every ~2 s while moving).
-
-No hierarchy yet for this splat: it is built in a job process of its own (~10 s per million Gaussians, ~0.5 GB per
-million), meanwhile the random subset is shown as before.
+Every cell keeps its viser object: a swap sets the existing handle's buffer (`_set`), so the client's splat groups keep
+their order. The browser (viser patched by docker/patch_viser_camera.py, SPLAT) keeps drawing the old buffer in its own
+order until the sort worker has ordered the new one, then shows both together; before, a swap showed the changed cells
+without a valid order for a moment (they flashed to the background, the user saw it every ~2 s while moving). A first
+fix padded every cut to a constant count; it made every sort bigger (more flicker while flying) and was removed.
 """
 import os
 import threading
@@ -20,15 +18,27 @@ import numpy as np
 from modelforge import splat_lod
 
 NODE = "/dense/splat_lod"
-PAD = NODE + "/pad"
 SETTLE = 0.4  # s after the camera stopped
 MOVING_EVERY = 2.0  # s between updates while it keeps moving
 MIN_MOVE = 0.02  # of the distance to the nearest cell: smaller moves do not count
 
 
+def pack(centers, covariances, rgbs, opacities):
+    """viser's splat buffer (N x 8 uint32), as add_gaussian_splats packs it."""
+    from viser._assignable_props_api import colors_to_uint8
+    n = len(centers)
+    cov_triu = np.asarray(covariances).reshape((-1, 9))[:, np.array([0, 1, 2, 4, 5, 8])]
+    return np.concatenate([np.ascontiguousarray(centers, dtype=np.float32).view(np.uint8),
+                           np.zeros((n, 4), dtype=np.uint8),
+                           np.ascontiguousarray(cov_triu, dtype=np.float16).view(np.uint8),
+                           colors_to_uint8(np.asarray(rgbs)), colors_to_uint8(np.asarray(opacities))],
+                          axis=-1).view(np.uint32)
+
+
 class SplatLod:
     def __init__(self, app):
         self.app = app
+        self.handles = {}  # cell index -> its viser splat handle
         self.idx = None  # the index in use
         self.drawn = {}  # cell -> level drawn
         self.cam = None  # (position, forward, fov, height) of the last camera
@@ -96,12 +106,21 @@ class SplatLod:
     def forget(self):
         """The scene was cleared (project switch): nothing is drawn any more."""
         with self.lock:
-            self.drawn, self.idx, self.cam, self.cut_cam = {}, None, None, None
+            self.drawn, self.idx, self.cam, self.cut_cam, self.handles = {}, None, None, None, {}
 
     def _clear(self):
-        if self.drawn:
+        if self.drawn or self.handles:
             self.app.server.scene.remove_by_name(NODE)
-        self.drawn = {}
+        self.drawn, self.handles = {}, {}
+
+    def _set(self, key, name, c, cov, rgb, op):
+        """Draw a cell: a new viser object the first time, else its buffer replaced in place."""
+        h = self.handles.get(key)
+        if h is None:
+            self.handles[key] = self.app.server.scene.add_gaussian_splats(name, centers=c, covariances=cov, rgbs=rgb,
+                                                                          opacities=op)
+            return
+        h.buffer = pack(c, cov, rgb, op)
 
     def redecorate(self):
         """The semantic search changed: send every drawn cell again."""
@@ -124,22 +143,6 @@ class SplatLod:
         pos, fwd, fov, h = self.cam
         return splat_lod.choose(idx, pos, fwd, fov_y=fov, height_px=h, budget=budget)
 
-    def _cap(self):
-        """Gaussians sent in all: the budget, or the coarsest cut when even that is larger; + 1 for the padding."""
-        coarsest = sum(c["levels"][-1]["n"] for c in self.idx["cells"])
-        return max(int(self.app.g_lod_budget.value), coarsest) + 1
-
-    def _pad(self, n):
-        """n invisible Gaussians (opacity 0, tiny, at the scene's centre): the rest of the cap."""
-        lo = np.min([c["box"][0] for c in self.idx["cells"]], 0)
-        hi = np.max([c["box"][1] for c in self.idx["cells"]], 0)
-        n = max(1, int(n))
-        self.pad_n = n
-        self.app.server.scene.add_gaussian_splats(
-            PAD, centers=np.tile(0.5 * (lo + hi), (n, 1)).astype(np.float32),
-            covariances=np.tile(np.eye(3, dtype=np.float32) * 1e-8, (n, 1, 1)),
-            rgbs=np.zeros((n, 3), np.float32), opacities=np.zeros((n, 1), np.float32))
-
     def _apply(self, cut):
         project, scene = self.app.path, self.app.server.scene
         changed = [i for i, k in cut.items() if self.drawn.get(i) != k]
@@ -147,7 +150,6 @@ class SplatLod:
             return
         sem = self.app.semantic
         with self.app.server.atomic():
-            self._pad(self._cap() - self.total(cut))  # the same total as before: no flash (see the top)
             for i in changed:
                 k = cut[i]
                 cell = self.idx["cells"][i]
@@ -155,7 +157,7 @@ class SplatLod:
                 if sem.rel is not None:
                     src, parent = splat_lod.cell_sources(project, k, cell)
                     c, cov, rgb, op = sem.decorate(c, cov, rgb, op, src, parent)
-                scene.add_gaussian_splats(f"{NODE}/c{i:04d}", centers=c, covariances=cov, rgbs=rgb, opacities=op)
+                self._set(i, f"{NODE}/c{i:04d}", c, cov, rgb, op)
                 self.drawn[i] = k
         self.app._lod_status()
 

@@ -94,12 +94,19 @@ browser's load stays the same everywhere.
 3. Render fine-tuning of the coarse levels.
 4. A 3D Tiles export (KHR Gaussian splatting) for viewers outside the GUI (Cesium).
 
-## Flash on every swap (fixed 2026-10-25)
+## Flash on every swap, flicker while flying (2026-10-25)
 
-The user saw the splat flash every few seconds while moving (the cut is swapped every MOVING_EVERY 2 s then).
-viser's client (Splatting/GaussianSplats.tsx) rebuilds its splat buffer when the total number of Gaussians changes and
-leaves the new draw order empty until its sort worker answers (only the very first buffer starts in identity order),
-so nothing is drawn for a moment; with an unchanged total it updates the texture in place and draws with the previous
-order. `gui/lod.py` now pads every cut to a constant total (the budget, or the coarsest cut + 1) with an invisible
-group (`/dense/splat_lod/pad`: opacity 0, tiny, at the scene's centre). Left: until the new sort arrives, one frame or
-so in the previous order (slight shimmer at most). Test: `test_view_draws_cells` (total constant across a swap).
+The user saw changed cells flash to the background every ~2 s while moving (the cut is swapped every MOVING_EVERY then).
+viser's client (Splatting/GaussianSplats.tsx) applied a changed splat buffer at once, with a draw order its sort worker
+had not computed for it: a new total → a new buffer whose order starts empty (only the very first buffer starts in
+identity order), so nothing drawn; the same total → the old order over the new layout. Also, re-adding a node under
+the same name made it a new splat group.
+- First fix (padding every cut to a constant count with invisible Gaussians): the flash stayed for the changed cells,
+  and the user then saw Gaussians flicker dark / light while flying: the padding made every sort the full budget, so
+  the order lagged the camera more. Removed.
+- Now: `gui/lod.py` keeps each cell's viser object and sets its handle's buffer (`_set`, `pack` = viser's packing),
+  and `docker/patch_viser_camera.py` (SPLAT) makes the client stage a changed buffer (same group count) until the sort
+  worker's first sort of it arrives (results tagged with the buffer generation), then apply buffer and order together;
+  results for other generations are dropped. Checked by applying the edits to the decoded bundle (each matches once)
+  and `node --check` of the bundle and the worker; not yet seen in a browser. Test: `test_view_draws_cells` (the same
+  handles across swaps, `pack` equals viser's buffer).

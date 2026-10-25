@@ -14,6 +14,8 @@ the code after unpacking; each pattern occurs once, in the camera controls' per-
    hidden input data-fly names (`report`), so the server pauses the clock (`paused`, for every browser, the
    slider and the photo window) and continues it from t.
 
+Splat buffer updates are staged until the sort worker has ordered them (SPLAT below): no gap, no stale order.
+
 Re-applying is safe: the loader's edit and the script are replaced, so this runs on an image patched by the older
 patch_viser_keys.sh too. Fails if viser's loader or the hook changed.
 
@@ -29,8 +31,40 @@ NEW_HOOK = ("qf((mfX,t)=>{let n=a.cameraControl,r=j.current;let mfE=document.get
             "if(n===null||r.size===0&&!mfO||!n.enabled)return;mfO&&n.rotate(mfO*Yt.DEG2RAD*Math.min(t,.1),0,!0);"
             "let i=(window.__mfSpeed=+(mfE?.dataset.speed||window.__mfSpeed||5))*t,o=50*Yt.DEG2RAD*t;")
 DECODE = "const code=td.decode(heap.subarray(up+ss,up+sz))"
+# Splat updates without a gap (the user saw changed LoD cells flash to the background, then flicker): viser applied a
+# changed splat buffer at once, with a draw order the sort worker had not computed for it yet (a new buffer size:
+# empty, so nothing drawn; same size: the old order on the new layout). Now the worker tags each sort with the buffer
+# generation it sorted (`gen`), and an update (same group count) only stages the new buffer: the old one is drawn,
+# in its own order, until the worker's first sort of the new one arrives; then buffer and order are applied together.
+SPLAT_SEND = "m({updateBuffer:p.gaussianBuffer,updateGroupIndices:p.groupIndices,updateNumGroups:p.numGroups})"
+SPLAT = (
+    # the worker: the generation of the buffer it sorts, in every result
+    ("self.postMessage({sortedIndices:o},[o.buffer])", "self.postMessage({sortedIndices:o,gen:self.__mfg|0},[o.buffer])"),
+    ("e.setBuffer(n.updateBuffer,n.updateGroupIndices),r=!0",
+     "e.setBuffer(n.updateBuffer,n.updateGroupIndices),self.__mfg=n.gen|0,r=!0"),
+    # viser's own update paths (another group count): shown at once, as before, as a new generation
+    (SPLAT_SEND, "m({updateBuffer:p.gaussianBuffer,updateGroupIndices:p.groupIndices,updateNumGroups:p.numGroups,"
+                 "gen:s.mfShown=s.mfGen=(s.mfGen|0)+1}),s.mfPending=null"),
+    # a sort result: the staged buffer goes in with its first order; results for other generations are dropped
+    ("o.current.onmessage=e=>{let n=e.data.sortedIndices;s.current&&n.length===s.current.numGaussians&&(",
+     "o.current.onmessage=e=>{let n=e.data.sortedIndices,G=e.data.gen|0,P=s.mfPending;if(P&&G===P.gen){"
+     "s.mfPending=null;s.mfShown=G;P.apply()}if(G!==(s.mfShown|0))return;"
+     "s.current&&n.length===s.current.numGaussians&&("),
+    # an update with the same group count: staged
+    ("else if(h&&s.current){if(g){",
+     "else if(h&&s.current){if(p.numGroups===s.current.numGroups){let G=(s.mfGen|0)+1,P=p;s.mfGen=G;"
+     "s.mfPending={gen:G,apply:()=>{if(P.numGaussians!==s.current.numGaussians){let e=s.current;"
+     "s.current=pz(P.gaussianBuffer,P.numGroups,a);setTimeout(()=>{e.textureBuffer.dispose(),e.geometry.dispose(),"
+     "e.material.dispose(),e.textureT_camera_groups.dispose()},500);u.current=new Float32Array;"
+     "s.current.material.uniforms.transitionInState.value=1;s.current.material.uniforms.numGaussians.value="
+     "P.numGaussians;s.current.textureBuffer.needsUpdate=!0;f()}else{let e=s.current.textureBuffer.image.data;"
+     "e.fill(0),e.set(P.gaussianBuffer),s.current.textureBuffer.needsUpdate=!0}t.mutable.current.requestRender()}};"
+     "m({updateBuffer:p.gaussianBuffer,updateGroupIndices:p.groupIndices,updateNumGroups:p.numGroups,gen:G})}"
+     "else if(g){"),
+)
 EDITS = ('.replaceAll("`KeyQ`","`KeyF`").replaceAll("`KeyE`","`KeyR`")'
-         f'.replace("{HOOK}","{NEW_HOOK}")')
+         f'.replace("{HOOK}","{NEW_HOOK}")'
+         + "".join(f'.{"replaceAll" if old == SPLAT_SEND else "replace"}("{old}","{new}")' for old, new in SPLAT))
 
 FLY = """<script id="mf-fly">(()=>{
 let P=null,Pk=null,C=null,Ck=null,t0=0,touch=-1e9,hold=false,frozen=null,resumed=0,seq=0;

@@ -98,16 +98,33 @@ def test_view_draws_cells(tmp_path, monkeypatch):
             time.sleep(0.2)
         assert app.lod.idx is not None, app.g_dense_md.content
         assert app.lod.total() <= 30_000 and "level of detail" in app.g_dense_md.content
-        sent = app.lod.total() + app.lod.pad_n  # padded to a constant total: viser updates in place, no flash
-        assert sent == app.lod._cap()
-        coarse = dict(app.lod.drawn)
-        cam = SimpleNamespace(position=(-5.0, -5.0, 1.0), look_at=(0.0, 0.0, 0.0), fov=0.9, image_height=1080)
+        t0 = time.time()
+        while len(app.lod.drawn) < len(app.lod.idx["cells"]) and time.time() - t0 < 10:  # the first draw done
+            time.sleep(0.1)
+        with app.lod.lock:
+            coarse, handles = dict(app.lod.drawn), dict(app.lod.handles)
+        rng = np.random.default_rng(0)  # pack() = viser's own packing
+        c, rgb, op = rng.normal(size=(5, 3)), rng.random((5, 3)), rng.random((5, 1))
+        cov = np.tile(np.eye(3) * 0.01, (5, 1, 1))
+        h = app.server.scene.add_gaussian_splats("/test_pack", centers=c, covariances=cov, rgbs=rgb, opacities=op)
+        assert np.array_equal(h.buffer, glod.pack(c, cov, rgb, op))
+        h.remove()
+        far = SimpleNamespace(position=(0.0, 0.0, 1e4), look_at=(0.0, 0.0, 0.0), fov=0.9, image_height=1080)
+        app.lod.on_camera(SimpleNamespace(camera=far))  # far away: every cell at its coarsest level
+        coarsest = {i: len(c["levels"]) - 1 for i, c in enumerate(app.lod.idx["cells"])}
+        t0 = time.time()
+        while app.lod.drawn != coarsest and time.time() - t0 < 10:
+            time.sleep(0.1)
+        assert app.lod.drawn == coarsest
+        box = np.array(app.lod.idx["cells"][0]["box"], float)  # inside cell 0: it gets the finest level
+        mid = box.mean(0)
+        cam = SimpleNamespace(position=tuple(mid), look_at=tuple(mid + [1.0, 0, -0.2]), fov=0.9, image_height=1080)
         app.lod.on_camera(SimpleNamespace(camera=cam))
         t0 = time.time()
-        while app.lod.drawn == coarse and time.time() - t0 < 10:
+        while app.lod.drawn.get(0) != 0 and time.time() - t0 < 10:
             time.sleep(0.1)
-        assert app.lod.drawn != coarse and 0 in app.lod.drawn.values() and app.lod.total() <= 30_000
-        assert app.lod.total() + app.lod.pad_n == sent
+        assert app.lod.drawn[0] == 0 and app.lod.total() <= 30_000
+        assert all(app.lod.handles[k] is v for k, v in handles.items())  # the same objects, buffers replaced
         app.semantic.rel = np.linspace(0, 1, idx_n := app.lod.idx["gaussians"])  # a fake search result
         app.semantic.g_near.value = False
         app.redraw_splat_decorated()
