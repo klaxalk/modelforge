@@ -167,12 +167,16 @@ class SplatfactoLidarModel(SplatfactoModel):
                   f"x{g.max():.2f})" if self.exposure_gains else "[lidar] use_exposure: no exposure gains in "
                   "transforms.json (frames mf_exposure)", flush=True)
         self.sun_files = meta.get("sun_files") if self.config.sun_light else None
+        self._sun_cache = {}  # (photo, H, W) -> its sunlight map at that size, blurred (CPU, float16)
+        ref = meta.get("sun_ref")  # the photos whose ambient sets the splat's look (the most overcast flight)
+        self.sun_ref = torch.tensor([bool(r) for r in ref]) if ref and any(ref) else None
         if self.sun_files:
             n = len(self.sun_files)
             self.mf_ambient = torch.nn.Parameter(torch.zeros(n, 3))  # log, per photo
             self.mf_sun = torch.nn.Parameter(torch.full((n, 3), -3.0))  # log: sunlight starts weak
-            print(f"[lidar] sun light: maps for {sum(f is not None for f in self.sun_files)} of {n} training images",
-                  flush=True)
+            print(f"[lidar] sun light: maps for {sum(f is not None for f in self.sun_files)} of {n} training images"
+                  + (f"; the look of the {int(self.sun_ref.sum())} reference photos" if self.sun_ref is not None
+                     else ""), flush=True)
         elif self.config.sun_light:
             print("[lidar] sun_light: no sun maps (dataparser --sun-maps)", flush=True)
         if self.mask_files:
@@ -194,22 +198,28 @@ class SplatfactoLidarModel(SplatfactoModel):
               "training as plain splatfacto", flush=True)
 
     def _sun_light(self, idx, H, W):
-        """(H, W, 3) light of training photo idx: ambient + sun x S (unknown pixels: the photo's mean S)."""
+        """(H, W, 3) light of training photo idx: ambient + sun x S (unknown pixels: the photo's mean S). The map,
+        blurred and at this size, is kept per photo and size (read + blurred per step doubled the training time)."""
         amb = torch.exp(self.mf_ambient[idx])
         sun = torch.exp(self.mf_sun[idx])
         f = self.sun_files[idx] if idx < len(self.sun_files) else None
         if f is None:
             return amb.view(1, 1, 3).expand(H, W, 3)
-        import cv2
-        S = np.load(f).astype(np.float32)
-        known = S >= 0
-        S[~known] = float(S[known].mean()) if known.any() else 0.0
-        if S.shape != (H, W):
-            S = cv2.resize(S, (W, H), interpolation=cv2.INTER_AREA)
-        b = self.config.sun_light_blur * W
-        if b > 0.5:
-            S = cv2.GaussianBlur(S, (0, 0), b)
-        S = torch.from_numpy(S).to(amb.device)
+        key = (idx, H, W)
+        S = self._sun_cache.get(key)
+        if S is None:
+            import cv2
+            S = np.load(f).astype(np.float32)
+            known = S >= 0
+            S[~known] = float(S[known].mean()) if known.any() else 0.0
+            if S.shape != (H, W):
+                S = cv2.resize(S, (W, H), interpolation=cv2.INTER_AREA)
+            b = self.config.sun_light_blur * W
+            if b > 0.5:
+                S = cv2.GaussianBlur(S, (0, 0), b)
+            S = torch.from_numpy(S).half()
+            self._sun_cache[key] = S
+        S = S.to(amb.device, non_blocking=True).float()
         return amb.view(1, 1, 3) + sun.view(1, 1, 3) * S[..., None]
 
     def get_param_groups(self):
@@ -288,8 +298,10 @@ class SplatfactoLidarModel(SplatfactoModel):
                 mm = F.interpolate(m[None, None].float(), size=(H, W), mode="nearest")[0, 0].to(target.device) > 0.5
                 outputs = dict(outputs, lidar_depth=torch.where(mm[:, :, None], target, torch.zeros_like(target)))
         loss = super().get_loss_dict(outputs, batch, metrics_dict)
-        if self.training and self.sun_files:  # the scale between the Gaussians' colour and the light: mean ambient 1
-            loss["mf_light_gauge"] = 0.1 * self.mf_ambient.mean() ** 2
+        if self.training and self.sun_files:  # the scale between the Gaussians' colour and the light: the reference
+            # photos' (the most overcast flight's) mean ambient 1, so the splat looks like them; else all photos'
+            amb = self.mf_ambient[self.sun_ref.to(self.mf_ambient.device)] if self.sun_ref is not None else self.mf_ambient
+            loss["mf_light_gauge"] = 0.1 * amb.mean() ** 2
         if sky_loss is not None:
             loss["sky_alpha"] = sky_loss
         if self.training and self.config.flatten_lambda > 0:

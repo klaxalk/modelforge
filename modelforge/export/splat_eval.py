@@ -56,6 +56,14 @@ def main():
             img = cv2.remap(img, maps[0], maps[1], cv2.INTER_LINEAR)
             img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
             gt = torch.tensor(img, device=dev, dtype=torch.float32) / 255.0
+            keep = None  # sky masks (evaluate.run sky=): the sky left out of the scores
+            if "masks" in d.files and str(d["masks"][i]):
+                mk = cv2.imread(str(d["masks"][i]), cv2.IMREAD_GRAYSCALE)
+                if mk is not None:
+                    h0, w0 = maps[0].shape[:2]
+                    mk = cv2.remap(cv2.resize(mk, (w0, h0), interpolation=cv2.INTER_NEAREST), maps[0], maps[1],
+                                   cv2.INTER_NEAREST)
+                    keep = torch.tensor(cv2.resize(mk, (W, H), interpolation=cv2.INTER_NEAREST) > 127, device=dev)
             colors, alphas, _ = rasterization(
                 means=g["means"], quats=g["quats"], scales=g["scales"], opacities=g["opacities"], colors=g["colors"],
                 viewmats=torch.tensor(d["viewmats"][i], device=dev)[None],
@@ -65,15 +73,21 @@ def main():
             pred = colors[0, ..., :3].clamp(0, 1)  # black background: the alpha-weighted sum as is
             if "gains" in d.files:
                 pred = ((pred.clamp(1e-6, 1) ** 2.2) * float(d["gains"][i])).clamp(1e-6, 1) ** (1 / 2.2)
+            sel = keep.reshape(-1) if keep is not None else torch.ones(H * W, dtype=torch.bool, device=dev)
             X = torch.cat([pred.reshape(-1, 3), torch.ones(H * W, 1, device=dev)], 1)
-            M = torch.linalg.lstsq(X, gt.reshape(-1, 3)).solution
+            M = torch.linalg.lstsq(X[sel], gt.reshape(-1, 3)[sel]).solution
             cc = (X @ M).clamp(0, 1).reshape(H, W, 3)
+            if keep is not None:  # the sky: the photo's own pixels in the render (no error there for SSIM / LPIPS)
+                pred = torch.where(keep[..., None], pred, gt)
+                cc = torch.where(keep[..., None], cc, gt)
             a = gt.permute(2, 0, 1)[None]
             b = pred.permute(2, 0, 1)[None]
-            m = {"psnr": float(peak_signal_noise_ratio(b, a, data_range=1.0)),
-                 "ssim": float(structural_similarity_index_measure(b, a, data_range=1.0)),
-                 "psnr_cc": float(peak_signal_noise_ratio(cc.permute(2, 0, 1)[None], a, data_range=1.0)),
-                 "empty": float((alphas[0, ..., 0] < 0.05).float().mean())}
+
+            def psnr(x):
+                return float(-10 * torch.log10(((x - gt) ** 2)[sel.view(H, W)].mean().clamp(min=1e-10)))
+            m = {"psnr": psnr(pred), "ssim": float(structural_similarity_index_measure(b, a, data_range=1.0)),
+                 "psnr_cc": psnr(cc), "empty": float((alphas[0, ..., 0] < 0.05).float().mean()),
+                 **({"sky": float(1 - keep.float().mean())} if keep is not None else {})}
             if lpips is not None:
                 m["lpips"] = float(lpips(b, a))
             per.append({k: round(v, 4) for k, v in m.items()})

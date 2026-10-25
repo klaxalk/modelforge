@@ -138,11 +138,13 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
 
 
 def run(project, holdout, width=1920, log=print, splat_path=None, located=None, report=True, gains=None,
-        rasterize_mode="classic"):
+        rasterize_mode="classic", sky=None):
     """Pose, render and score the held-out images; stats to report.json["evaluation"] (report=True) and
     returned. splat_path: another ENU splat than splat/splat_enu.ply (e.g. a training snapshot); located:
     pose_holdout's result, to locate the images once for several splats. gains: {image name: relative exposure}
-    (modelforge.exposure): each render scaled by it (a splat trained with use_exposure)."""
+    (modelforge.exposure): each render scaled by it (a splat trained with use_exposure). sky: a folder of sky masks
+    (<name>.png, 0 = sky; modelforge/sky.py): the sky left out of the scores (a splat trained with sky masks renders it
+    empty)."""
     import pycolmap
     from modelforge import splat, splat_mesh
     from modelforge.pipeline import Report
@@ -172,7 +174,9 @@ def run(project, holdout, width=1920, log=print, splat_path=None, located=None, 
              camera=np.array([ids.index(int(located[n].get("camera_id", first))) for n in names]),
              render_width=int(width), rasterize_mode=rasterize_mode,
              paths=np.array([os.path.join(holdout["images_dir"], n) for n in names]),
-             **({"gains": np.array([float(gains.get(n, 1.0)) for n in names])} if gains else {}), **g)
+             **({"gains": np.array([float(gains.get(n, 1.0)) for n in names])} if gains else {}),
+             **({"masks": np.array([os.path.join(sky, n + ".png") if os.path.exists(os.path.join(sky, n + ".png"))
+                                    else "" for n in names])} if sky else {}), **g)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "splat_eval.py")
     out_json = os.path.join(ws, "metrics.json")
     lines = []

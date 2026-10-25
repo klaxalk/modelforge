@@ -80,6 +80,11 @@ class LidarDataParser(Nerfstudio):
             folder = Path(self.config.sun_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]
             out.metadata["sun_files"] = [f if Path(f).exists() else None for f in files]
+            ref = folder / "ref.json"  # modelforge splat.sun_maps: the reference photos (the most overcast flight)
+            if ref.exists():
+                import json
+                names = set(json.load(open(ref)))
+                out.metadata["sun_ref"] = [Path(f).name in names for f in out.image_filenames]
         if self.config.depth_maps:
             folder = Path(self.config.depth_maps)
             files = [str(folder / (Path(f).name + ".npy")) for f in out.image_filenames]

@@ -362,6 +362,23 @@ def sun_maps(project, mesh, downscale, on_line=print, job=None, on_count=None):
             on_count(int(m.group(1)), int(m.group(2)))
     _stream([os.path.join(NS_BIN, "python"), script, project, mesh, sun_json, out, "--downscale", str(int(downscale))],
             line, job or Job())
+    # the splat's look: the flight with the least hard shadow (the lighting survey's dark share; run on every 10th photo
+    # when missing) sets the brightness (the plugin holds its photos' mean ambient at 1); one flight: all photos
+    survey = os.path.join(root, lighting.DIR, "survey.json")
+    srcs = json.load(open(os.path.join(root, "poses.json")))
+    by_src = {}
+    for r in srcs["images"]:
+        by_src.setdefault(r.get("source", 0), []).append(r["image"])
+    ref = None
+    if len(by_src) > 1:
+        sv = json.load(open(survey)) if os.path.exists(survey) else lighting.survey(root, every=10, on_line=on_line)
+        darkest = {s["source"]: s["dark"] for s in sv["sources"] if s.get("dark") is not None}
+        if darkest:
+            ref = min(darkest, key=darkest.get)
+            on_line(f"sun light: the splat looks like {os.path.basename(srcs['sources'][ref]['video'])} (least hard "
+                    f"shadow: {100 * darkest[ref]:.1f} % dark)")
+    json.dump(by_src[ref] if ref is not None else [n for v in by_src.values() for n in v],
+              open(os.path.join(out, "ref.json"), "w"))
     return out
 
 
