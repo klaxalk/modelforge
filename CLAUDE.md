@@ -909,8 +909,9 @@ Results on `berlin_3_1` (300 images, CPU):
 ## Robust priors (M3), `modelforge/sfm/robust.py`
 
 A `PriorModel` is self-calibrated after every round, starting from round 1.
-Round 0 still has the default focal length (2× off) and 40 px thresholds, so it
-runs with absolute priors only. Each update does, in order:
+Round 0 still has the default focal length (2× off) and 40 px thresholds, so no
+calibration or drift then; its BA has the absolute **and** the relative priors
+(`PriorModel.relative_start_round` 0, since 2026-10-25). Each update does, in order:
 1. **systematic**: boresight B = median camera-frame rotation residual;
    time offset δt = trimmed least squares of position residual on velocity.
    Both are estimated against the raw priors over *all* frames, then folded
@@ -920,16 +921,27 @@ runs with absolute priors only. Each update does, in order:
    the median whitened d² = χ²₃ median. Clamped to ×2 per round, with floors.
 3. **flag**: priors beyond χ²₆ at 99.9% lose their term in the next round.
    Cameras with fewer than 100 observations (`min_obs_to_reject`) are never
-   flagged: they can't overrule their prior, and losing it lets them drift.
+   flagged: they can't overrule their prior, and losing it lets them drift. The
+   same guard holds for a relative prior when either camera is weak
+   (`guard_relative`, 2026-10-26).
 
-**Loss on the absolute priors is Huber** (scale 3σ). Relative priors stay
-Cauchy.
+**Loss on the absolute priors is Huber** (scale 3σ); **the relative priors too
+since 2026-10-25** (`PriorModel.rel_loss`, Cauchy before).
 - Why: Cauchy's pull fades with distance. A camera seeing few points, each in
   a 2-view track that slides with it, escaped 35 m in round 0 and stayed
   there. This happened on two pieces of `berlin_3_1`, frame 2998, 15
   observations.
 - Huber's pull stays constant, and gross prior outliers are rejected by step 3
   anyway.
+- **Relative priors from round 0, Huber, guarded** (2026-10-25/26; the user: round 0 turned the smooth flight
+  into a jagged path). Before, round 0 had no relative priors, Cauchy let cameras that round 0 had moved off stay
+  there, and calibration then rejected the jumped pairs, so they were never pulled back. Metric
+  `build/jag2.py PROJECT`: |C_i − cubic fit over the ±3 neighbours, i left out| per source, for the priors and every
+  snapshot. karlak (1346 photos, p90 / p99): priors 21 / 124 cm; before: round 0 91 / 425, round 1 35 / 185; now
+  round 0 54 / 241, final 23 / 129; relative rejections 289 / 369 → 208 / 311 after rounds 0 / 1; final error
+  0.551 px. kladno_dopravnik (150 photos, one clean flight; `build/kdop_prior_ab.py`): old, Huber and Huber + guard
+  identical (path 1.1 / 3.0 cm vs the priors' 4.0 / 16.2 cm, 0.570 px): the images pin the cameras there.
+  `prior_ba(fix_poses=True)` (an experiment: poses constant) gave Ceres linear-solver failures on a berlin subset.
 - Single-video `berlin_3_1`, Cauchy → Huber: error median/p90 0.517/1.250 →
   0.490/1.139 px, prior deviation max 1.81 → 1.77 m. Refine takes 121 → 181 s.
 

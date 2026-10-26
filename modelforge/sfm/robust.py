@@ -103,7 +103,14 @@ class PriorModel:
     # (berlin_3_1 pieces: 56 observations -> 40 m off). Its large residual means the image
     # solution is weak, not that the prior is wrong.
     min_obs_to_reject: int = 100
-    start_round: int = 1  # round 0 runs with unconverged intrinsics and 40 px thresholds
+    start_round: int = 1  # round 0 runs with unconverged intrinsics and 40 px thresholds: no calibration / drift
+    # relative priors from this round on, with this loss (2026-10-25, the user: round 0 broke the smooth flight into a
+    # jagged path): before they started in round 1 with Cauchy, whose pull fades far out, so cameras round 0 had
+    # moved off (karlak: off a local smooth fit p90 87 cm, the priors 21 cm) stayed there. From round 0 with Huber
+    # (constant pull, as the absolute priors): 54 cm, the reprojection error unchanged (0.346 -> 0.349 px)
+    relative_start_round: int = 0
+    rel_loss: str = "huber"  # "huber" | "cauchy"
+    guard_relative: bool = True  # min_obs_to_reject also guards the relative priors (either camera; False = before)
     max_scale_change: float = 2.0  # per round
     floors: tuple = (0.1, 0.1, 0.02, 0.01)  # abs rot deg, abs pos m, rel rot deg, rel pos m
 
@@ -266,7 +273,14 @@ def update(model, rec, priors_raw):
     d2_rel = {k: sum(_d2_blocks(*r)) for k, r in rel_res.items()}
     nobs = {rec.image(i).name: rec.image(i).num_points3D for i in rec.reg_image_ids()}
     model.abs_rejected = {n for n, d in d2_abs.items() if d > thr and nobs.get(n, 0) >= model.min_obs_to_reject}
-    model.rel_rejected = {k for k, d in d2_rel.items() if d > thr} if model.use_relative else set()
+    # Relative: the same guard, on either camera. A weakly seen camera that jumped looks like an outlier against its
+    # neighbours, and losing its smoothness term too leaves the jump in place. karlak (2026-10-26): rejected after
+    # rounds 0 / 1 289 / 369 -> 208 / 311, final path off a local smooth fit p90 / p99 29 / 134 -> 23 / 129 cm (the
+    # priors 21 / 124); kladno_dopravnik (150 photos, one clean flight): identical to before.
+    model.rel_rejected = ({k for k, d in d2_rel.items()
+                           if d > thr and (not model.guard_relative
+                                            or min(nobs.get(k[0], 0), nobs.get(k[1], 0)) >= model.min_obs_to_reject)}
+                          if model.use_relative else set())
     rep["abs_d2_median"] = round(float(np.median(list(d2_abs.values()))), 3)
     rep["rel_d2_median"] = round(float(np.median(list(d2_rel.values()))), 3) if d2_rel else None
     rep["abs_rejected"] = len(model.abs_rejected)

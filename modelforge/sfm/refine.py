@@ -190,7 +190,8 @@ class _Progress(pyceres.IterationCallback):
 
 def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
              refine_intrinsics=True, max_iterations=500, on_iteration=None, relative=True, settle=Settle(),
-             token=None, skip=None, images=None, image_weight=1.0, skip_round=None):
+             token=None, skip=None, images=None, image_weight=1.0, skip_round=None, fix_poses=False,
+             rel_loss=None):
     """BA over all registered images with reprojection + 6-DoF prior terms.
 
     Absolute priors on every image (except model.abs_rejected), and, if
@@ -204,6 +205,10 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     as constant-pose residuals). Relative priors join pairs with both images inside.
 
     image_weight scales every reprojection term (a solve on thinned points: see local_ba).
+
+    rel_loss: "huber" | "cauchy" for the relative priors (None: model.rel_loss).
+
+    fix_poses: every pose held at its current value (the priors in round 0): only the intrinsics and the points move.
     """
     from modelforge.sfm import robust
     model = model or robust.PriorModel(use_relative=False)
@@ -232,24 +237,29 @@ def prior_ba(rec, priors, model=None, loss_scale_px=1.0, prior_loss_scale=3.0,
     # Losses on whitened residuals (sigma units). Absolute: Huber, whose pull on a far-off camera
     # stays constant. Cauchy's fades, so a camera seeing few points (each in 2-view tracks that
     # slide with it) ran off 35 m in round 0 on berlin_3_1 pieces; gross prior outliers are
-    # handled by explicit rejection instead. Relative: Cauchy (heavy-tailed, ~23 % rejected).
+    # handled by explicit rejection instead. Relative: Huber by default too (model.rel_loss; Cauchy before 2026-10-25).
     abs_loss = pyceres.HuberLoss(prior_loss_scale)
-    prior_loss = pyceres.CauchyLoss(prior_loss_scale)
+    rel_loss = rel_loss or getattr(model, "rel_loss", "cauchy")
+    prior_loss = pyceres.HuberLoss(prior_loss_scale) if rel_loss == "huber" else pyceres.CauchyLoss(prior_loss_scale)
     poses = {}
     for image_id in (images if local else rec.reg_image_ids()):
         img = rec.image(image_id)
         pose = rec.frame(img.frame_id).rig_from_world
         if problem.has_parameter_block(pose.params):  # else: no observations, stays at its prior
             poses[img.name] = pose
+            if fix_poses:
+                problem.set_parameter_block_constant(pose.params)
     n_abs = n_rel = 0
     for name, pose in poses.items():
+        if fix_poses:  # constant terms only
+            break
         if name in model.abs_rejected:
             continue
         prior = priors[name]
         cost = pycolmap.cost_functions.AbsolutePosePriorCost(prior.covariance(model.abs_sigmas), prior.rigid())
         problem.add_residual_block(cost, abs_loss, [pose.params])
         n_abs += 1
-    if model.use_relative and relative:
+    if model.use_relative and relative and not fix_poses:
         for a, b in robust.consecutive_pairs(priors, poses):
             if (a, b) in model.rel_rejected:
                 continue

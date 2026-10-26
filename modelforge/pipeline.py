@@ -303,7 +303,7 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
         corrected = robust.corrected_priors(pri, model)
         live = rec
         ba = refine.prior_ba(rec, corrected, model, refine_intrinsics=refine_intrinsics, loss_scale_px=rnd.loss_scale_px,
-                             relative=i >= model.start_round, token=token, max_iterations=max_iterations, skip=skip,
+                             relative=i >= model.relative_start_round, token=token, max_iterations=max_iterations, skip=skip,
                              skip_round=skip_round,
                              on_iteration=lambda s: emit({"phase": "ba", **ctx, "rec": live, "iteration": s.iteration,
                                                           "cost": s.cost}))
