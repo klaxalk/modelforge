@@ -1107,6 +1107,7 @@ class App:
         self.quick.float(x=8, y=8, width=24 + 72 * per_row, height=136)
         self.photo_panel.float(x=16 + 24 + 72 * per_row, y=8, width=PHOTO_PANEL_WIDTH,
                                height=round(PHOTO_PANEL_WIDTH / self.aspect) + 96)
+        self.photo_panel.minimize()  # folded by default (the user asked); the Tie points tab opens it
         self.map.panel.float(x=8, y=152, width=map_mod.WINDOW_WIDTH, height=map_mod.WINDOW_WIDTH + 330)
         self.map.panel.minimize()  # the quick bar's Map opens it
 

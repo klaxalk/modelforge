@@ -268,6 +268,13 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    shown in History. fullrun_test / kladno_dopravnik: SIFT; karlak, berlin, berlin_all, kladno_dira, dira2k: ALIKED +
    RoMa. ALIKED's precision is near SIFT's (0.585 vs 0.475 px),
    GIM's not (0.78). **RoMa links anything over flat ground** (60 pairs > 400 m apart: all verified), so its matches must land within 10 m in the earlier model (`learned.Ground`; none of those 60 does; no model: no dense pass). berlin_all matched 2026-10-29 (the first run was OOM-killed in the merge: fixed): `docs/todo_matching.md`, `build/matchbench/`.
+17. **TODO: heights from a terrain model** (the user asked to keep it for later, 2026-10-29): flights no image links
+   tie to the others stay at their barometric height (5-10 m off between days on berlin_all). An optional "Terrain
+   model" (national LiDAR DTM: Brandenburg LGB / Berlin FIS-Broker DGM1 1 m ~0.1-0.2 m, ČÚZK DMR 5G for the Czech
+   sites; else Copernicus GLO-30 30 m ~2-4 m), downloaded with the user's OK and cached per area like the map tiles:
+   per flight / pass its flat ground cells (the prototype `build/zalign.py`) against the DTM's height there -> height
+   equations in the pose graph next to `Chunked.flight_z` (one constant for the datum). Caveats: ground that changed
+   since the survey (quarries: only cells that agree), the national vertical datum vs the ellipsoid (a constant).
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
@@ -2452,7 +2459,7 @@ Code layout:
       while any browser holds it, for all browsers, the slider and the photo window, and continues from t when the
       last one lets go (or disconnects). If no answer comes within 3 s, the page follows the server's clock again.
     - **Photo window** (the user asked, 2026-10-22): a floating panel right of the quick bar (`photo_panel`,
-      420 px wide, height from the images' aspect) shows the photo of the camera the flight is nearest to
+      420 px wide, height from the images' aspect; folded by default since 2026-10-29, the Tie points tab opens it) shows the photo of the camera the flight is nearest to
       (`FlightPath.pose`'s index), also when the Position slider jumps; decoded at ~630 px with JPEG DCT
       scaling (`Project.photo`, ~20 ms) only when the camera changes.
     - **Navigation** (the user asked, 2026-10-22: zooming in made moving ever slower): viser orbits a pivot
