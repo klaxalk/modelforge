@@ -430,6 +430,19 @@ def _rounds(project, rec, pri, model, rounds, prefix, emit, token, max_iteration
     return rec, last, results
 
 
+def _flight_z(model, pg):
+    """A pose graph's flight height offsets (Chunked.flight_z) into the flights' priors (model.source_offsets);
+    the log line's tail."""
+    z = pg.get("flight_z_m") or {}
+    for s, dz in z.items():
+        model.source_offsets[s] = model.source_offsets.get(s, np.zeros(3)) + np.array([0.0, 0.0, dz])
+    if not z:
+        return ""
+    big = sorted(z.items(), key=lambda kv: -abs(kv[1]))[:4]
+    return (f"; flight heights moved by up to {max(abs(v) for v in z.values()):.2f} m ("
+            + ", ".join(f"source {k} {v:+.2f}" for k, v in big) + f"), {pg['z_steps']} height steps")
+
+
 def _drift_line(drift):
     return "; ".join(f"source {s}: {d['pairs']} pairs" + (
         f", far split median {d['far_split_median_m']} m, increment ≤ {d['increment_max_m']} m, "
@@ -504,12 +517,12 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
     else:
         emit({"phase": "posegraph", "cameras": len(order), "edges": len(edges)})
         pg = chunked.pose_graph(init, edges, corrected, model, rejected, token=token,
-                                solver=chunked.solver_options(cfg.posegraph_solver),
+                                solver=chunked.solver_options(cfg.posegraph_solver), flight_z=cfg.flight_z,
                                 on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
                                                              "max_iterations": 200}))
         jobs.check(token)
         log(f"refine: pose graph, {pg['cameras']} cameras, {pg['edges']} edges, {pg['abs_priors']} priors: "
-            f"{pg['iterations']} it ({pg['termination']}), {pg['seconds']} s")
+            f"{pg['iterations']} it ({pg['termination']}), {pg['seconds']} s" + _flight_z(model, pg))
         for name, i in ids.items():
             frame = rec.frame(rec.image(i).frame_id)
             frame.rig_from_world = chunked._rigid(init[name])
@@ -545,14 +558,15 @@ def _refine_chunks(project, rec, pri, model, rounds, cfg, emit, token, max_itera
                 with open(os.path.join(os.environ["MODELFORGE_DUMP_POSEGRAPH"], f"posegraph_{k}.pkl"), "wb") as f:
                     pickle.dump({"init": cur, "edges": edges, "priors": corrected, "model": model,
                                  "rejected": rejected, "loops": loops, "loop_loss": cfg.revisit_loss}, f)
+            corrected = robust.corrected_priors(pri, model)  # with the flights' height offsets so far
             rs["pose_graph"] = pg = chunked.pose_graph(
                 cur, edges, corrected, model, rejected, loops=loops, loop_loss=cfg.revisit_loss, token=token,
-                solver=chunked.solver_options(cfg.posegraph_solver),
+                solver=chunked.solver_options(cfg.posegraph_solver), flight_z=cfg.flight_z,
                 on_iteration=lambda s: emit({"phase": "posegraph_iteration", "iteration": s.iteration,
                                              "max_iterations": 200}))
             jobs.check(token)
             log(f"refine: revisit pass {k + 1}: pose graph with {len(loops)} loop edges: {pg['iterations']} it "
-                f"({pg['termination']}), {pg['seconds']} s")
+                f"({pg['termination']}), {pg['seconds']} s" + _flight_z(model, pg))
             stats["revisits"].append(rs)
             for name, i in ids.items():
                 rec.frame(rec.image(i).frame_id).rig_from_world = chunked._rigid(cur[name])

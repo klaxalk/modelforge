@@ -65,6 +65,11 @@ class Chunked:
     revisit_rot_deg: float = 0.1
     revisit_done_m: float = 0.05  # stop when the median split of the far pairs is below this
     revisit_loss: float = 3.0  # Huber scale of the loop-closure edges (whitened)
+    # height: the barometer is smooth over seconds but off between flights (berlin_all: 5-10 m), so in the pose graph
+    # a flight's priors set its height only up to a free offset (pulled weakly to 0), and consecutive photos keep
+    # their barometric height difference (never rejected). Without it, cross-flight links lifted pieces of a flight
+    # (6-7 m steps between consecutive photos) and the pieces drew stacked copies of the buildings.
+    flight_z: bool = True
     global_passes: int = 2  # triangulate all + global BA on thinned points, before the polish (0: none)
     global_points_per_image: int = 100
     # pose-graph linear solver: "cgnr" (conjugate gradients, Jacobi) or "cholesky" (sparse normal Cholesky, CHOLMOD;
@@ -125,13 +130,92 @@ def chunk_edges(cfg, names, poses):
     return out
 
 
+FLIGHT_Z_SIGMA_M = 20.0  # flight_z: the weak pull of a flight's height offset to its barometric height
+Z_STEP_SIGMA_M = 0.1  # flight_z: consecutive photos' height difference vs the barometer's, sigma = this + per s * dt
+Z_STEP_PER_S = 0.05
+Z_STEP_MAX_S = 10.0  # photos further apart in time are not tied this way
+
+
+def _cz(p):
+    """Camera centre height of cam_from_world params p (qx qy qz qw tx ty tz) and its gradient (7,): c = -R^T t."""
+    x, y, z, w = p[:4]
+    t = p[4:7]
+    col = np.array([2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)])  # third column of R
+    g = np.empty(7)
+    g[0] = -(2 * z * t[0] - 2 * w * t[1] - 4 * x * t[2])
+    g[1] = -(2 * w * t[0] + 2 * z * t[1] - 4 * y * t[2])
+    g[2] = -(2 * x * t[0] + 2 * y * t[1])
+    g[3] = -(2 * y * t[0] - 2 * x * t[1])
+    g[4:7] = -col
+    return -float(col @ t), g
+
+
+class _ZPrior(pyceres.CostFunction):
+    """(camera height - (prior height + the flight's offset)) / sigma; blocks [pose (7), offset (1)]."""
+
+    def __init__(self, z0, sigma):
+        pyceres.CostFunction.__init__(self)
+        self.set_num_residuals(1)
+        self.set_parameter_block_sizes([7, 1])
+        self.z0, self.s = z0, sigma
+
+    def Evaluate(self, params, residuals, jacobians):
+        cz, g = _cz(params[0])
+        residuals[0] = (cz - self.z0 - params[1][0]) / self.s
+        if jacobians is not None:
+            if jacobians[0] is not None:
+                jacobians[0][:] = g / self.s
+            if jacobians[1] is not None:
+                jacobians[1][0] = -1.0 / self.s
+        return True
+
+
+class _ZStep(pyceres.CostFunction):
+    """((height b - height a) - the barometer's difference) / sigma; blocks [pose a, pose b]."""
+
+    def __init__(self, dz, sigma):
+        pyceres.CostFunction.__init__(self)
+        self.set_num_residuals(1)
+        self.set_parameter_block_sizes([7, 7])
+        self.dz, self.s = dz, sigma
+
+    def Evaluate(self, params, residuals, jacobians):
+        za, ga = _cz(params[0])
+        zb, gb = _cz(params[1])
+        residuals[0] = (zb - za - self.dz) / self.s
+        if jacobians is not None:
+            if jacobians[0] is not None:
+                jacobians[0][:] = -ga / self.s
+            if jacobians[1] is not None:
+                jacobians[1][:] = gb / self.s
+        return True
+
+
+class _Scalar(pyceres.CostFunction):
+    """x / sigma for a 1-parameter block."""
+
+    def __init__(self, sigma):
+        pyceres.CostFunction.__init__(self)
+        self.set_num_residuals(1)
+        self.set_parameter_block_sizes([1])
+        self.s = sigma
+
+    def Evaluate(self, params, residuals, jacobians):
+        residuals[0] = params[0][0] / self.s
+        if jacobians is not None and jacobians[0] is not None:
+            jacobians[0][0] = 1.0 / self.s
+        return True
+
+
 def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge_loss=None, loops=(),
-               loop_loss=3.0, solver=None, on_iteration=None, token=None):
+               loop_loss=3.0, solver=None, on_iteration=None, token=None, flight_z=False):
     """Solve all poses: chunk edges (RelativePosePriorCost, Cauchy) + loop-closure edges (`loops`, the same
     form, Huber at `loop_loss`) + absolute priors (AbsolutePosePriorCost, Huber at 3 sigma, as in
     refine.prior_ba; `rejected` names get none). init: name -> params, mutated in place. solver: extra
-    pyceres.SolverOptions attributes; on_iteration(summary) per iteration; token: Stop aborts. Returns the solver
-    stats."""
+    pyceres.SolverOptions attributes; on_iteration(summary) per iteration; token: Stop aborts. flight_z
+    (Chunked.flight_z): heights from the priors only up to a free offset per flight (source), and consecutive photos
+    keep the barometer's height difference; the offsets are returned in "flight_z_m" (add them to the flight's
+    priors). Returns the solver stats."""
     t0 = time.time()
     params = {n: np.array(p, float) for n, p in init.items()}
     problem = pyceres.Problem()
@@ -144,12 +228,35 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
         problem.add_residual_block(cost, pyceres.HuberLoss(loop_loss), [params[a], params[b]])
     n_abs = 0
     abs_loss = pyceres.HuberLoss(3.0)
+    sig = model.abs_sigmas
+    if flight_z:  # the priors' heights go in below, relative to a free offset per flight
+        import copy
+        sig = copy.copy(model.abs_sigmas)
+        sig.pos_vertical_m = 1e4
+    offsets, n_steps = {}, 0
     for n, p in params.items():
         if n in rejected or n not in priors:
             continue
-        cost = pycolmap.cost_functions.AbsolutePosePriorCost(priors[n].covariance(model.abs_sigmas), priors[n].rigid())
+        cost = pycolmap.cost_functions.AbsolutePosePriorCost(priors[n].covariance(sig), priors[n].rigid())
         problem.add_residual_block(cost, abs_loss, [p])
         n_abs += 1
+        if flight_z:
+            src = priors[n].source
+            if src not in offsets:
+                offsets[src] = np.zeros(1)
+                problem.add_residual_block(_Scalar(FLIGHT_Z_SIGMA_M), None, [offsets[src]])
+            problem.add_residual_block(_ZPrior(float(priors[n].center[2]), model.abs_sigmas.pos_vertical_m), abs_loss,
+                                       [p, offsets[src]])
+    if flight_z:  # consecutive photos of a flight: the barometer's height difference, never rejected
+        seq = sorted((n for n in params if n in priors), key=lambda n: (priors[n].source, priors[n].time))
+        for a, b in zip(seq, seq[1:]):
+            pa, pb = priors[a], priors[b]
+            dt = abs(pb.time - pa.time)
+            if pa.source != pb.source or dt > Z_STEP_MAX_S:
+                continue
+            problem.add_residual_block(_ZStep(float(pb.center[2] - pa.center[2]), Z_STEP_SIGMA_M + Z_STEP_PER_S * dt),
+                                       pyceres.HuberLoss(3.0), [params[a], params[b]])
+            n_steps += 1
     for p in params.values():
         if problem.has_parameter_block(p):
             problem.set_manifold(p, pyceres.ProductManifold(pyceres.EigenQuaternionManifold(), pyceres.EuclideanManifold(3)))
@@ -165,7 +272,9 @@ def pose_graph(init, edges, priors, model, rejected=(), max_iterations=200, edge
     pyceres.solve(options, problem, summary)
     for n, p in params.items():
         init[n] = p
-    return {"cameras": len(params), "edges": len(edges), "loops": len(loops), "abs_priors": n_abs, "iterations": summary.num_successful_steps + summary.num_unsuccessful_steps,
+    z = {"flight_z_m": {int(k): round(float(v[0]), 3) for k, v in sorted(offsets.items())}, "z_steps": n_steps} \
+        if flight_z else {}
+    return {**z, "cameras": len(params), "edges": len(edges), "loops": len(loops), "abs_priors": n_abs, "iterations": summary.num_successful_steps + summary.num_unsuccessful_steps,
             "initial_cost": summary.initial_cost, "final_cost": summary.final_cost,
             "termination": str(summary.termination_type).split(".")[-1], "seconds": round(time.time() - t0, 1)}
 

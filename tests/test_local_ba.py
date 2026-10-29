@@ -295,3 +295,50 @@ def test_auto_ba_mode_by_memory():
     assert pipeline.auto_ba_mode({}, 3000, available_gb=27)[0] == "chunked"
     assert pipeline.auto_ba_mode({}, 300, available_gb=27)[0] == "global"
     assert 7.2 < pipeline.global_ba_need_gb(14_712_904) < 15
+
+
+@pytest.mark.parametrize("flight_z", [False, True])
+def test_flight_height_offset_moves_whole_flights(flight_z):
+    """Two flights over the same ground, flight 1's barometer 5 m high; loop edges tie only a stretch of flight 1 to
+    flight 0 (where the matcher linked them). Without flight_z that stretch is pulled down alone and tears off its
+    neighbours (a step, stacked copies; berlin_all 2026-10-29); with it the whole flight moves and its heights stay
+    smooth."""
+    from modelforge.sfm import chunked
+    from modelforge.sfm.priors import PriorSigmas, rot_to_quat_xyzw
+    R = np.diag([1.0, -1.0, -1.0])  # looking straight down
+    q = rot_to_quat_xyzw(R)
+
+    def params(C):
+        return np.r_[q, -R @ C]
+    truth, pri, order = {}, {}, 0
+    for src in (0, 1):
+        for k in range(40):
+            n = f"f{src}_{k:03d}"
+            C = np.array([2.0 * k, 3.0 * src, 30.0])
+            truth[n] = params(C)
+            Cp = C + np.array([0.0, 0.0, 5.0 if src == 1 else 0.0])  # the barometer's error
+            pri[n] = Prior.from_pose(n, k, k, R, Cp, None, src, order, 1000.0 * src + 1.0 * k)
+            order += 1
+    model = robust.PriorModel(abs_sigmas=PriorSigmas(0.75, 0.5, 0.5, 1.5), calibrate=False, estimate_systematic=False,
+                              use_relative=False, estimate_drift=False)
+    cfg = chunked.Chunked(edge_steps=(1, 4))
+    edges = []
+    f0, f1 = [n for n in truth if n.startswith("f0")], [n for n in truth if n.startswith("f1")]
+    for names in (f0, f1[:15], f1[15:25], f1[25:]):  # flight 1's chain broken where photos gave no chunk edges
+        edges += chunked.chunk_edges(cfg, names, {n: truth[n] for n in names})
+    cov = np.diag([np.radians(0.1) ** 2] * 3 + [0.03 ** 2] * 3)
+    loops = [(f"f0_{k:03d}", f"f1_{k:03d}", chunked.relative(truth[f"f0_{k:03d}"], truth[f"f1_{k:03d}"]), cov)
+             for k in range(15, 25)]  # only this stretch was matched across the flights
+    init = {n: np.array(pri[n].params) for n in truth}
+    pg = chunked.pose_graph(init, edges, pri, model, loops=loops, flight_z=flight_z)
+    z0 = np.array([refine.center_of(init[f"f0_{k:03d}"])[2] for k in range(40)])
+    z1 = np.array([refine.center_of(init[f"f1_{k:03d}"])[2] for k in range(40)])
+    rel = z1 - z0  # truth 0 (the absolute height is a gauge)
+    steps = np.abs(np.diff(z1))
+    print("flight 1 - flight 0 heights", np.round(rel[[0, 14, 15, 24, 25, 39]], 2), "largest step",
+          round(float(steps.max()), 2))
+    if not flight_z:  # measured: the linked stretch at 0.01 m, the rest of flight 1 at +4.63 m
+        assert steps.max() > 2.0
+        return
+    assert steps.max() < 0.1 and np.all(np.abs(rel) < 0.3)  # the whole flight came down, smoothly
+    assert abs(pg["flight_z_m"][1] - pg["flight_z_m"][0] + 5.0) < 0.3

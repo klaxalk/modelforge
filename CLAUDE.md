@@ -1552,6 +1552,18 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
       35–52 min each: `docs/todo_posegraph_speed.md`), drift passes no gain (0.27–0.30 m), global passes 0.30 → 0.20 →
       **0.14 m** (p90 1.22 → 0.83 m; BAs 210 s + ~3 min on ~140k points), polish 29 min; final 0.58 / 1.29 px, 6.2M
       points, 5.1 h, peak 14.6 GB. A third global pass would likely gain more.
+  - **Flight heights in the pose graph** (`Chunked.flight_z`, default on; 2026-10-29, the user's idea: GNSS XY is good,
+    barometric height is not, between flights): berlin_all with ALIKED + RoMa showed buildings stacked 6-8 m apart.
+    Cross-flight links (new with the learned matching) pulled only the linked stretch of a flight to the other flight's
+    height; the rest stayed at its own barometer (absolute priors, sigma 0.5 m vertical), the Cauchy chunk edges gave
+    way, and the refined camera heights jumped 6-7 m between consecutive photos (DJI_0452 t 700 -> 701 s, DJI_0484 a
+    20 s stretch +6.7 m), each lifted stretch drawing a copy. Now the pose graph takes heights from the priors only up
+    to a free offset per flight (`_ZPrior`, offset pulled to 0 at `FLIGHT_Z_SIGMA_M` 20 m), and consecutive photos of a
+    flight keep the barometer's height difference (`_ZStep`, sigma 0.1 m + 0.05 m/s, <= 10 s apart, Huber, never
+    rejected); the offsets go into the flights' priors (`model.source_offsets`, z), so the later BAs keep them; log
+    "flight heights moved by up to ...". Synthetic (`test_flight_height_offset_moves_whole_flights`): a 5 m barometer
+    error, loop edges on one stretch, the chain broken around it: without, a 4.63 m step; with, the flights 0.00 m apart.
+    Diagnostics: `build/stack_slice.py` (side views at saved views), `build/stack_who.py` (camera z - prior along time).
   - **Global refine on kladno_dira** (2026-10-21, with terrain pairs, stopped after round 1 to diagnose): round 1 BA
     79 min (158 iterations, 15 CHOLMOD "not positive definite" step failures), point error 1.085 → 0.706 px
     median, revisits merged (far split 5 cm). Its log said 3.5 px: the after-BA stats were taken after the drift shift
