@@ -27,6 +27,13 @@ from modelforge.video import ingest as video_ingest
 
 SAMPLING = {"dji": ("distance", "time"), "video": video_ingest.SAMPLING, "rosbag": ros_ingest.SAMPLING}
 NO_INFO, IMAGE_FRAME = "(none: estimate intrinsics)", "(image header frame)"
+ALL_FOLDERS = "all folders"  # the Ingest tab's Folder: no filter
+
+
+def _label(video):
+    """A source's name in the Ingest tab: its folder and file name ("baracks/DJI_0483.MP4")."""
+    parent = os.path.basename(os.path.dirname(os.path.abspath(video)))
+    return f"{parent}/{os.path.basename(video)}" if parent else os.path.basename(video)
 
 PALETTE = [(70, 134, 251), (251, 185, 56), (27, 229, 181), (228, 70, 11), (164, 252, 60), (180, 90, 250),
            (250, 110, 180), (120, 200, 255)]
@@ -130,6 +137,10 @@ class IngestPanel:
         gui = self.gui
         self.g_md = gui.add_markdown("")
         with gui.add_folder("Videos"):
+            self.g_folder = gui.add_dropdown("Folder", options=(ALL_FOLDERS,), initial_value=ALL_FOLDERS,
+                                             hint="Pick a folder first: the Video list then shows only its clips "
+                                                  "(the number of clips in brackets).")
+            self.g_folder.on_update(lambda _: self._filter_videos())
             self.g_video = gui.add_dropdown("Video", options=("(none found)",),
                                             hint="Videos of the library (data root, incl. data/videos/; project "
                                                  "folders are skipped; Videos tab to manage them). An .SRT sidecar "
@@ -137,10 +148,13 @@ class IngestPanel:
             self.g_video_path = gui.add_text("or path", initial_value="",
                                              hint="Any video path inside the container (repo = /workspace); "
                                                   "overrides the dropdown.")
-            row = gui.add_button_group("", options=("Add as source", "Rescan"),
+            row = gui.add_button_group("", options=("Add as source", "Add all in folder", "Rescan"),
                                        hint="Add as source: the whole clip becomes a new source (narrow it with its "
-                                            "range). Rescan: look for new videos.")
-            row.on_click(lambda e: self.add_source() if e.target.value == "Add as source" else self.rescan())
+                                            "range). Add all in folder: every clip of the chosen Folder becomes a "
+                                            "source (those already in the sources are skipped). Rescan: look for "
+                                            "new videos.")
+            row.on_click(lambda e: {"Add as source": self.add_source,
+                                    "Add all in folder": self.add_folder}.get(e.target.value, self.rescan)())
             from modelforge.gui import upload as stream_upload
             self.g_upload = gui.add_html(stream_upload.widget("videos:", hint=(
                 "Upload a DJI video (.MP4 / .MOV), and optionally its .SRT sidecar, or a ROS bag file (ROS 1 .bag, "
@@ -286,25 +300,70 @@ class IngestPanel:
         for r in dict.fromkeys(roots):
             if os.path.isdir(r):
                 found += [os.path.relpath(v) for v in find(r)]
-        found = list(dict.fromkeys(found))
-        self.g_video.options = tuple(found) or ("(none found)",)
+        self._found = list(dict.fromkeys(found))
+        counts = {}
+        for v in self._found:
+            d = os.path.dirname(v) or "."
+            counts[d] = counts.get(d, 0) + 1
+        old = getattr(self, "_folders", {}).get(self.g_folder.value)
+        self._folders = {f"{d} ({n})": d for d, n in sorted(counts.items())}
+        opts = (ALL_FOLDERS,) + tuple(self._folders)
+        self.g_folder.options = opts
+        # the same folder again after a rescan (its count may have changed)
+        self.g_folder.value = next((o for o, d in self._folders.items() if d == old), ALL_FOLDERS)
+        self._filter_videos()
+
+    def _filter_videos(self):
+        """The Video list: every clip (paths), or those of the chosen folder (file names)."""
+        folder = getattr(self, "_folders", {}).get(self.g_folder.value)
+        found = getattr(self, "_found", [])
+        if folder is None:
+            self._video_paths = {v: v for v in found}
+        else:
+            self._video_paths = {os.path.basename(v): v for v in found if (os.path.dirname(v) or ".") == folder}
+        self.g_video.options = tuple(self._video_paths) or ("(none found)",)
+
+    def _unusable(self, v):
+        """Why `v` cannot be a source of this project, or None."""
+        if not v or v == "(none found)" or not os.path.exists(v):
+            return f"❌ video not found: `{v}`"
+        if self.kind == "rosbag" and not rbag.is_bag(v):
+            return f"❌ not a ROS bag (a ROS 1 .bag, a ROS 2 .mcap, or a folder with metadata.yaml): `{v}`"
+        if self.kind != "rosbag" and rbag.is_bag(v):
+            return f"❌ `{v}` is a ROS bag: it needs a project of kind ROS bag"
+        return None
 
     def add_source(self, video=None):
-        v = video or self.g_video_path.value.strip() or self.g_video.value
-        if not v or v == "(none found)" or not os.path.exists(v):
-            self.g_status.content = f"❌ video not found: `{v}`"
-            return
-        if self.kind == "rosbag" and not rbag.is_bag(v):
-            self.g_status.content = f"❌ not a ROS bag (a ROS 1 .bag, a ROS 2 .mcap, or a folder with metadata.yaml): `{v}`"
-            return
-        if self.kind != "rosbag" and rbag.is_bag(v):
-            self.g_status.content = f"❌ `{v}` is a ROS bag: it needs a project of kind ROS bag"
+        v = video or self.g_video_path.value.strip() or getattr(self, "_video_paths", {}).get(
+            self.g_video.value, self.g_video.value)
+        why = self._unusable(v)
+        if why:
+            self.g_status.content = why
             return
         self.sources.append(ingest.Source(v))
         self.g_video_path.value = ""
+        self._sources_added(1)
+
+    def add_folder(self):
+        """Every clip of the chosen Folder as a source, each whole; clips already among the sources are skipped."""
+        folder = getattr(self, "_folders", {}).get(self.g_folder.value)
+        if folder is None:
+            self.g_status.content = "❌ pick a Folder first (Add all in folder adds the clips of one folder)"
+            return
+        have = {os.path.abspath(s.video) for s in self.sources}
+        clips = [v for v in getattr(self, "_video_paths", {}).values() if (os.path.dirname(v) or ".") == folder]
+        new = [v for v in clips if os.path.abspath(v) not in have and not self._unusable(v)]
+        self.sources += [ingest.Source(v) for v in new]
+        skipped = len(clips) - len(new)
+        self.g_status.content = (f"added {len(new)} clip(s) from `{folder}`"
+                                 + (f" · {skipped} skipped (already a source or not usable)" if skipped else ""))
+        if new:
+            self._sources_added(len(new))
+
+    def _sources_added(self, n):
         self._rebuild_sources()
         self._clear_preview()
-        self.g_pv_source.value = self.g_pv_source.options[-1]  # its first frame, once decoded
+        self.g_pv_source.value = self.g_pv_source.options[-n]  # the first new one's first frame, once decoded
         self.request_plan()
 
     def _rebuild_sources(self):
@@ -320,7 +379,7 @@ class IngestPanel:
         gui = self.gui
         with self.g_sources:
             for k, s in enumerate(self.sources):
-                f = gui.add_folder(f"{k + 1}. {os.path.basename(s.video)}")
+                f = gui.add_folder(f"{k + 1}. {_label(s.video)}")
                 with f:
                     md = gui.add_markdown("analysing …")
                     end = s.end if s.end is not None else max(s.start + 1.0, 1.0)
@@ -360,7 +419,7 @@ class IngestPanel:
             "range; add the same video again (\"Add piece\") to take several pieces."
         self.g_fc.visible = self.kind == "dji" and len({s.video for s in self.sources if s.enabled}) >= 2
         self.show_flight_check()
-        self.g_pv_source.options = tuple(f"{k + 1}. {os.path.basename(s.video)}" for k, s in enumerate(self.sources)) \
+        self.g_pv_source.options = tuple(f"{k + 1}. {_label(s.video)}" for k, s in enumerate(self.sources)) \
             or ("-",)
         if self.g_pv_source.value not in self.g_pv_source.options:  # the previewed source is gone
             self._clear_preview()
@@ -626,7 +685,8 @@ class IngestPanel:
                                if self.kind == "dji" else ""),
                      "rosbag": f" · poses from {c.align['method']}: {int(c.valid_pose.sum())}/{c.n} images"
                      if self.kind == "rosbag" else ""}.get(self.kind, "")
-            lines = [f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + extra]
+            lines = [f"📁 `{os.path.dirname(s.video) or '.'}`",
+                     f"{c.duration:.0f} s, {c.width}×{c.height} @ {c.fps:.2f} fps" + extra]
             if sp:
                 r = sp.report
                 if "path_m" in r:

@@ -5,14 +5,19 @@ python difix_refine.py SPEC.json
 SPEC: splat_npz (ENU: means, quats wxyz, scales log, opacities logit, sh (N, K, 3)), repo (Difix3D), model, transforms,
 images_dirs (where the photos are, the training size first: images_N, images), downscale, sky_dir (sky masks at the training size, or null), steps, rounds,
 shift_m, rot_m (metres per radian in the pose distance), novel_prob, novel_weight, difix_width (0 = the training
-size), targets (4 x 4 OpenCV c2w in the transforms' world), out_npz, workdir, cache_gb.
+size), targets (4 x 4 OpenCV c2w in the transforms' world), out_npz, workdir, cache_gb, flatten, needle,
+needle_ratio (the shape terms of the splat's own training, nsplugin/mf_splatfacto_lidar.py; 0 = off), keep_shape (no
+Gaussian more elongated than it was, or than needle_ratio; default true).
 
 A fine-tune of the splat as it is (no densification): every steps / rounds steps the pseudo views move shift_m
 towards their targets (starting at the nearest training camera), are rendered with that camera's intrinsics, cleaned
 by Difix (nvidia/difix_ref, half precision; the nearest training photo as the reference, brought to the median
 exposure) and replace the previous set. A step trains on a pseudo view with probability novel_prob, its loss x
 novel_weight and kept to the rendered alpha > 0.5 (as Difix3D's gsplat trainer: the sky and empty space stay out),
-else on a training photo (exposure gain, sky masks, undistorted; read from disk, an LRU cache of cache_gb).
+else on a training photo (exposure gain, sky masks, undistorted; read from disk, an LRU cache of cache_gb). The
+splat's shape terms (flatten, no needles) apply as in its training, and keep_shape caps each Gaussian's elongation:
+without them the fine-tune turned 27 % of kladno_dopravnik's Gaussians into needles (largest / middle scale > 3:
+7.7 % -> 43.8 %; the terms alone: 18 %).
 Measured on karlak (docs/todo_splat_quality.md): views aimed at held-out poses +0.65 dB there, LPIPS -0.04."""
 import collections
 import json
@@ -200,6 +205,13 @@ def main(spec_path):
     ssim = SSIM(data_range=1.0, size_average=True, channel=3)
     p_novel, w_novel = float(spec.get("novel_prob", 0.3)), float(spec.get("novel_weight", 0.3))
     every = max(1, steps // rounds)
+    flatten, needle = float(spec.get("flatten", 0.0)), float(spec.get("needle", 0.0))
+    needle_ratio = float(spec.get("needle_ratio", 3.0))
+    cap = None
+    if spec.get("keep_shape", True):  # the largest / middle log-scale each Gaussian may reach
+        ls = torch.sort(P["scales"].detach(), dim=-1).values
+        cap = torch.clamp(ls[:, 2] - ls[:, 1], min=float(np.log(needle_ratio)))
+        del ls
     t1 = time.time()
     for step in range(steps):
         if step % every == 0 and step // every < rounds:
@@ -219,10 +231,22 @@ def main(spec_path):
         m = mask.to(dev)[..., None].float()
         l1 = ((img - gt).abs() * m).sum() / (m.sum() * 3).clamp(min=1)
         s = 1 - ssim((img * m).permute(2, 0, 1)[None], (gt * m).permute(2, 0, 1)[None])
-        (weight * (0.8 * l1 + 0.2 * s)).backward()
+        loss = weight * (0.8 * l1 + 0.2 * s)
+        if flatten > 0 or needle > 0:  # as the splat's training (mf_splatfacto_lidar.get_loss_dict)
+            ls = torch.sort(P["scales"], dim=-1).values  # log scales
+            if flatten > 0:  # only the smallest axis may give
+                loss = loss + flatten * torch.exp(ls[:, 0] - ls[:, 1].detach()).mean()
+            if needle > 0:
+                loss = loss + needle * torch.relu(ls[:, 2] - ls[:, 1] - np.log(needle_ratio)).mean()
+        loss.backward()
         for o in opt.values():
             o.step()
             o.zero_grad(set_to_none=True)
+        if cap is not None:  # no Gaussian more elongated than it was (or than needle_ratio)
+            with torch.no_grad():
+                ls, order = torch.sort(P["scales"], dim=-1)
+                longest = torch.minimum(ls[:, 2], ls[:, 1] + cap)
+                P["scales"].scatter_(1, order[:, 2:], longest[:, None])
         if (step + 1) % 100 == 0:
             print(f"[difix] step {step + 1} / {steps} ({time.time() - t1:.0f} s)", flush=True)
     np.savez(spec["out_npz"], means=P["means"].detach().cpu().numpy(), quats=P["quats"].detach().cpu().numpy(),

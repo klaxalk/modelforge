@@ -249,3 +249,68 @@ towards the target 3 m, Difix resolution training size / 1024 px), **Refine spla
   20.77 dB / LPIPS 0.293, as the prototype's arm; 342 s. Tests: `tests/test_difix.py`.
 - Not done: densification during the refinement; the target view's own field of view (renders use the nearest
   photo's camera); a tiled splat's per-tile semantic features go stale (the merged file changed).
+
+### Suggested Difix target views (2026-10-26, the user's idea)
+
+Difix tab → **Suggest target views** → "Suggest views where the splat is thin" (`difix.suggest_views`,
+`add_suggested`): the SfM mesh's measured faces (patched holes left out) sampled at its point spacing; per sample the
+summed opacity of the splat's Gaussian centres in the 3 x 3 x 3 cubes of 2 spacings around it; below 0.2 x the median
+= thin (gaps, and areas drawn with a few large Gaussians: on berlin almost all foliage). Counting each Gaussian over
+its whole extent instead found nothing on berlin (0.0 %: some Gaussian reaches every mesh point). Views go greedily
+where a photo footprint (the photos' median distance to the surface) holds the most thin surface, looking at it along
+the outward normal (the photos' side) from that distance, between 10° and 75° down (MIN / MAX_DOWN_DEG), no higher than
+the photos within that distance flew (above it they looked through the floaters over the flight path), not closer
+than half the distance, with no mesh sample in the line of sight or above the camera; else turned towards the
+nearest photos' direction. Surface farther than 2x the typical distance from every photo (the scene's edge) is
+skipped. Records carry `suggested` (thin m², density, orthogonal, distance); a new suggestion replaces them, views
+saved by hand stay. berlin: 400k samples, 12.8 % thin, 8 views ~12 m across in 3 s (`build/suggest_test.py`, renders
+`build/suggest_render.py` -> `build/suggest_v5.jpg`). Not yet measured: whether Difix on these views improves the splat
+more than on hand-picked ones. Test: `test_suggested_views_look_at_the_thin_spot`.
+
+**Clearance like a real photo** (2026-10-27; the user: some views sat so close to the mesh that no real camera would
+be there). The checks were only the line of sight and "not under the mesh". Now a position also needs a distance to
+the nearest surface of at least `CLEARANCE` (0.9) x the smallest among its 10 nearest photos'. Surface here means the
+mesh samples plus **every** opaque splat Gaussian (opacity > 0.5), which also holds what the mesh lacks (trees,
+machines). A 300k subsample missed the nearest ones.
+- kladno_dira, 20 views: 3 had been closer than every photo nearby: thin 17 at 1.8 m (photos ≥ 3.2 m), thin 9 / 14
+  at 4.7 / 4.8 m (photos ≥ 6.2 m). Now 6 positions are turned down and those views move to 4.1 / 7.6 / 6.1 m.
+- berlin and kladno_dopravnik were not affected.
+- Suggesting takes 15 s instead of 4 s (an exact search over all opaque Gaussians).
+- Records carry `clearance_m`; the stats carry `too_close`. Measured with `build/difix_clear*.py`.
+- Test: `test_suggested_views_keep_clear_of_the_splat`.
+
+**Compare before / after** (2026-10-27, the user asked): Difix tab → **Compare: After Difix / Before Difix**, shown
+once `splat/splat_enu.pre_difix.ply` exists. It swaps the View's Splat layer between the project's splat and that
+backup at the same camera; the files stay as they are.
+- With level of detail, the backup gets its own folder, `splat/lod_pre_difix` (`splat_lod.lod_dir(project, splat=)`,
+  built the first time it is shown), so both are drawn alike. Clean removes it. Undo moves it to `splat/lod`.
+- The search highlight shows on After only: its scores belong to the project's splat.
+- A new Difix run or a project switch goes back to After.
+- Test: `test_splat_lod.py::test_view_draws_cells`.
+
+**Runs accumulate, the baseline stays** (2026-10-27, the user: always compare against the baseline; consecutive Difix
+runs build one new splat).
+- Each run starts from the current splat and writes back to it. `BACKUP` is copied only when there is no baseline.
+- A run records the splat it wrote in `splat/difix_state.json` (size + mtime). It writes to a temporary file, records
+  it, then renames it into place, so no check ever sees it half done.
+- **Bug fixed:** a new training, resume or tiles merge used to keep the old baseline. Compare then showed an
+  unrelated splat, the next run made no new copy, and Undo brought back the old splat over the retrain.
+- Now `difix.baseline` sees that the splat is no longer Difix's output and removes the baseline, its level of detail
+  and the Difix record. The GUI checks on every View refresh.
+- A baseline without a record (made before this change) adopts the current splat.
+- Test: `test_baseline_follows_a_new_training`.
+
+**Needles from the fine-tune** (2026-10-27, the user: Difix makes many elongated, sharp Gaussians).
+- **Cause:** `export/difix_refine.py` trained every Gaussian on the photos and the pseudo views with only the
+  colour loss: no flatten and no "No needles" term, unlike the splat's own training.
+- kladno_dopravnik (one target view, 3000 steps): largest / middle scale > 3 went from 7.7 % to 43.8 %, > 10 from
+  0.07 % to 6.2 %, p99 4.3 → 21.6. 27 % of all Gaussians doubled their ratio (longest axis 7 → 13 cm, opacity
+  median 0.78).
+- **Fix:**
+  - The fine-tune now adds the shape terms the splat was trained with (`difix.shape_terms`: report.json
+    `splat.regularize`, else `splat.FLATTEN` / `splat.NEEDLE`). Alone they reach 18.0 % / 0.71 % / p99 8.7.
+  - A hard cap (`keep_shape`, default on) also applies after every step: no Gaussian more elongated than it was, or
+    than 3:1 if that is more. Together: **3.0 % / 0.03 % / p99 3.5**.
+- Renders of the target view (`build/difix_cmp_render.py`, `build/difix_ab/cmp*.jpg`): the sign and the conveyor stay
+  as sharp as with the old fine-tune, and the gravel loses its long streaks. Held-out PSNR was not measured again.
+- Measured with `build/difix_needles.py BASELINE AFTER` on a symlinked copy (`build/difix_ab`).

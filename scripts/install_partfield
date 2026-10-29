@@ -1,0 +1,27 @@
+#!/bin/bash
+# PartField (github.com/nv-tlabs/PartField; NVIDIA License: NON-COMMERCIAL use only, research and education) for the
+# Rig tab's "Propose parts" (modelforge/rig_partfield.py), in its own environment under build/partfield: Python 3.11 +
+# torch 2.7.1 cu128 (its README's 3.10 / torch 2.4 not needed). Nothing in the image changes. Run in the dev
+# container: MODELFORGE_GPU=1 scripts/dev scripts/install_partfield  (~6 GB, a few minutes; reuses UniRig's uv and
+# Python when scripts/install_unirig ran, else installs them)
+set -e
+mkdir -p /workspace/build/partfield /workspace/build/unirig
+cd /workspace/build/unirig
+[ -x uvtool/bin/uv ] || python3 -m pip install --quiet --target uvtool uv
+cd /workspace/build/partfield
+export UV_PYTHON_INSTALL_DIR=/workspace/build/unirig/python UV_CACHE_DIR=/workspace/build/unirig/uv_cache
+UV="env PYTHONPATH=/workspace/build/unirig/uvtool python3 -m uv"
+$UV python install 3.11
+[ -d venv ] || $UV venv venv --python 3.11
+[ -d PartField ] || git clone --depth 1 https://github.com/nv-tlabs/PartField.git
+sed -i 's/plt\.cm\.get_cmap(/plt.get_cmap(/g' PartField/run_part_clustering.py  # matplotlib >= 3.9
+P="$UV pip install --python venv/bin/python"
+$P torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+$P psutil "lightning==2.2.*" h5py yacs trimesh scikit-image loguru boto3 mesh2sdf tetgen pymeshlab plyfile einops libigl potpourri3d simple_parsing arrgh open3d scikit-learn huggingface_hub pytz vtk "numpy<2"
+$P torch_scatter -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+mkdir -p PartField/model
+[ -f PartField/model/model_objaverse.ckpt ] || HF_HOME=/workspace/build/hf_cache venv/bin/python -c "
+from huggingface_hub import hf_hub_download; import shutil
+p = hf_hub_download('mikaelaangel/partfield-ckpt', 'model_objaverse.ckpt'); shutil.copy(p, 'PartField/model/model_objaverse.ckpt'); print(p)"
+venv/bin/python -c "import torch, torch_scatter, lightning, open3d; print('PartField env OK', torch.__version__, torch.cuda.is_available())"
+echo INSTALL-DONE

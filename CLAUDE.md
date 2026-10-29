@@ -39,7 +39,7 @@ Done:
     Export / Settings (dark mode);
   - right (main): run state, **Run full pipeline**, **Stop**, Sparse /
     Splat / Splat mesh / Dense, history;
-  - two windows floating at the bottom of the 3D view: the log (left) and the Hardware monitor (right).
+  - a window floating at the bottom of the 3D view with two tabs: the log and the Hardware monitor.
   - Projects: list, open, create, rename, delete; final vs. intermediate
     results; clean.
   - Videos: a file manager over the shared video library: folders (create,
@@ -122,20 +122,22 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    anti-aliased rasterization, the depth prior outliers): **karlak A/B 2026-10-24**: exposure +0.24 dB held-out, now
    on by default (Splat tab "Exposure from the metadata"); bilateral grid worse on new views; anti-aliased +0.2 dB but
    -1.5 dB in classic viewers (opt-in); tile masks (berlin tile 0) same mean PSNR, worst views +0.8 dB, depth-fog p90 1287 % → 20 %, 33 % faster:
-   now on by default for tiled runs; **depth outlier gate** (a mesh target drops where the render lies > 50 % behind it, after step 2000) on by default, berlin tile 0 worst views +0.7 dB; seams of a merged masked run checked (tiles 0 + 2: seam band equal with the gate, interior +0.2 dB); **2026-10-25:** SH degree 1 dropped (worse on and off the path), split gradient 0.0005 at x2 LPIPS -0.017 for 1.7x the Gaussians, Difix3D: +0.65 dB off the path only where its pseudo views aim, so **in the GUI as right panel → Difix** (its own target views, Refine splat with Difix, Undo; `modelforge/difix.py`); open: 4K with the lower split threshold: `docs/todo_splat_quality.md`.
+   now on by default for tiled runs; **depth outlier gate** (a mesh target drops where the render lies > 50 % behind it, after step 2000) on by default, berlin tile 0 worst views +0.7 dB; seams of a merged masked run checked (tiles 0 + 2: seam band equal with the gate, interior +0.2 dB); **2026-10-25:** SH degree 1 dropped (worse on and off the path), split gradient 0.0005 at x2 LPIPS -0.017 for 1.7x the Gaussians, Difix3D: +0.65 dB off the path only where its pseudo views aim, so **in the GUI as right panel → Difix** (its own target views, Refine splat with Difix, Undo, Compare before / after; `modelforge/difix.py`); open: 4K with the lower split threshold: `docs/todo_splat_quality.md`.
 2. ~~Calibration biased low (~0.7×)~~ **closed 2026-10-23, by measurement**: the 0.7× was one synthetic draw
    (seed 1: its prior noise itself came out 0.81× nominal). A redundancy-aware estimate (Helmert VCE, tr(H) of the
    prior blocks by one perturbed re-solve, Hutchinson; `build/vce_proto.py`) found tr(H) 1–13 of 120 (images pin
    the cameras, the priors keep ~all their redundancy), also with 60 points per scene; median rule vs VCE on seeds
    1–4: 0.67–1.07 vs 0.79–1.00 of the true σ, each within the draw's own scatter. Not implemented (an extra BA
    solve per round for nothing measurable).
-3. **Robustness of long jobs: done.** **Memory estimates before heavy stages, done 2026-10-24** (`modelforge/memory.py`: per stage from the project's last measured peak, the machine's records or a model calibrated on karlak; the GUI asks before a job that does not fit in the available RAM, the queue waits for it; every finished stage's peak is recorded). **Done 2026-10-24:**
+3. **Robustness of long jobs: done.** **Memory estimates before heavy stages, done 2026-10-24** (`modelforge/memory.py`: per stage from the project's last measured peak, the machine's records or a model calibrated on karlak; the GUI asks before a job that does not fit in the available RAM, the queue waits for it; every finished stage's peak is recorded; a chunked refine's recorded peak grows at the model's 0.16 GB per extra M matches, not in proportion, `memory.GROW_AT_MODEL_RATE`: only its triangulations of all photos grow, berlin_all 36 → 24.5 GB, 2026-10-29). **Done 2026-10-24:**
    re-attaching a job after a GUI restart (job processes outlive the GUI; `PROJECT/job.json` / `job.log` /
    `job.cancel`, `App._reattach`). **Done 2026-10-23:** resume refine (Sparse tab "Resume refine", CLI `--resume-refine`, a checkpoint
    after every round / chunk / pass in `sparse/refine_resume.pkl`); the GUI's in-process stages (features … refine,
    export, SfM mesh, COLMAP dense) run in a job process of their own (`modelforge/worker.py`: an OOM kill takes only
    the job; `MODELFORGE_INPROCESS=1` = as before): `docs/todo_robustness.md`.
-4. **Job queue with completion notices: first version done 2026-10-23** (right panel → Queue: project + stage +
+4. **Job queue with completion notices: first version done 2026-10-23** (stage list = the full pipeline's steps in its
+   order + Difix suggest / refine and the splat mesh, and entries keep the Sparse tab's Images used / Register
+   selections, since 2026-10-26; right panel → Queue: project + stage +
    the tabs' settings at queueing time, run one after the other, browser notification per entry; memory check
    per entry done 2026-10-24 (waits until the RAM it needs is free); **entries of other projects run without switching
    the view, done 2026-10-24**: in a process of their own, `gui/headless.py` (an App on that project without a
@@ -150,9 +152,21 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    loop closures (as BA residuals they only bent the clicked cameras): `docs/todo_tie_points.md`.
 7. **Register more photos into an SfM model: done 2026-10-25** (the user asked; the photos chosen like Images used:
    every N-th / time range / keyframes at a density, those in use skipped): Sparse tab → Register more photos: the
-   unused extracted photos located by PnP against the fixed model (0.67 px on kladno_dopravnik; the metadata + the
+   unused extracted photos located by PnP against the fixed model; **since 2026-10-26 the last step of Run SfM (all) and
+   of the SfM part of Run full pipeline** (after export, the overlap analysis first when its Selection is keyframes
+   and none is current; skipped when the selection holds no photo beyond those in use), its folder below the stage
+   buttons and open by default, as is Images used (0.67 px on kladno_dopravnik; the metadata + the
    refine's interpolated corrections alone 2.0 px median, up to 33: the check), added to transforms.json for the splat:
    `docs/todo_register_more.md`.
+8. **Exclude photos from the splat on: done 2026-10-28** (the user asked: without extracting or running SfM again;
+   `modelforge/exclude.py`, `gui/exclude.py`): Sparse tab → **Exclude photos (splat and after)**: the photo selected in
+   Inspect (or the Photo window's), or a time range of a source / all sources; Undo last, Include all; **Apply: export
+   again**. `PROJECT/excluded.json` (entries in order: a name or {t0, t1, source} on the project timeline). The SfM model
+   keeps them; `stage_export` leaves them out like the isolated photos (re-triangulated without them into
+   sparse/export, so the SfM mesh too), and `register.add_frames` skips registered photos covered by it
+   (`registered_excluded`; they do not count as a ghost stretch for `near_dropped`). COLMAP dense still uses them. The
+   View greys excluded cameras; the status says when the last export applied a different choice. Tests:
+   `tests/test_exclude.py`, `test_gui_dense.py::test_exclude_photos_panel`.
 
 **Low**
 1. ~~Run the full clip through dense and splat~~: superseded (2026-10-23) by the `berlin` project (4 clips, 3142
@@ -196,11 +210,64 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    a tile's own, those showing >= 20 % of it always stay (a higher bar dropped berlin views of the kind the merge broke);
    a training A/B on one tile is open: `docs/todo_tile_size.md`.
 10. **Saved camera views: done 2026-10-25** (the user asked): left panel → Views: Save current view (position, look-at, up, field of view) under a name; ▶ glide there, ⟳ replace, ✏ rename, 🗑 delete; per project in `PROJECT/views.json`: `docs/todo_saved_views.md`.
-11. **TODO: Ingest tab: pick a folder, list only its videos** (the user asked, 2026-10-25): the Videos list there shows every
-   clip of the library at once; a folder picker (the library's folders, as in the Videos tab) narrowing the list to that
-   folder would make finding the clip easier.
+11. ~~Ingest tab: pick a folder, list only its videos~~ **done 2026-10-27** (the user asked): Ingest → Videos →
+   **Folder** ("all folders", then every folder holding clips, with their count) narrows the Video list to that
+   folder's clips, by file name (`IngestPanel._filter_videos`); a rescan keeps the folder. **Add all in folder**
+   (2026-10-28, `IngestPanel.add_folder`) makes every clip of that folder a whole source, skipping those already in
+   the sources. Each source's title reads "folder/file" and its stats start with its folder path (`_label`). Test:
+   `test_gui_ingest.py::test_ingest_folder_filter`.
 12. **TODO: rename the Videos tab** to "Data" or similar (the user asked, 2026-10-25): it also holds ROS bags; the
    hints, the Ingest tab's references to it and the docs follow.
+13. **TODO (waiting for the user): an Unreal Engine 5 plugin showing splats with our level of detail** (the user
+   asked, 2026-10-26). Do not start until the user has installed UE5 on this machine and provided a sample splat
+   plugin to start from. Plan and requirements: `docs/todo_unreal_splat.md`.
+14. **A classical 2D map: done 2026-10-27** (the user asked; quick bar **Map**, `modelforge/gui/map.py`,
+   `modelforge/map2d.py`, `modelforge/geo.py`):
+   - **Background:** Esri aerial / OSM tiles cached in `ROOT/.map_tiles`, with the splat's **orthophoto** on top
+     (`modelforge/ortho.py`, stage `ortho`, GeoTIFF export in UTM).
+   - **Shown:** the flight path, the cameras and the live 3D camera wedge.
+   - **Heat maps:** photos per area, neighbour overlap, held-out PSNR, Difix thin spots.
+   - **Layers:** isolated photos, splat tiles, the Ingest plan, search results and saved / Difix views as pins.
+   - **Clicks:** go there / to a pin, centre, leave out a tile, an Ingest rectangle → sources (look-at inside,
+     pieces ≥ 5 s, gaps < 3 s joined; Undo), a source's range start / end, an area → Images used / Register more
+     photos.
+
+   Details: `docs/todo_map.md`.
+15. **TODO: articulated and moving objects, first version built 2026-10-27** (the user asked; on kladno_dopravnik's
+   mobile screener): left panel → **Rig** tab (`modelforge/rig.py`, `gui/rig.py`): the Search tab's object cut out
+   of the splat (its matches grown over voxels above the ground matching better than generic words; 28.8k Gaussians
+   in 0.6 s), the ground under it filled, joints picked by Ctrl + click ×3 (hinge axis, then the moving part), a
+   slider per joint moving the part's own splat node, export of the posed splat (SH turned per part).
+   **Propose joints (UniRig)** (`modelforge/rig_unirig.py`; installed by `scripts/install_unirig` into build/unirig,
+   its own Python 3.11): UniRig's skeleton of a TSDF mesh of the object, 10 seeds, limbs >= 2 runs agree on that leave
+   the body become lift hinges where they leave it; on the screener both side conveyors (4 of 10 runs each), ~3.5
+   min. **Animate** (Rig tab): a demo sweep of every joint or the user's keyframes, eased, played at 30 Hz
+   by moving the parts' nodes; **Plan motions (vision model)** (`modelforge/rig_vlm.py`): Qwen2.5-VL-7B offline
+   looks at annotated renders (4 sides, a close-up per joint, a photo), names the machine and parts and plans 2-3
+   motions as keyframes ("planned: …" under Motion); **Propose parts (PartField)** (`modelforge/rig_partfield.py`,
+   non-commercial licence, `scripts/install_partfield`): parts from a learned feature field, joints at their
+   contacts (turntable / hinge), Parts slider + Split (the excavator: tracks → house slew → arm; UniRig failed on it);
+   **Joints from a template** (`rig_vlm.template`): the vision model writes the machine's chain, the tab asks for
+   each pin and part by name (Ctrl + click), the joints follow (the model's own pointing was too rough).
+   The cut-out handles rough ground (median ground, other instances as walls, a capped search, background-adaptive
+   growing; kladno_bagr). Articulate-Anything was not run (it retrieves household PartNet objects and needs a cloud API). Open: a local
+   vision-language model for joint types / axes, motion captured in different passes, a photo-mask cut-out (SAM 2),
+   soft motion / wind, unseen surfaces: `docs/todo_rigs.md`.
+16. **Features / matching for hard pairs: built 2026-10-28** (the user asked; berlin_all fails across viewpoints /
+   scales). Benchmark on 56 overlapping pairs with 0 COLMAP SIFT inliers: RoMa links 11 of 14 scale / 53 of 64
+   overall, MASt3R 47, GIM-LightGlue 41, ALIKED + LightGlue 37, OpenCV SIFT 25, COLMAP's SIFT 0 (its 8192 cap keeps
+   coarse scales; 32k links 14 of 42); only 6 % of the overlapping pairs > 60 s apart were in pairs.txt. Built
+   (`modelforge/sfm/learned.py`, worker `export/matchers.py` in build/matchers from `scripts/install_matchers`):
+   Extractor aliked-lightglue / gim-lightglue (LightGlue matching), Dense matcher roma for the unlinked pairs between
+   passes (3 per photo), covisible pairs between passes from the earlier model (10 per photo, `pairs.covisible`),
+   Register more photos / evaluation with the same features, extracted once per photo (a cache keyed by the photo's
+   size + mtime, kept across choices of Images used). **Default "auto"** for Extractor and Dense matcher (the user's
+   choice; GUI and CLI; `pipeline.auto_matching`): ALIKED + RoMa when >= max(20, 1 % of the photos) look-at pairs
+   from the priors lie > 60 s apart on the timeline (several flights / passes over the same ground; without priors:
+   covisible pairs of an earlier model), SIFT otherwise and without the matchers; recorded in report features.auto,
+   shown in History. fullrun_test / kladno_dopravnik: SIFT; karlak, berlin, berlin_all, kladno_dira, dira2k: ALIKED +
+   RoMa. ALIKED's precision is near SIFT's (0.585 vs 0.475 px),
+   GIM's not (0.78). **RoMa links anything over flat ground** (60 pairs > 400 m apart: all verified), so its matches must land within 10 m in the earlier model (`learned.Ground`; none of those 60 does; no model: no dense pass). berlin_all matched 2026-10-29 (the first run was OOM-killed in the merge: fixed): `docs/todo_matching.md`, `build/matchbench/`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
@@ -391,8 +458,19 @@ SRT only helps two things:
   - NEO2 sample: 22.0 frames (SRT: 21.6) from 20 s of decoding. Mavic 4 `dira.MP4`: 0.5 frames in
     125 s, cached per clip.
   - `Clip.telemetry` and `sampling_curve` clamp at both ends now (negative leads read ahead).
-- Tests: `tests/test_djmd_models.py` (both layouts from hand-built packets, the auto yaw rules,
-  the windows).
+- **DJI Mavic 3** (2026-10-28, the user's `berlin_all`, 21 clips; model "DJIMavic3"): records at 3.2 / 3.3 / 3.4 as
+  on the Mavic 4, but
+  - **latitude / longitude in radians** (all priors sat near 0.92° N / 0.23° E, the flight shrunk 57×):
+    `djmd.radians` decides per clip (values beyond ±π/2 / ±π are degrees; inside, the integrated velocity
+    decides when the drone moved, else radians), `decode` converts. Against the SRT: 2–3 cm median, p99 0.55 m;
+    altitudes identical.
+  - its camera record has **no header** (the Mavic 4's fields 9 / 10 / 11 / 24): `records` takes a headerless
+    record holding 9 and 10 (ISO, shutter, f-number were 0 / NaN for the exposure correction).
+  - **Heading = aircraft yaw** (`NO_YAW_AXIS`): the gimbal yaw sits −4.6 to −49° off the aircraft yaw, constant
+    within a flight but different per flight, while the aircraft yaw matched the course within ~1° in straight
+    flight. The 20° rule of unknown models would have taken the gimbal for 13 of the 21 clips.
+- Tests: `tests/test_djmd_models.py` (the NEO2 / Mavic 4 / Mavic 3 layouts from hand-built packets, radians, the
+  auto yaw rules, the windows).
 
 Key facts (details in `docs/djmd_format.md`):
 - Attitude is in 0.1° units. Velocity is NED in m/s. Aircraft yaw is a true
@@ -478,7 +556,8 @@ Video-kind notes:
     shown as a failure.
   - Learned features / matching (ALIKED, LoMa, LightGlue) exist in this
     COLMAP but need `ONNX_ENABLED=ON`. Selecting ALIKED in the current image
-    **aborts the process**, so they are not offered.
+    **aborts the process**, so COLMAP's are not offered. Since 2026-10-28 ALIKED / GIM +
+    LightGlue and RoMa run through Python instead (`sfm/learned.py`, Low item 16).
   - COLMAP also has `pose_prior_mapper` (incremental with GPS priors).
     Relevant for phones with per-frame GPS or the ROS 2 kind, not for
     videos without metadata.
@@ -805,7 +884,7 @@ extract once, then run the pipeline on subsets of it, in the same project):
     **dense** (2026-10-22, the user asked: shifted one step denser; before dense / normal / sparse = 0.20 / 0.12 /
     0.06, so the calibration table below uses the old names: its "dense" is today's normal, its "normal" today's
     sparse, and its "sparse" (0.06) is gone).
-  - **Default: keyframes, density dense** (the user asked, 2026-10-22; `gui/subset.py DEFAULT_MODE`): a project that
+  - **Default: keyframes, density sparse** (since 2026-10-26, the user asked; dense from 2026-10-22; `gui/subset.py DEFAULT_MODE`): a project that
     never chose a subset (none recorded in poses.json) starts on keyframes, so Run full pipeline runs the overlap
     analysis and the keyframe selection first. A chosen every N-th is kept, also every 1 over the whole range ("all
     images": `apply_subsample` now records it instead of nothing).
@@ -816,7 +895,10 @@ extract once, then run the pipeline on subsets of it, in the same project):
     polled for features).
   - **Run full pipeline applies the panel's choice first** (stage `images`, `SubsetPanel.apply_selection`; 2026-10-22:
     switched to every N-th, the pipeline stayed on the keyframes, as only keyframes were applied): keyframes as below,
-    or every N-th when it differs from the images in use (else nothing moves).
+    or every N-th when it differs from the images in use (else nothing moves). **Only while no choice was applied
+    yet** (since 2026-10-26, the user asked; `SubsetPanel.selection_made`: poses.json records a "subsample"): after
+    that it skips analyze + images and keeps the images in use (History "images used · … kept"); change them in
+    the Sparse tab.
   - **Every N-th after keyframes** (moric, 2026-10-22: "now using 1 of 400 images"): in keyframes mode the panel never
     set Keep every / Starting at / Time range, so switching to every N-th used the slider's placeholder 0-1 s, and
     that range got stored. Now `refresh` always sets them, a stored range holding < 2 images opens on the whole
@@ -1693,6 +1775,10 @@ than 6 point spacings from every point cut. `PROJECT/sfmmesh/` mesh.ply (vertex 
 (≤ 300k faces), stats.json; report.json `sfm_mesh`. View tab Mesh **sfm**. fullrun_test: 43.7k points, depth 11
 (0.17 m cells), 175k of 225k faces kept, 82 % of the points within 0.3 m of a vertex, 5 s. Not yet used as a prior
 (the plan: rendered depth / normals per training view for the depth loss, Gaussians seeded on it).
+- **Mesh type** (Sparse Mesh tab, CLI `--method`; the user asked, 2026-10-26): **poisson** (default, the above) or
+  **delaunay** (COLMAP `delaunay_mesher --input_type sparse` on the same model: a visibility graph cut along the tracks'
+  rays; its vertices are the SfM points, coloured like them; the same trim; no hole patching: Patch holes refuses, the
+  pipelines skip it). fullrun_test: 56k faces / 29k vertices in 3.7 s vs Poisson 176k / 92k in 5.3 s.
 - **Patch holes** (Sparse tab **Patch holes in SfM mesh** + "Max hole size (m)", stage `sfmmesh-fill`, run by hand;
   `--fill [MAX]`; the user asked): Poisson's surface is closed (fullrun_test: 12 open edges of 338k), so the faces
   the trim cut form pieces (`components`: faces sharing an edge, union-find by hooking + pointer jumping); anything
@@ -1947,6 +2033,25 @@ fine detail, a sidecar so the normal splat export stays unchanged):
   the GUI starts (~13 s; "text model: ready" in the tab); a search meanwhile waits for it. Opening a project
   with ready features also loads them and the splat positions in the background (`_warm`), so the first
   search takes ~0.4 s instead of ~6 s. Not done in `App()` itself: tests create apps.
+- **Octree index** (the user asked, 2026-10-27; `modelforge/semantic_tree.py`): the search no longer scores every
+  Gaussian. The features are mapped exactly to unit vectors in 1 + 64 dimensions (the Cholesky factor of the Gram
+  matrix of [PCA mean, basis]: cosine = dot product). The seen Gaussians are sorted along a Morton curve (16 levels),
+  and a cell splits above 2048 Gaussians. A leaf holds up to 100 cluster vectors (spherical k-means, ≥ 16 Gaussians
+  per cluster) with an angular radius covering every member, its Gaussians grouped by cluster. Inner cells cluster
+  their children's clusters, the radius grown by the triangle inequality.
+  - A search descends from the root into the cells, and in leaves the clusters, whose bound on
+    sigmoid(T z·(q′ − n′)) per negative reaches the floor (min(threshold, 0.55)). Only those clusters' members are
+    scored. Exact at or above the floor; below it 0, which is never shown or grouped. A slider moved below the
+    floor rescores.
+  - Bounding cos_q and cos_n apart pruned almost nothing: text-image cosines span ~0.1, a 9° cap ~0.16. Opening
+    whole leaves scored ~50 %.
+  - Measured (floor 0.55 / 0.6): lab 181k seen Gaussians, 3–16 % / 1–8 % scored, 9–17 ms vs 40 ms for the full
+    scan; tobik and hrnek 2–6 % / 1–2 %. Identical results everywhere. Build 3.3 s for 181k.
+  - `splat/semantic/octree.npz`, keyed by features.npz (size + mtime) and the Gaussian count. Built at the end of
+    the semantic stage, or when the Search tab loads features without it. The result line says the share scored.
+  - Inner cells prune little at these sizes (their radii reach 40–70°). The gain grows with the splat: the cluster
+    table is ~10 % of the Gaussians. Benchmark: `build/tree_bench.py PROJECT QUERY...`. Test:
+    `test_octree_search_is_exact_above_the_floor`.
 - Tiled splats: features per tile, merged (see "Splat tiles").
 - Not yet: tiling above 2048 px, distillation (option B).
 - Tests: `tests/test_semantic.py` (scoring, staleness, the panel's decoration; synthetic features).
@@ -2188,6 +2293,9 @@ Code layout:
     utilization and GPU memory (bars + numbers + GPU temperature / power), and a 2-minute history plot.
     Sampled at 1 Hz from `/proc/stat`, `/proc/meminfo` (host-wide, also in the container) and
     `nvidia-smi` (no psutil / pynvml in the image). Tests: `tests/test_gui_hardware.py`.
+  - **Rig** tab (left panel, after Search; 2026-10-27): articulated objects cut out of the splat (Low item 15,
+    `docs/todo_rigs.md`). `App.decorate` = the search's highlight, then the shown rig's object removed (also for the
+    level-of-detail cells); while it picks a joint, Ctrl + click goes to it instead of the pivot.
   - **Settings** tab (left panel): **Dark mode**.
     - `App.set_dark` calls `configure_theme(dark_mode=...)` for every client
       (the default `control_layout` sends no dock command, so the panel
@@ -2229,10 +2337,10 @@ Code layout:
     edges or above / below another panel, so "bottom", as the user asked, is
     a float. It shows the last 200 lines, newest first, because markdown
     cannot auto-scroll.
-    - The Hardware monitor (`self.hw_panel`) floats right of it (x=776,
-      480 px). The user wanted them split side by side; a floating panel
-      cannot be split into columns (only docked ones can), so they are two
-      windows. Both start minimized.
+    - The Hardware monitor is the log window's second tab (the user asked,
+      2026-10-27). Before, it was a window of its own to the right of the
+      log, because a floating panel cannot be split into columns. The window
+      starts minimized.
   - **Run full pipeline** (stage `all`) runs SfM → SfM mesh → splat → semantic features (Search tab
     "Include in Run full pipeline", default on; skipped without the RADIO packages) → colouring the SfM mesh, with
     the tabs' settings. **No splat mesh** (2026-10-22, the user asked; from 2026-10-18 until then it was the
@@ -2304,8 +2412,8 @@ Code layout:
     - Tested with a stand-in browser that lags 3 updates.
   - **Fly** (View tab folder + quick bar, the user asked): replays the camera path.
     - `gdata.FlightPath`: the shown snapshot's registered cameras in capture order, parametrized by
-      **distance** (the user asked for 0.5 m/s by default, loop on): segment = max(distance, 0.02 m ×
-      rotation in degrees), so turns on the spot take time (25°/s at 0.5 m/s); where the project
+      **distance** (default 2 m/s since 2026-10-26 (0.5 before), loop on): segment = max(distance, 0.02 m ×
+      rotation in degrees), so turns on the spot take time (100°/s at 2 m/s); where the project
       timeline pauses over 3 s (between videos) the jump is shortened to at most 2 m. Scene units
       for videos without metadata.
     - Positions follow a cubic Hermite curve (finite-difference tangents); orientations are slerped.
@@ -2322,7 +2430,7 @@ Code layout:
       start, speed / Loop changes and slider jumps; `_fly_now`) and `_fly_watch` at 4 Hz (slider, status, photo
       window, the end with Loop off). A browser connecting during a flight joins it (no recenter); the last one
       closing ends it; opening a project ends it.
-    - Controls: speed in m/s (default 0.5), Loop (default on), and "Camera's field of view" (on: the real
+    - Controls: speed in m/s (default 2), Loop (default on), and "Camera's field of view" (on: the real
       camera's vertical FOV while flying; the browser's FOV and up come back afterwards).
     - The **Position** slider shows progress; dragging it jumps there, also when not flying.
     - A drag, wheel or held movement key on the 3D view **pauses** the flight and hands the camera to the user
@@ -2341,6 +2449,23 @@ Code layout:
       ground; a yellow ball for 2 s); **View → Carry the pivot forward** (default on, `_carry_pivot` on every camera
       update, not while Orbit / Fly drive it): within 1 % of the scene's size (>= 0.3 m) the pivot moves 8x that far
       ahead. viser's own keys: W A S D move, R / F up / down (viser's Q / E), arrows turn; speed View → **Move speed** (default 5 m/s, remembered; viser's fixed 2 m/s). Both by `docker/patch_viser_camera.py`, which makes viser's bundle loader edit the unpacked code (the speed is read from a hidden `#mf-move-speed` element at the top of the right panel while a key is held); a browser keeps the old code across GUI restarts: hard reload.
+    - **Many cameras** (2026-10-28, berlin_all: 29.5k photos; the GUI hung): every photo had two frustum nodes
+      (refined + prior, created even when hidden, each with a click handler), so a browser connecting replayed 266,822
+      messages. Above `MAX_FRUSTA` (2000) cameras each layer is one wireframe line-segment node (8 segments per
+      camera, per-camera colours; `App._draw_camera_lines`), drawn only while shown; no thumbnails or clicks there.
+      Opening berlin_all: 774 messages. Test: `test_gui_dense.py::test_many_cameras_are_one_wireframe_per_layer`.
+    - **Far clipping plane** (2026-10-28): viser's default is 1000 m, which cut off the far parts of berlin_all's
+      path while turning; it is now max(1000 m, 8 x the scene extent) (`App._set_far`, `FAR_EXTENTS`), set on
+      connect and with every recenter / project switch.
+    - **Ground grid** (View tab, default on; 2026-10-28, the user asked): a faint xy grid (`App._draw_grid`, viser
+      `add_grid`) max(0.5 m, 1 % of the extent) under the lowest camera of the path (snapshot + priors; the Ingest
+      plan's tracks without images), over its extent + 20 %, cells a round 1 / 2 / 5 x 10^k near 1/40 of the extent,
+      every 10th line darker, colours by theme; the cell size is in the View stats.
+    - **Pose graph** (View → Pose graph folder, default off; 2026-10-29, the user asked): a line per verified pair of
+      database.db (`Project.pose_graph`: two_view_geometries rows > 0, cached by size + mtime) between the shown
+      snapshot's cameras, coloured red → yellow → green by inliers (log, 15 → 1000+); Edges "between passes" (two
+      flights or > `learned.FAR_S` apart, the default) / "all"; Min inliers; at most 300k lines (the strongest). The
+      status counts the pairs and the photos linked to another pass. Test `test_pose_graph_lines_between_verified_pairs`.
     - One camera driver: Fly stops Orbit and vice versa. Layers: points, cameras with
     thumbnails, prior cameras, prior→refined segments, trajectories. Cameras
     can be coloured by position or rotation deviation, reprojection error,
@@ -2375,6 +2500,10 @@ Things to know:
 - Points far outside the flight area are hidden, and the cloud uses float32.
   Unfiltered BA output contains points 100+ km away, which overflow viser's
   default float16.
+- **The Snapshot dropdown follows a live refine** (2026-10-28): a snapshot the refine loads (round_N, posegraph)
+  joins the list and shows as picked (`App._show_snapshot_name`; `_snapshot_picked` skips the reload), and a stopped
+  or failed job refreshes the list too. Before, berlin_all's list stayed "priors" (from when new images were applied)
+  while the View showed the refine's posegraph model.
 - Live refine takes about 2× the headless time (171 s vs 83 s). The scene
   updates hold the GIL during Ceres' Python callbacks.
 - Triangulation is RANSAC-based, so runs are not bit-identical. Medians are

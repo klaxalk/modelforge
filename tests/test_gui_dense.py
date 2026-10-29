@@ -250,7 +250,7 @@ def test_quick_bar(app):
     app._sync_quickbar()
     assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "●", "Cams": "○", "Thumbs": "·",
                        "Resid": "○", "Traj": "●", "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
-                       "Center": "⌖", "Fly": "○"}  # the default view: points and trajectories; cameras, thumbs off
+                       "Center": "⌖", "Fly": "○", "Map": "○"}  # the default view: points and trajectories; cameras, thumbs off
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Tiles", None)  # View: Tile boundaries
@@ -459,3 +459,125 @@ def test_move_speed(app, monkeypatch):
     monkeypatch.setattr(app, "_save_setting", lambda k, v: saved.update({k: v}))
     app._set_move_speed(12.5)
     assert 'id="mf-move-speed" data-speed="12.5"' in app.g_speed_html.content and saved == {"move_speed": 12.5}
+
+
+def test_many_cameras_are_one_wireframe_per_layer(app, monkeypatch):
+    """Above MAX_FRUSTA cameras the cameras and prior cameras are one line-segment node each (8 segments per
+    camera), with no frustum nodes; the selection recolours it, hiding a layer removes its node."""
+    from modelforge.gui import app as app_mod
+    scene = app.server.scene
+    monkeypatch.setattr(app_mod, "MAX_FRUSTA", 10)
+    app.g_cams.value = app.g_priors.value = True
+    app._draw_cameras()
+    assert not app.cam_handles and not app.prior_handles
+    lines = scene.get_handle_by_name("/cams_lines")
+    assert len(lines.points) == 8 * int(app.snap.cams.valid.sum())
+    assert scene.get_handle_by_name("/priors_lines") is not None
+    app.select(0)
+    assert tuple(scene.get_handle_by_name("/cams_lines").colors[0, 0]) == app_mod.SELECTED_COLOR
+    app.g_priors.value = False
+    app._draw_cameras()
+    assert scene.get_handle_by_name("/priors_lines") is None
+    monkeypatch.setattr(app_mod, "MAX_FRUSTA", 2000)  # few cameras again: frustum nodes
+    app._draw_cameras()
+    assert app.cam_handles and scene.get_handle_by_name("/cams_lines") is None
+
+
+def test_far_plane_follows_the_scene(app):
+    """The far clipping plane grows with the scene (viser's 1000 m cut large flights), never below 1000 m."""
+    from modelforge.gui.app import FAR_EXTENTS
+    app._set_far(frame=(np.zeros(3), 2000.0))
+    assert app.server.initial_camera.far == FAR_EXTENTS * 2000.0
+    app._set_far(frame=(np.zeros(3), 10.0))
+    assert app.server.initial_camera.far == 1000.0
+
+
+def test_exclude_photos_panel(app):
+    """Sparse tab → Exclude photos: the Inspect selection toggles, a time range adds, the View greys them, the
+    status asks for an export (the user asked, 2026-10-28)."""
+    from modelforge import exclude
+    from modelforge.gui.exclude import COLOR
+    ex = app.exclude
+    app.select(2)
+    assert ex.pick() is True and ex.mask[2]
+    assert "excluded" in app.g_inspect_md.content and "Apply" in ex.g_md.content
+    assert tuple(app._camera_colors()[2]) == COLOR
+    t = app.project.time
+    ex.g_range.value = (float(t[5]), float(t[7]))
+    assert ex.g_range_md.content.startswith("→ 3 photos")
+    ex.add_range()
+    assert int(ex.mask.sum()) == 4 and exclude.names(app.path) == {app.project.names[k] for k in (2, 5, 6, 7)}
+    ex.edit("Undo last")
+    assert int(ex.mask.sum()) == 1
+    assert ex.pick(2) is False and not ex.mask.any()
+    ex.edit("Include all")
+    assert not os.path.exists(os.path.join(app.path, exclude.FILE))
+
+
+def test_ground_grid_under_the_path(app):
+    """View → Ground grid: under the lowest camera, over the path, a round cell size; off removes it."""
+    app.g_grid.value = True
+    app._draw_grid()
+    g = app.server.scene.get_handle_by_name("/grid")
+    pts = app._grid_path()
+    assert g is not None and g.position[2] < pts[:, 2].min()
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    assert g.width >= hi[0] - lo[0] and g.height >= hi[1] - lo[1]
+    m = app.grid_cell / 10 ** np.floor(np.log10(app.grid_cell))
+    assert round(m, 6) in (1, 2, 5, 10)
+    app.g_grid.value = False
+    app._draw_grid()
+    assert app.server.scene.get_handle_by_name("/grid") is None
+    app.g_grid.value = True
+
+
+def test_pose_graph_lines_between_verified_pairs(app):
+    """View → Pose graph: one line per verified pair of database.db at the snapshot's cameras; between passes is a
+    subset; Min inliers filters; off removes it."""
+    import sqlite3
+    db = os.path.join(app.path, "database.db")
+    if not os.path.exists(os.path.join(REAL, "database.db")):
+        pytest.skip("needs a matched project")
+    if not os.path.exists(db):
+        os.symlink(os.path.abspath(os.path.join(REAL, "database.db")), db)  # only read
+    con = sqlite3.connect(db)
+    want = con.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0").fetchone()[0]
+    con.close()
+    app.load_snapshot("refined")
+    i, j, n = app.project.pose_graph()
+    assert len(i) == want and np.all(i < j) and n.min() > 0
+    app.g_graph.value, app.g_graph_edges.value, app.g_graph_min.value = True, "all", 15
+    app._draw_graph()
+    v = app.snap.cams.valid
+    h = app.server.scene.get_handle_by_name("/pose_graph")
+    assert h is not None and len(h.points) == int((v[i] & v[j]).sum())
+    assert np.allclose(h.points[0, 0], app.snap.cams.centers[i[v[i] & v[j]][0]], atol=1e-3)
+    app.g_graph_min.value = int(np.median(n))
+    app._draw_graph()
+    assert len(app.server.scene.get_handle_by_name("/pose_graph").points) < len(h.points) or n.min() == n.max()
+    app.g_graph_edges.value = "between passes"
+    app.g_graph_min.value = 15
+    app._draw_graph()
+    g = app.server.scene.get_handle_by_name("/pose_graph")
+    assert g is None or len(g.points) <= len(h.points)
+    assert "verified pairs" in app.g_graph_md.content
+    app.g_graph.value = False
+    app._draw_graph()
+    assert app.server.scene.get_handle_by_name("/pose_graph") is None
+
+
+def test_live_snapshot_shows_in_the_dropdown(app, monkeypatch):
+    """A snapshot a live refine loaded joins the Snapshot list and shows as picked, without a second load (the
+    dropdown had kept "priors" only while the View showed the refine's model)."""
+    app.g_snapshot.options = ("priors",)
+    app.load_snapshot("priors")  # as after a project opened before SfM
+    with app.lock:
+        app.snap = app.project.load_snapshot("refined")
+        loads = []
+        monkeypatch.setattr(app, "load_snapshot", lambda name: loads.append(name))
+        app._show_snapshot_name("refined")
+    assert "refined" in app.g_snapshot.options and app.g_snapshot.value == "refined" and not loads
+    monkeypatch.undo()
+    app.g_snapshot.value = "priors"  # a real pick still loads
+    assert app.snap.name == "priors"
+    app.refresh_snapshot_list(select="main")

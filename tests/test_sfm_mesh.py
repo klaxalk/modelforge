@@ -43,6 +43,23 @@ def test_sfm_mesh_lies_on_the_points(tmp_path):
     assert not (tmp_path / "sfmmesh" / "patched.npy").exists()
 
 
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "points3D.bin")),
+                    reason="needs a refined project")
+def test_delaunay_sfm_mesh(tmp_path):
+    """Mesh type delaunay: COLMAP's sparse Delaunay mesher, its vertices the SfM points (coloured like them), no
+    patching."""
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), tmp_path / "sparse" / "refined")
+    st = sfm_mesh.run(str(tmp_path), method="delaunay", on_line=lambda m: None)
+    assert st["method"] == "delaunay" == sfm_mesh.method(str(tmp_path)) and st["faces"] > 1000
+    v = plyfile.PlyData.read(tmp_path / "sfmmesh" / "mesh.ply")["vertex"].data
+    assert "red" in v.dtype.names and np.ptp(v["red"]) > 0  # the points' colours
+    assert not (tmp_path / "sfmmesh" / "kept.npy").exists() and not sfm_mesh.can_fill(str(tmp_path))
+    with pytest.raises(RuntimeError, match="Delaunay"):
+        sfm_mesh.fill(str(tmp_path), on_line=lambda m: None)
+    assert sfm_mesh.run(str(tmp_path), on_line=lambda m: None)["method"] == "poisson"  # back: patchable again
+    assert sfm_mesh.can_fill(str(tmp_path)) and not (tmp_path / "sfmmesh" / "delaunay.ply").exists()
+
+
 def test_components_split_by_shared_edges():
     # two triangles sharing an edge, a third touching them only at a vertex, a fourth masked out
     faces = np.array([[0, 1, 2], [1, 2, 3], [3, 4, 5], [5, 6, 7]])

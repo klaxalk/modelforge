@@ -23,18 +23,30 @@ import time
 
 FILE = ".modelforge_queue.json"
 DIR = ".modelforge_queue.d"  # an external entry's <id>.json / .status.json / .cancel / .log
-STAGES = {  # label -> App.run_stage stage
+STAGES = {  # label -> App.run_stage stage, in the order the full pipeline runs them (2026-10-26, the user asked)
     "Run full pipeline": "all",
-    "Run SfM (all)": "sfm",
-    "Refine": "refine",
+    "Run SfM (all: features … export, register more photos)": "sfm",
+    "Overlap analysis of the extracted images": "analyze",
+    "Images used: apply the selection": "images",
+    "Features": "features",
+    "Pairs": "pairs",
+    "Match": "match",
+    "Refine (videos: reconstruct)": "refine",
     "Resume refine": "refine-resume",
     "Export": "export",
-    "SfM mesh (all: mesh, holes, colour)": "sfmmesh-all",
+    "Register more photos": "register",
+    "SfM mesh (all: mesh, patch holes, colour)": "sfmmesh-all",
+    "SfM mesh: build": "sfmmesh",
+    "SfM mesh: patch holes": "sfmmesh-fill",
+    "SfM mesh: colour from the photos": "sfmmesh-colour",
     "Set up tiles": "splat-tiles",
     "Train splat": "splat",
     "Resume splat": "splat-resume",
-    "Splat mesh": "splatmesh",
     "Semantic features": "semantic",
+    "Difix: suggest target views": "difix-suggest",
+    "Difix: refine the splat": "difix",
+    "Splat mesh: build": "splatmesh",
+    "Splat mesh: patch holes": "splatmesh-fill",
     "COLMAP dense (all)": "dense",
 }
 MIN_FREE_GB = 6.0  # an entry starts only with this much RAM available (an OOM kill once took a 5 h refine), or what

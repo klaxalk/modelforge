@@ -448,3 +448,22 @@ def test_loss_masks_keep_the_tiles_pixels(tmp_path):
             x = (u + 0.5 - w / 2) / f * 10  # the ground point of the sampled pixel
             assert m[v, u] == (x < 0), (u, v, x)
     assert m[:4].all()
+
+
+def test_tile_links_registered_photos(tmp_path):
+    """Photos added by Register more photos live in registered/images/: a tile's dataset links that folder too (svata,
+    2026-10-27: the tile's downscaling failed on registered/images/svata_00154.jpg)."""
+    import plyfile
+    p = str(tmp_path / "proj")
+    for d in ("images", "registered/images"):
+        os.makedirs(os.path.join(p, d))
+    frames = [{"file_path": "images/a.jpg", "transform_matrix": np.eye(4).tolist()},
+              {"file_path": "registered/images/b.jpg", "transform_matrix": np.eye(4).tolist()}]
+    json.dump({"fl_x": 100.0, "fl_y": 100.0, "w": 64, "h": 48, "frames": frames},
+              open(os.path.join(p, "transforms.json"), "w"))
+    v = np.zeros(3, [("x", "f4"), ("y", "f4"), ("z", "f4")])
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex")]).write(os.path.join(p, "sparse_pc.ply"))
+    out, _ = splat_tiles.write_tile(p, 0, {"frames": [0, 1], "cell": [None, None, None, None], "margin": 1.0}, 2)
+    for f in frames:
+        assert os.path.isdir(os.path.dirname(os.path.join(out, f["file_path"])))
+    assert not os.path.isabs(os.readlink(os.path.join(out, "registered")))

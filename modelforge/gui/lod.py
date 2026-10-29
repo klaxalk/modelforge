@@ -45,7 +45,8 @@ class SplatLod:
         self.moved_at = 0.0
         self.cut_at = 0.0
         self.cut_cam = None
-        self.building = None  # project being built
+        self.building = None  # (project, splat) being built
+        self.splat = None  # the splat drawn: None = the project's, else a path in it (the splat from before Difix)
         self.lock = threading.Lock()
         self._stop = threading.Event()
         threading.Thread(target=self._loop, daemon=True).start()
@@ -56,35 +57,36 @@ class SplatLod:
         return bool(self.app.g_splat_lod.value) and total > int(self.app.g_lod_budget.value)
 
     def ready(self):
-        """The index of the open project's splat (None: not built yet; starts the build)."""
-        path = self.app.path
-        idx = splat_lod.index(path)
-        if idx is None and self.building != path:
-            self._build(path)
+        """The index of the open project's splat, or of self.splat (None: not built yet; starts the build)."""
+        path, splat = self.app.path, self.splat
+        idx = splat_lod.index(path, splat)
+        if idx is None and self.building != (path, splat):
+            self._build(path, splat)
         return idx
 
-    def _build(self, path):
+    def _build(self, path, splat=None):
         from modelforge import worker
         from modelforge.gui import jobqueue
         need = 1.0 + 0.6 * self.app._splat_total / 1e6
         if jobqueue._available_gb() < need + jobqueue.MIN_FREE_GB:
             self.app._on_log(f"level of detail: not built, needs ~{need:.0f} GB of free RAM")
             return
-        self.building = path
+        self.building = (path, splat)
 
         def go():
             t0 = time.time()
             try:
                 if os.environ.get("MODELFORGE_INPROCESS") == "1":
-                    splat_lod.build_in(path)
+                    splat_lod.build_in(path, splat)
                 else:
-                    worker.run("modelforge.splat_lod:build_in", {"folder": path}, label="level of detail")
+                    worker.run("modelforge.splat_lod:build_in", {"folder": path, "splat": splat},
+                               label="level of detail")
                 self.app._on_log(f"level of detail built in {time.time() - t0:.0f} s")
             except Exception as e:  # noqa: BLE001 - the subset stays
                 self.app._on_log(f"level of detail failed: {e}")
             finally:
                 self.building = None
-            if os.path.abspath(self.app.path) == os.path.abspath(path):
+            if os.path.abspath(self.app.path) == os.path.abspath(path) and self.splat == splat:
                 self.app._unchanged("splat", None)  # redraw with it
                 self.app._draw_splat()
         threading.Thread(target=go, daemon=True).start()
@@ -153,10 +155,10 @@ class SplatLod:
             for i in changed:
                 k = cut[i]
                 cell = self.idx["cells"][i]
-                c, cov, rgb, op = splat_lod.load_cell(project, k, cell)
-                if sem.rel is not None:
+                c, cov, rgb, op = splat_lod.load_cell(project, k, cell, self.splat)
+                if (sem.rel is not None or self.app.rig.shown) and self.splat is None:  # the project splat's
                     src, parent = splat_lod.cell_sources(project, k, cell)
-                    c, cov, rgb, op = sem.decorate(c, cov, rgb, op, src, parent)
+                    c, cov, rgb, op = self.app.decorate(c, cov, rgb, op, src, parent)
                 self._set(i, f"{NODE}/c{i:04d}", c, cov, rgb, op)
                 self.drawn[i] = k
         self.app._lod_status()

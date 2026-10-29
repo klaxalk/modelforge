@@ -3,6 +3,7 @@ again: every N-th image (with an offset and a time window), or keyframes chosen 
 overlap (optional "Analyze extracted images" pass, sfm/overlap.py). projects.apply_subsample does the
 work; the results of the previous image set move to previous/, so the pipeline then runs again."""
 
+import json
 import math
 import os
 import threading
@@ -25,7 +26,7 @@ class Selection:
     def __init__(self, gui, mode=DEFAULT_MODE, level=overlap.DEFAULT_LEVEL, on_update=None):
         self.g_mode = gui.add_dropdown(
             "Selection", options=tuple(MODES), initial_value=mode,
-            hint="every N-th image: uniform along each source. keyframes (default; density dense): as few "
+            hint="every N-th image: uniform along each source. keyframes (default; density sparse): as few "
                  "images as keep enough overlap between neighbours, measured on the images (Analyze below; "
                  "Run full pipeline analyzes and selects by itself): fewer on straight cruising, more in turns "
                  "and close passes. A project that chose every N-th image keeps it.")
@@ -46,12 +47,28 @@ class Selection:
                  "the one before. Expected splat quality (held-out photos, kladno_dopravnik): "
                  + "; ".join(f"{k} ({v:.2f}): {overlap.QUALITY[k]}" for k, v in overlap.LEVELS.items())
                  + ".")
-        for g in (self.g_mode, self.g_every, self.g_offset, self.g_range, self.g_level):
+        self.g_area = gui.add_checkbox(
+            "Only photos looking into the map's area", initial_value=True, visible=False,
+            hint="Map window → Click: Draw an area, then Use the area for Images used / Register: of the photos "
+                 "chosen above, only those whose look-at point (the optical axis on the terrain) lies inside the "
+                 "drawn polygon. Untick to ignore the area.")
+        self.area = None  # {"polygon": [[x, y], ...], "names": set of the extracted photos looking into it}
+        for g in (self.g_mode, self.g_every, self.g_offset, self.g_range, self.g_level, self.g_area):
             g.on_update(lambda _: on_update and on_update())
         self.g_mode.on_update(lambda _: self.show_mode())
 
     def mode(self):
         return MODES[self.g_mode.value]
+
+    def set_area(self, polygon, names):
+        """The map's drawn area (ENU polygon) and the extracted photos looking into it; None clears it."""
+        self.area = None if polygon is None else {"polygon": [[float(x), float(y)] for x, y in polygon],
+                                                  "names": set(names)}
+        self.g_area.visible = self.area is not None
+        self.g_area.value = self.area is not None
+
+    def _area_on(self):
+        return self.area is not None and self.g_area.value
 
     def show_mode(self):
         every = self.mode() == "every"
@@ -68,7 +85,18 @@ class Selection:
         return lo, hi
 
     def args(self, images, ov):
-        """apply_subsample / register keyword arguments: names (keyframes) or every / offset / start / end."""
+        """apply_subsample / register keyword arguments: names (keyframes, or any choice inside the map's area) or
+        every / offset / start / end."""
+        a = self._args(images, ov)
+        if not self._area_on():
+            return a
+        names = a["names"] if "names" in a else [images[k]["image"] for k in projects.subsample_selection(images, **a)]
+        setting = a.get("setting") or {"method": "every", "every": a["every"], "offset": a["offset"],
+                                       "start": a["start"], "end": a["end"]}
+        return dict(names=[n for n in names if n in self.area["names"]],
+                    setting={**setting, "area": self.area["polygon"]})
+
+    def _args(self, images, ov):
         if self.mode() == "keyframes":
             level = self.g_level.value
             names = overlap.select_keyframes(images, ov, overlap.LEVELS[level])
@@ -84,19 +112,20 @@ class Selection:
         return a["names"] if "names" in a else [images[k]["image"] for k in projects.subsample_selection(images, **a)]
 
     def describe(self):
+        area = " in the map's area" if self._area_on() else ""
         if self.mode() == "keyframes":
-            return f"keyframes ({self.g_level.value})"
+            return f"keyframes ({self.g_level.value}){area}"
         lo, hi = self.g_range.value
         full = lo <= self.g_range.min and hi >= self.g_range.max
         return (f"every {int(self.g_every.value)}" + (f" from #{int(self.g_offset.value)}" if self.g_offset.value else "")
-                + ("" if full else f", {lo:g}–{hi:g} s"))
+                + ("" if full else f", {lo:g}–{hi:g} s") + area)
 
 
 class SubsetPanel:
     def __init__(self, app, gui):
         self.app = app
         self._images, self._overlap = [], None
-        with gui.add_folder("Images used", expand_by_default=False):
+        with gui.add_folder("Images used", expand_by_default=True):
             self.g_md = gui.add_markdown("")
             self.sel = Selection(gui, on_update=self._preview)
             self.g_mode, self.g_every, self.g_offset = self.sel.g_mode, self.sel.g_every, self.sel.g_offset
@@ -114,7 +143,8 @@ class SubsetPanel:
                      "become the subset; the full extraction stays in extracted/). Results of the current image "
                      "set (features, matches, sparse, dense, splat, ...) move to previous/: run the pipeline "
                      "again. Keep every 1 over the whole range returns to all images. Run full pipeline applies "
-                     "the panel's choice (keyframes or every N-th) by itself as its first step.")
+                     "the panel's choice (keyframes or every N-th) by itself as its first step, but only while no "
+                     "choice was applied yet; after that it keeps the images in use.")
             self.g_apply.on_click(lambda _: self.apply())
 
     def _mode(self):
@@ -162,6 +192,8 @@ class SubsetPanel:
                                  + ")")
         else:
             self.g_md.content = f"using all **{info['used']}** extracted images"
+        if st.get("area"):
+            self.g_md.content += f" · inside an area drawn on the map ({len(st['area'])} corners)"
         if self._overlap:
             self.g_md.content += (f"  \nanalysis: {len(self._overlap['keypoints'])} images, "
                                   f"{len(self._overlap['pairs']):,} verified pairs")
@@ -195,6 +227,13 @@ class SubsetPanel:
         self.g_preview.content = (f"→ **{n}** of {len(self._images)} images{extra}  \n"
                                   "applying moves the current results to previous/")
 
+    def selection_made(self):
+        """An Images used choice was applied before (poses.json "subsample"): the full pipeline keeps it."""
+        try:
+            return bool(self.app.path and (projects.subsample_info(self.app.path) or {}).get("setting"))
+        except (OSError, ValueError, KeyError):
+            return False
+
     def keyframes_selected(self):
         """Selection = keyframes: the full pipeline then analyzes and selects first."""
         return bool(self._images) and self._mode() == "keyframes"
@@ -209,7 +248,8 @@ class SubsetPanel:
             return n, total, f"keyframes ({self.g_level.value})"
         self._images = projects.extracted_images(self.app.path)
         args = self._args()
-        names = {self._images[k]["image"] for k in projects.subsample_selection(self._images, **args)}
+        names = set(args["names"]) if "names" in args else \
+            {self._images[k]["image"] for k in projects.subsample_selection(self._images, **args)}
         if len(names) < 2:
             raise RuntimeError(f"Images used: every N-th selects {len(names)} image(s) (check Starting at / Time range)")
         current = set(self.app.project.names) if self.app.project else set()
@@ -218,8 +258,7 @@ class SubsetPanel:
             self.app.load_project()
             self.app.refresh_after_images_changed()
         self.refresh()
-        every = f"every {args['every']}" + (f" from #{args['offset']}" if args["offset"] else "")
-        return len(names), len(self._images), every
+        return len(names), len(self._images), self.sel.describe()
 
     def apply_keyframes(self):
         """In a running job (full pipeline, after the analysis): use the keyframes at the chosen density
@@ -271,14 +310,14 @@ class RegisterPanel:
     def __init__(self, app, gui):
         self.app = app
         self._images, self._overlap = [], None
-        with gui.add_folder("Register more photos (for the splat)", expand_by_default=False):
+        with gui.add_folder("Register more photos (for the splat)", expand_by_default=True):
             gui.add_markdown(
                 "After SfM: place more of the **extracted** photos into the model, without running SfM again, so the "
                 "splat trains on a denser set. Choose them as in **Images used**; those of the choice already in "
                 "use are skipped. Each is matched to the model photos nearest in time and located (PnP, the model "
                 "unchanged; ~3 s per 4K photo); its pose must agree with the flight's trajectory (the metadata + "
                 "the refine's corrections, interpolated).")
-            self.sel = Selection(gui, level="extra dense", on_update=self._preview)
+            self.sel = Selection(gui, level="dense", on_update=self._preview)
             self.g_preview = gui.add_markdown("")
             self.g_run = gui.add_button("Register more photos", icon=viser.Icon.PHOTO_PLUS,
                                         hint="Place the photos chosen above (those not in use) into the refined model "
@@ -311,8 +350,17 @@ class RegisterPanel:
             return
         reg = register.load(path)
         stale = os.path.exists(os.path.join(path, register.DIR, "registered.json")) and reg is None
+        try:
+            mf = json.load(open(os.path.join(path, "transforms.json")))["modelforge"]
+            near = len(mf["registered_near_dropped"])
+            user = len(mf.get("registered_excluded", ()))
+        except (OSError, ValueError, KeyError):
+            near = user = 0
         self.g_md.content = (
-            f"{len(reg['images'])} photos registered into this model (in transforms.json)"
+            (f"{len(reg['images'])} photos registered into this model ({len(reg['images']) - near - user} in "
+             f"transforms.json; left out: {near} next to isolated photos the export left out, {user} excluded "
+             "below)" if near or user else
+             f"{len(reg['images'])} photos registered into this model (in transforms.json)")
             + (f": {reg['stats']['selection']}" if reg.get("stats", {}).get("selection") else "") if reg else
             "⚠ the registered photos belong to an earlier model: register again" if stale else "none registered")
 
@@ -340,6 +388,13 @@ class RegisterPanel:
         self.g_preview.content = (f"→ **{len(new)}** photos to register ({len(names)} chosen, "
                                   f"{len(names) - len(new)} of them in use)")
         self.g_run.disabled = not new
+
+    def pending(self):
+        """Photos the selection would register (not in use), 0 when there is no pool or no analysis it needs."""
+        from modelforge.sfm import register
+        if not self._images or (self.sel.mode() == "keyframes" and not self._overlap):
+            return 0
+        return len(register.candidates(self.app.path, selection=self.job_kwargs()["selection"]))
 
     def job_kwargs(self):
         """register.run's selection + describe for the job."""

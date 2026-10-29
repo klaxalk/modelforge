@@ -6,7 +6,8 @@ schema-less and fields are mapped by their protobuf path. Field meanings were
 reverse engineered on a DJI NEO2 clip and checked on a Mavic 4 Pro clip; see
 docs/djmd_format.md. The camera / aircraft / gimbal records are found by the type
 in their header (`.1.3` = 1 / 2 / 3), since their positions differ between models
-(NEO2: 3.2 / 3.4 / 3.5, Mavic 4: 3.2 / 3.3 / 3.4).
+(NEO2: 3.2 / 3.4 / 3.5, Mavic 4: 3.2 / 3.3 / 3.4, Mavic 3: 3.2 / 3.3 / 3.4, its camera record without a header).
+The Mavic 3 stores latitude / longitude in radians, the others in degrees (`decode` converts).
 
 Usage:
     python -m modelforge.dji.djmd data/clip.MP4 -o data/clip_djmd.csv
@@ -15,6 +16,7 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import struct
 import subprocess
 import sys
@@ -126,6 +128,8 @@ def records(rec):
             t = _msg(hdr).get(3)
             if t in (CAMERA, AIRCRAFT, GIMBAL):
                 out.setdefault(t, sub)
+        elif CAMERA not in out and 9 in sub and 10 in sub:  # Mavic 3: a camera record without a header
+            out[CAMERA] = sub
     return out
 
 
@@ -220,9 +224,36 @@ def model_name(mp4):
     return ""
 
 
+def radians(frames):
+    """True when the clip's latitude / longitude are in radians (Mavic 3) rather than degrees (NEO2, Mavic 4).
+    Values beyond +-pi/2 / +-pi can only be degrees. Inside that range they are radians unless the drone flew within
+    ~1.6 deg of 0 N 0 E: when it moved, the positions read either way are compared with the integrated velocity."""
+    ok = [f for f in frames if math.isfinite(f.lat) and math.isfinite(f.lon) and (f.lat or f.lon)]
+    if not ok or any(abs(f.lat) > math.pi / 2 or abs(f.lon) > math.pi for f in ok):
+        return False
+    a, b = ok[0], ok[-1]
+    vn = ve = 0.0
+    for f, g in zip(ok, ok[1:]):
+        vn += g.vel_n * (g.pts - f.pts)
+        ve += g.vel_e * (g.pts - f.pts)
+    if math.hypot(vn, ve) < 20.0:  # hardly moved: radians (degrees would put it in the Gulf of Guinea)
+        return True
+    r = 6371000.0
+    for unit in (1.0, math.pi / 180):  # radians, degrees
+        dn = (b.lat - a.lat) * unit * r
+        de = (b.lon - a.lon) * unit * r * math.cos(a.lat * unit)
+        if math.hypot(dn - vn, de - ve) < 0.5 * math.hypot(vn, ve):
+            return unit == 1.0
+    return True
+
+
 def decode(mp4):
     stream = find_djmd_stream(mp4)
-    return [decode_packet(i, pts, pkt) for i, (pts, pkt) in enumerate(read_packets(mp4, stream))]
+    frames = [decode_packet(i, pts, pkt) for i, (pts, pkt) in enumerate(read_packets(mp4, stream))]
+    if radians(frames):
+        for f in frames:
+            f.lat, f.lon = math.degrees(f.lat), math.degrees(f.lon)
+    return frames
 
 
 def main():

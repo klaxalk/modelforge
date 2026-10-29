@@ -17,6 +17,12 @@ Output: PROJECT/registered/ (images/ hard links to the pool, registered.json: th
 images.bin size + mtime) and per photo its cam_from_world, camera, inliers). The export appends these photos to
 transforms.json (frames marked "mf_registered") while the model is that one (add_frames); the splat then trains on
 them like the others. A new refine makes them stale: register again.
+
+Photos next to the ones the export left out (sfm/isolated.py: a pass no other ties in, its ground a copy off the
+others') are registered but kept out of transforms.json (`near_dropped`; the user asked, 2026-10-26): they are located
+against those dropped photos' points in the refined model, so they land on the same offset copy and would bring the
+ghost back into the splat. Rule: half or more of the model photos they are located against (the NEIGHBORS nearest in
+time, of their flight) were left out. Decided at every export, as the left-out set may change.
 """
 import json
 import os
@@ -29,6 +35,7 @@ DIR = "registered"
 MIN_INLIERS = 60
 MAX_SHIFT_M = 1.0  # registered vs interpolated pose: further = a wrong registration
 MAX_TURN_DEG = 2.0
+NEIGHBORS = 6  # model photos a photo is located against (evaluate.locate's default)
 
 
 def _model_key(project):
@@ -130,9 +137,16 @@ def run(project, every=1, on_line=print, on_progress=None, token=None, selection
               open(os.path.join(out_dir, "registered.json"), "w"), indent=1)
     shutil.rmtree(os.path.join(out_dir, "work"), ignore_errors=True)
     n_tf = add_frames(project)
+    try:
+        near = len(json.load(open(os.path.join(project, "transforms.json")))["modelforge"]["registered_near_dropped"])
+    except (OSError, ValueError, KeyError):
+        near = 0
+    stats["near_dropped"] = near
     on_line(f"register: {len(imgs)} of {len(cands)} registered (median {stats['inliers_median']} inliers, "
             f"{stats['error_px_median']} px; {stats['not_located']} not located, {len(far)} off the trajectory), "
-            f"{n_tf} added to transforms.json, {stats['seconds']:.0f} s")
+            f"{n_tf} added to transforms.json"
+            + (f" ({near} left out: next to photos the export left out as isolated)" if near else "")
+            + f", {stats['seconds']:.0f} s")
     from modelforge.pipeline import Report
     Report(project).set("register", stats)
     return stats
@@ -189,7 +203,15 @@ def add_frames(project):
                                                  for n, v in reg["images"].items()])
         except Exception:  # noqa: BLE001 - metadata unreadable: no gains
             gains = {}
+        skip = near_dropped(project, t, reg["images"], rec)
+        t.setdefault("modelforge", {})["registered_near_dropped"] = sorted(skip)
+        from modelforge import exclude  # the user's choice covers registered photos too (by name or time range)
+        user = exclude.names(project, [{"image": n, **v} for n, v in reg["images"].items()])
+        t["modelforge"]["registered_excluded"] = sorted((user & set(reg["images"])) - skip)
+        skip |= user
         for n, v in sorted(reg["images"].items()):
+            if n in skip:
+                continue
             w2c = np.eye(4)
             w2c[:3] = np.array(v["cam_from_world"])
             c2w = np.linalg.inv(w2c)
@@ -205,6 +227,29 @@ def add_frames(project):
     json.dump(t, open(tmp, "w"), indent=1)
     os.replace(tmp, path)
     return sum(1 for f in t["frames"] if f.get("mf_registered"))
+
+
+def near_dropped(project, t, images, rec):
+    """Registered photos (images: registered.json's) whose NEIGHBORS nearest model photos of their flight are half or
+    more ones the export left out: model photos (rec) missing from transforms.json t."""
+    kept = {os.path.basename(f["file_path"]) for f in t["frames"] if not f.get("mf_registered")}
+    model = {rec.image(i).name for i in rec.reg_image_ids()}
+    from modelforge import exclude  # left out by the user, not a ghost copy: their neighbours are fine
+    dropped = model - kept - exclude.names(project)
+    if not dropped:
+        return set()
+    poses = json.load(open(os.path.join(project, "poses.json")))["images"]
+    by_src = {}
+    for r in poses:
+        if r["image"] in model:
+            by_src.setdefault(r.get("source", 0), []).append((r.get("time_s") or 0.0, r["image"] in dropped))
+    out = set()
+    for n, v in images.items():
+        near = sorted(by_src.get(v.get("source", 0), []), key=lambda c: abs(c[0] - (v.get("time_s") or 0.0)))
+        near = near[:NEIGHBORS]
+        if near and 2 * sum(d for _, d in near) >= len(near):
+            out.add(n)
+    return out
 
 
 def remove(project):

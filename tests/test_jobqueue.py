@@ -126,11 +126,11 @@ def test_queued_entries_run_with_their_settings(tmp_path, monkeypatch):
     try:
         app.g_pairs.value = "sequential"
         app.g_neighbors.value = 7
-        app.queue.g_stage.value = "Run SfM (all)"
-        monkeypatch.setitem(jobqueue.STAGES, "Pairs", "pairs")
-        app.queue.g_stage.options = tuple(jobqueue.STAGES)
         app.queue.g_stage.value = "Pairs"
+        app.register.sel.g_level.value = "normal"
         app.queue.add()
+        assert app.queue.q.entries[0]["settings"]["register.sel.g_level"] == "normal"  # the Sparse panels too
+        assert "subset.g_mode" in app.queue.q.entries[0]["settings"]
         app.open_project(os.path.join(root, "b"))
         app.g_pairs.value = "auto"
         app.queue.add()

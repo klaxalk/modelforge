@@ -458,6 +458,8 @@ def write_tile(project, k, tile, downscale=1):
         t["lidar_ply_file_path"] = os.path.relpath(os.path.join(project, t["lidar_ply_file_path"]), out)
     json.dump(t, open(os.path.join(out, "transforms.json"), "w"), indent=1)
     _link(os.path.join(project, "images"), os.path.join(out, "images"))
+    for top in {f["file_path"].split("/")[0] for f in t["frames"] if "/" in f["file_path"]} - {"images"}:
+        _link(os.path.join(project, top), os.path.join(out, top))  # registered/ (Register more photos)
     if downscale > 1:
         os.makedirs(os.path.join(project, f"images_{downscale}"), exist_ok=True)
         _link(os.path.join(project, f"images_{downscale}"), os.path.join(out, f"images_{downscale}"))

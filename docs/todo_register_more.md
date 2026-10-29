@@ -43,8 +43,21 @@ can use any denser subset without running SfM again.
   stretches (fast turns, low passes), untested.
 - **Choosing the photos like Images used** (2026-10-25, the user asked): the folder has the same Selection as Sparse
   tab → Images used (`gui/subset.py Selection`, shared): every N-th with Starting at and a Time range, or keyframes at
-  a density (default **extra dense**: SfM on dense keyframes, the denser ones registered); the choice is made over the
+  a density (default **dense**: SfM on sparse keyframes, the denser ones registered; extra dense / sparse before 2026-10-26); the choice is made over the
   whole extracted pool and its photos in use are skipped (`register.candidates(selection=)`; the preview: "→ N photos
   to register (M chosen, K of them in use)"). Keyframes need the overlap analysis (Images used → Analyze). Before:
   only "every N of the unused photos" (still `register.run(every=)`). Tests: `test_candidates_from_a_selection`,
   `test_gui_register_selection`.
+- **Next to isolated photos** (2026-10-26, the user asked): registration uses `sparse/refined`, which still holds the
+  photos the export leaves out (sfm/isolated.py), so a photo next to them was located against their offset copy of
+  the ground, passed the trajectory check (that trajectory runs through them too) and went into transforms.json,
+  bringing the ghost back. Now `register.near_dropped`: a registered photo whose `NEIGHBORS` (6) nearest model photos
+  of its flight are half or more left out stays registered but out of transforms.json (decided at every export;
+  transforms.json `modelforge.registered_near_dropped`, the Sparse tab status and the run's log say how many). Test:
+  `test_photos_next_to_isolated_ones_stay_out`.
+
+**In the pipelines (2026-10-26, the user asked):** Register more photos is the last step of Run SfM (all) and of the
+SfM part of Run full pipeline (after export, before the SfM mesh and the splat), with the panel's selection (default
+keyframes, dense). Keyframes without a current overlap analysis run the analysis first; a selection with no photo
+beyond those in use skips the step (History note). The folder sits below the stage buttons (after export) and
+opens by default, as does Images used.

@@ -1,0 +1,35 @@
+#!/bin/bash
+# Learned features and matchers for SfM (modelforge/sfm/learned.py; docs/todo_matching.md): ALIKED + LightGlue
+# (github.com/cvg/LightGlue, Apache-2.0), GIM-LightGlue (github.com/xuelunshen/gim, its SuperPoint + LightGlue weights;
+# SuperPoint's are Magic Leap's non-commercial ones) and RoMa (github.com/Parskatt/RoMa, MIT) for hard pairs.
+# Their own environment under build/matchers: a venv on nerfstudio's Python that reuses its torch 2.7.1 cu128 (a .pth
+# file), plus the few packages they add. Nothing in the image changes. Run in the dev container:
+#   MODELFORGE_GPU=1 scripts/dev scripts/install_matchers   (~1.5 GB with the weights, a few minutes)
+set -e
+D=/workspace/build/matchers
+mkdir -p $D/src
+cd $D
+[ -d venv ] || /opt/nerfstudio/bin/python -m venv venv
+echo /opt/nerfstudio/lib/python3.12/site-packages > venv/lib/python3.12/site-packages/nerfstudio_base.pth
+cd src
+[ -d LightGlue ] || git clone -q --depth 1 https://github.com/cvg/LightGlue.git
+[ -d RoMa ] || git clone -q --depth 1 https://github.com/Parskatt/RoMa.git
+[ -d gim ] || git clone -q --depth 1 https://github.com/xuelunshen/gim.git
+cd $D
+/opt/nerfstudio/bin/python -m pip freeze 2>/dev/null | grep -E "^(numpy|torch|torchvision)==" > constraints.txt
+venv/bin/pip install -q -c constraints.txt kornia einops loguru omegaconf
+venv/bin/pip install -q --no-deps -e src/LightGlue -e src/RoMa
+export TORCH_HOME=/workspace/build/torch_hub
+venv/bin/python - <<'EOF'
+import sys, torch
+sys.path.insert(0, "/workspace/build/matchers/src/gim")
+import lightglue
+lightglue.ALIKED(max_num_keypoints=4096)  # weights into TORCH_HOME
+lightglue.LightGlue(features="aliked")
+from networks.lightglue.superpoint import SuperPoint  # noqa: F401 (GIM's code imports)
+from romatch import roma_outdoor
+roma_outdoor(device=torch.device("cuda"), use_custom_corr=False)  # RoMa + DINOv2 weights
+print("matchers env OK", torch.__version__, torch.cuda.is_available())
+EOF
+ls -la src/gim/weights/gim_lightglue_100h.ckpt
+echo INSTALL-DONE

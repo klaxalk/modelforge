@@ -77,6 +77,22 @@ Hasselblad L3D-100c, 3840×2160 @ 29.97; the longest 33 min, 59,025 packets).
 The decoder's output on the NEO2 sample is identical before and after the type-based lookup
 (15785/15785 frames).
 
+## Other models: DJI Mavic 3
+
+Checked on 21 clips of the user's `berlin_all` (2026-10-28; model "DJIMavic3", with SRT sidecars).
+
+- **Records** at `3.2` / `3.3` / `3.4` (camera / aircraft / gimbal), as on the Mavic 4, but the **camera
+  record has no header** `.1`: it is recognised by holding fields 9 and 10. Its fields are the Mavic 4's:
+  ISO `.9.1`, exposure `.10.1` (packed 1/800), f-number `.11.1` (packed 56/10), colour temperature `.24.1`;
+  `.36.1` repeats `abs_alt`, `.37.1` = 36 (focal length, 35 mm equivalent?). All agree with the SRT.
+- **Latitude / longitude in radians** (`.4.1.2` / `.4.1.3`, doubles): 0.91842 = 52.6215°. The NEO2 and
+  the Mavic 4 write degrees. `djmd.decode` converts (`djmd.radians` decides per clip). After that,
+  djmd minus SRT is 2–3 cm median (p99 0.55 m: the SRT's 5 decimals); `rel_alt` / `abs_alt` (mm) are identical.
+- **Gimbal:** attitude in `.3` and a quaternion in `.4`, as on the Mavic 4, but the yaw is in a reference
+  that **shifts per flight**: −4.6 to −49° from the aircraft yaw (constant within a flight, spread ~1–3°).
+  The aircraft yaw matches the GPS course within ~1° in straight flight (roll < 3°, > 4 m/s), so the camera
+  heading is the **aircraft yaw** (`NO_YAW_AXIS`).
+
 ## Relation to the SRT sidecar
 
 - The SRT `pp_current` (and `pp_target`) quaternions are (w, x, y, z), ZYX. They

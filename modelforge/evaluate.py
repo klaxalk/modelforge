@@ -58,6 +58,7 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
     sfm/register.py): each photo takes the camera of its source's model images nearest in time (a source is one
     camera), its SIFT features (extracted with that camera into WS) are matched (ratio test) to those `neighbors`
     images' features, the matches with a 3D point give 2D-3D pairs, PnP + refinement gives the pose.
+    With learned features (sfm/learned.py) the photo gets the same features and LightGlue matches instead.
     images: [{"image", "time_s", "source"}]. Returns {name: {"viewmat", "inliers", "camera_id", "matches",
     "error_px" (median reprojection error of the inliers)}} (keep_matches: also the inlier "p2d", "p3d");
     on_progress(done, total)."""
@@ -78,8 +79,18 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
                       key=lambda c: abs(c[1] - h.get("time_s", 0.0)))[:neighbors]
     cam_of = {h["image"]: model_by_name[near[0][2]].camera_id for h in holdout["images"] for near in [nearest(h)]
               if near}
+    from modelforge.sfm import learned
+    method = learned.method_of(project)
+    lq = {}  # learned features: per photo (its keypoints, [(model name, matches)]) from one worker run
+    if method:
+        todo = [h for h in holdout["images"] if h["image"] in cam_of]
+        qs = [{"image": h["image"], "model": [c[2] for c in nearest(h)]} for h in todo]
+        if qs:
+            res = learned.query(project, method, holdout["images_dir"], qs, ws, token=token,
+                                progress=on_progress and (lambda k, n: on_progress(k, 2 * n)))
+            lq = {q["image"]: r for q, r in zip(qs, res)}
     hdbs = {}  # camera id -> held-out features (one database per camera: SINGLE mode, its intrinsics)
-    for cid in sorted(set(cam_of.values())):
+    for cid in sorted(set(cam_of.values()) if not method else ()):
         cam = rec.cameras[cid]
         path = os.path.join(ws, "holdout_features.db" if len(rec.cameras) == 1 else f"holdout_features_c{cid}.db")
         _sift(path, holdout["images_dir"], [n for n, c in cam_of.items() if c == cid], upright, cam.model.name,
@@ -92,16 +103,28 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
             if token is not None:
                 token.check()
             if on_progress:
-                on_progress(k_h, len(holdout["images"]))
+                n_h = len(holdout["images"])
+                on_progress(n_h + k_h, 2 * n_h) if method else on_progress(k_h, n_h)  # learned: matching was half
             if h["image"] not in cam_of:
                 log(f"evaluate: {h['image']} not located (no model image of its source)")
                 continue
             cid = cam_of[h["image"]]
-            cam, hdb = rec.cameras[cid], hdbs[cid]
-            kp, desc = _features(hdb, h["image"])
-            near = nearest(h)
+            cam = rec.cameras[cid]
             p2d, p3d, seen = [], [], set()
-            for _, _, mname in near:
+            if method:  # LightGlue matches of the project's learned features
+                kp, per_model = lq[h["image"]]
+                for mname, m in per_model:
+                    pid = np.array([p.point3D_id if p.has_point3D() else -1
+                                    for p in model_by_name[mname].points2D])
+                    for q, t in m:
+                        if t < len(pid) and pid[t] >= 0 and q not in seen:
+                            seen.add(q)
+                            p2d.append(kp[q])
+                            p3d.append(rec.points3D[int(pid[t])].xyz)
+            else:
+                hdb = hdbs[cid]
+                kp, desc = _features(hdb, h["image"])
+            for _, _, mname in (nearest(h) if not method else ()):
                 img = model_by_name[mname]
                 mkp, mdesc = _features(mdb, mname)
                 pid = np.array([p.point3D_id if p.has_point3D() else -1 for p in img.points2D])

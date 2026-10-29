@@ -19,6 +19,11 @@ import threading
 import time
 
 MARGIN = 1.1  # on a measured peak
+# stages of which only a part grows with the driver: a measured peak grows at the model's rate per driver unit, not in
+# proportion. A chunked refine's chunks do not grow with the project, only its triangulations of all photos (COLMAP's
+# match cache + correspondence graph: berlin_all 75M ALIKED + RoMa matches 4.8 GB): its 16.3 GB at 31M SIFT matches
+# scaled in proportion to 68M asked for 36 GB (2026-10-29).
+GROW_AT_MODEL_RATE = {"refine:chunked"}
 HISTORY = 20  # machine-wide records kept per stage
 MACHINE_FILE = ".modelforge_memory.json"
 
@@ -211,7 +216,12 @@ def _one(project, k, settings, rep):
     if rec and rec.get("peak_gb"):
         peak, dr = rec["peak_gb"], rec.get("driver")
         grow = d / dr if d and dr else 1.0
-        need = MARGIN * (base + max(peak - base, 0.0) * max(grow, 1.0)) if grow > 1 else MARGIN * peak
+        if grow <= 1:
+            need = MARGIN * peak
+        elif k in GROW_AT_MODEL_RATE:
+            need = MARGIN * (peak + per * (d - dr))
+        else:
+            need = MARGIN * (base + max(peak - base, 0.0) * grow)
         return need, (f"its last {k} peaked at {peak:.1f} GB" +
                       (f", {grow:.1f}x the {unit} now" if grow > 1.05 else ""))
     per_seen = learned(project, k)

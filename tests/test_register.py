@@ -74,3 +74,38 @@ def test_candidates_from_a_selection(tmp_path):
         ["a_001.jpg", "a_007.jpg"]  # 1, 4, 7, 10 chosen; 4 and 10 in use
     assert names(register.candidates(str(p), selection={"names": ["a_002.jpg", "a_003.jpg", "zz.jpg"]})) == \
         ["a_003.jpg"]
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined")), reason="needs a refined project")
+def test_photos_next_to_isolated_ones_stay_out(tmp_path):
+    """Registered photos next to model photos the export left out (sfm.isolated) are not added to transforms.json:
+    they were located against those photos' offset copy of the ground (the user asked, 2026-10-26)."""
+    import pycolmap
+    from modelforge.sfm import register
+    p = tmp_path / "proj"
+    p.mkdir()
+    shutil.copytree(os.path.join(REAL, "sparse", "refined"), p / "sparse" / "refined")
+    poses = json.load(open(os.path.join(REAL, "poses.json")))
+    recs = sorted(poses["images"], key=lambda r: (r.get("source", 0), r["time_s"]))
+    model, pool = recs[::2], recs[1::2]  # the model holds every 2nd photo, the others are "registered"
+    json.dump(dict(poses, images=model), open(p / "poses.json", "w"))
+    t = json.load(open(os.path.join(REAL, "transforms.json")))
+    names = [r["image"] for r in model]
+    dropped = set(names[10:18])  # a stretch the export left out
+    t["frames"] = [f for f in t["frames"] if os.path.basename(f["file_path"]) in set(names) - dropped]
+    json.dump(t, open(p / "transforms.json", "w"))
+    rec = pycolmap.Reconstruction(str(p / "sparse" / "refined"))
+    cam = next(iter(rec.cameras))
+    imgs = {r["image"]: {"cam_from_world": np.eye(4)[:3].tolist(), "camera_id": cam, "inliers": 100,
+                         "source": r.get("source", 0), "frame": r.get("frame"), "time_s": r["time_s"]} for r in pool}
+    (p / register.DIR).mkdir()
+    json.dump({"model": register._model_key(str(p)), "stats": {}, "images": imgs},
+              open(p / register.DIR / "registered.json", "w"))
+    register.add_frames(str(p))
+    out = json.load(open(p / "transforms.json"))
+    added = {os.path.basename(f["file_path"]) for f in out["frames"] if f.get("mf_registered")}
+    skipped = set(out["modelforge"]["registered_near_dropped"])
+    inside = {r["image"] for r in pool[11:17]}  # between dropped photos
+    far = {r["image"] for r in pool[:5] + pool[25:]}
+    assert inside <= skipped and not (far & skipped)
+    assert added == set(imgs) - skipped and len(skipped) < 12

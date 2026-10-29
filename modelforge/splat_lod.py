@@ -29,6 +29,7 @@ import time
 import numpy as np
 
 OUT = os.path.join("splat", "lod")
+SPLAT = os.path.join("splat", "splat_enu.ply")  # the project's splat; others (splat=) get a folder of their own
 CELL_MAX = 100_000  # Gaussians per cell at level 0
 RATIO = 4  # each level holds ~1/RATIO of the one below
 MIN_LEVEL_GAUSSIANS = 1_000  # no coarser level once a cell is this small
@@ -41,8 +42,13 @@ TRIU = np.array([0, 1, 2, 4, 5, 8])
 VERSION = 1
 
 
-def lod_dir(project):
-    return os.path.join(project, OUT)
+def lod_dir(project, splat=None):
+    """The LoD folder of the project's splat, or of another splat file in it (splat: a path in the project, e.g. the
+    splat from before Difix: splat/splat_enu.pre_difix.ply -> splat/lod_pre_difix)."""
+    if not splat or os.path.normpath(splat) == SPLAT:
+        return os.path.join(project, OUT)
+    stem = os.path.splitext(os.path.basename(splat))[0].replace("splat_enu.", "").replace(".", "_")
+    return os.path.join(project, os.path.dirname(splat), "lod_" + stem)
 
 
 def _splat_key(path):
@@ -50,11 +56,13 @@ def _splat_key(path):
     return [st.st_size, int(st.st_mtime_ns)]
 
 
-def index(project):
-    """The LoD index of the project's splat, None when missing or built for another splat."""
-    splat = os.path.join(project, "splat", "splat_enu.ply")
+def index(project, splat=None):
+    """The LoD index of the project's splat (or splat, a path in the project), None when missing or built for another
+    splat."""
+    folder = lod_dir(project, splat)
+    splat = os.path.join(project, splat or SPLAT)
     try:
-        d = json.load(open(os.path.join(lod_dir(project), "index.json")))
+        d = json.load(open(os.path.join(folder, "index.json")))
     except (OSError, ValueError):
         return None
     if not os.path.exists(splat) or d.get("splat") != _splat_key(splat) or d.get("version") != VERSION:
@@ -134,18 +142,18 @@ def _voxel_for(c, size, target):
     return hi
 
 
-def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL_MAX):
-    """Build PROJECT/splat/lod/ for splat/splat_enu.ply; returns the index."""
+def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL_MAX, splat=None):
+    """Build PROJECT/splat/lod/ for splat/splat_enu.ply (or lod_dir(project, splat) for splat); returns the index."""
     from modelforge.gui import data as gdata
     t0 = time.time()
-    splat = os.path.join(project, "splat", "splat_enu.ply")
+    out = lod_dir(project, splat)
+    splat = os.path.join(project, splat or SPLAT)
     key = _splat_key(splat)
     say = progress or (lambda s: None)
     say("level of detail: reading the splat")
     c, cov, rgb, op = gdata.load_splat(splat, None)
     n = len(c)
     cells = _cells(c, cell_max)
-    out = lod_dir(project)
     tmp = out + ".part"
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
@@ -199,16 +207,16 @@ def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL
     return idx_out
 
 
-def build_in(folder):
+def build_in(folder, splat=None):
     """build(folder), for modelforge.worker (a "project" argument would make it a job of the project)."""
-    build(folder)
+    build(folder, splat=splat)
 
 
-def load_cell(project, k, cell):
+def load_cell(project, k, cell, splat=None):
     """viser arrays (centers, covariances, rgbs, opacities) of one cell at level k."""
     lv = cell["levels"][k]
     s = slice(lv["offset"], lv["offset"] + lv["n"])
-    d = lod_dir(project)
+    d = lod_dir(project, splat)
     c = np.load(os.path.join(d, f"L{k}_centers.npy"), mmap_mode="r")[s]
     t = np.asarray(np.load(os.path.join(d, f"L{k}_cov.npy"), mmap_mode="r")[s], dtype=np.float32)
     rgba = np.asarray(np.load(os.path.join(d, f"L{k}_rgba.npy"), mmap_mode="r")[s], dtype=np.float32) / 255
@@ -216,9 +224,9 @@ def load_cell(project, k, cell):
     return np.ascontiguousarray(c), cov, np.ascontiguousarray(rgba[:, :3]), np.ascontiguousarray(rgba[:, 3:])
 
 
-def cell_sources(project, k, cell):
+def cell_sources(project, k, cell, splat=None):
     """(original indices of the cell's level-0 Gaussians, their level-k Gaussian within the cell or None at k 0)."""
-    d = lod_dir(project)
+    d = lod_dir(project, splat)
     l0 = cell["levels"][0]
     s = slice(l0["offset"], l0["offset"] + l0["n"])
     src = np.asarray(np.load(os.path.join(d, "L0_parent.npy"), mmap_mode="r")[s])

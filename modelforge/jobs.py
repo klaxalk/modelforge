@@ -10,6 +10,7 @@ adjustment checks it every iteration (its Ceres callback aborts the solve).
 import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ class Token:
         self.event = threading.Event()
         self._procs = set()
         self._soft = {}  # process -> (callable asking it to end by itself, seconds to wait for that)
+        self._groups = set()  # processes started in their own process group: stopped as a group
         self._lock = threading.Lock()
 
     @property
@@ -44,7 +46,7 @@ class Token:
             procs, soft = list(self._procs), dict(self._soft)
         for p in procs:
             if p.poll() is None and p not in soft:
-                p.terminate()
+                self._signal(p, signal.SIGTERM)
         for p in procs:
             if p in soft and p.poll() is None:
                 ask, timeout = soft[p]
@@ -57,16 +59,30 @@ class Token:
             try:
                 p.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                p.kill()
+                self._signal(p, signal.SIGKILL)
 
-    def run(self, cmd, on_line=None, env=None, soft_stop=None, soft_timeout=300):
+    def _signal(self, p, sig):
+        """Send sig to a process, or to its whole process group when it was started with group=True."""
+        try:
+            if p in self._groups:
+                os.killpg(p.pid, sig)
+            else:
+                p.send_signal(sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def run(self, cmd, on_line=None, env=None, soft_stop=None, soft_timeout=300, group=False):
         """Run cmd, stream its output lines to on_line; Cancelled if stopped, RuntimeError on failure.
         soft_stop: called on cancel instead of terminating, then up to soft_timeout s to exit by itself
-        (splat training saves a checkpoint first)."""
+        (splat training saves a checkpoint first). group: start it in its own process group and stop the whole
+        group (a shell script's children, e.g. UniRig's launch scripts, would outlive the shell)."""
         self.check()
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
+                             start_new_session=group)
         with self._lock:
             self._procs.add(p)
+            if group:
+                self._groups.add(p)
             if soft_stop:
                 self._soft[p] = (soft_stop, soft_timeout)
         tail = []
@@ -82,6 +98,7 @@ class Token:
         finally:
             with self._lock:
                 self._procs.discard(p)
+                self._groups.discard(p)
                 self._soft.pop(p, None)
         self.check()
         if rc:

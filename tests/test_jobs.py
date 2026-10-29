@@ -60,3 +60,26 @@ def test_ba_skip_keeps_the_current_state():
 
     ba = refine.prior_ba(rec, priors, robust.PriorModel(), on_iteration=on_iteration, skip=skip, settle=None)
     assert ba["termination"] == "SKIPPED" and ba["usable"] and ba["iterations"] == 3
+
+
+def test_group_stop_ends_a_scripts_children(tmp_path):
+    """group=True: Stop ends the whole process group; a shell script's child (UniRig's launch scripts run Python
+    under bash) does not outlive it."""
+    import subprocess
+    import threading
+    import time
+    pidfile = tmp_path / "child.pid"
+    tok = jobs.Token()
+    script = f"sleep 300 & echo $! > {pidfile}; wait"
+    threading.Timer(1.0, tok.cancel).start()
+    t0 = time.time()
+    try:
+        tok.run(["bash", "-c", script], group=True)
+        raise AssertionError("not stopped")
+    except jobs.Cancelled:
+        pass
+    assert time.time() - t0 < 10
+    pid = int(pidfile.read_text())
+    time.sleep(0.3)
+    alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+    assert not alive

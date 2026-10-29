@@ -40,6 +40,18 @@ def test_estimates_follow_measured_peaks(tmp_path):
     assert why.startswith("export:")
 
 
+def test_chunked_refine_grows_at_the_model_rate(tmp_path):
+    """Only a chunked refine's triangulations of all photos grow with the matches: a recorded peak grows by the
+    model's GB per M matches, not in proportion (berlin_all: 16.3 GB at 31.1M -> 36 GB at 68.4M before)."""
+    p = _project(str(tmp_path), "p", {"match": {"inlier_matches": 31.1e6}, "features": {"images": 7753}})
+    memory.record(p, "refine", 16.32, {"ba_mode": "chunked"})
+    rep = json.load(open(os.path.join(p, "report.json")))
+    rep["match"]["inlier_matches"] = 68.4e6
+    json.dump(rep, open(os.path.join(p, "report.json"), "w"))
+    need, why = memory.estimate(p, "refine", {"ba_mode": "chunked"})
+    assert abs(need - 1.1 * (16.32 + 0.16 * (68.4 - 31.1))) < 1e-6 and "2.2x" in why
+
+
 def test_refine_by_ba_mode(tmp_path):
     p = _project(str(tmp_path), "p", {"match": {"inlier_matches": 80e6}, "features": {"images": 5000}})
     g = memory.estimate(p, "refine", {"ba_mode": "global"})[0]

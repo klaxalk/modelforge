@@ -31,11 +31,11 @@ import time
 import numpy as np
 import pycolmap
 
-from modelforge import dense, jobs
+from modelforge import dense, exclude, jobs
 from modelforge.export import lidar as lidar_mod
 from modelforge.export import nerfstudio
 from modelforge.dji import ingest
-from modelforge.sfm import checkpoint, chunked, features, isolated, pairs, priors as priors_mod, reconstruct, refine, robust, tie_points
+from modelforge.sfm import checkpoint, chunked, features, isolated, learned, pairs, priors as priors_mod, reconstruct, refine, robust, tie_points
 
 SFM_STAGES = ("features", "pairs", "match", "refine", "export")  # DJI: refine from the pose priors
 VIDEO_SFM_STAGES = ("features", "pairs", "match", "reconstruct", "export")  # no metadata: incremental SfM
@@ -88,18 +88,33 @@ def known_camera(project):
     return json.load(open(path)) if os.path.exists(path) else None
 
 
-def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None, progress=None):
+def stage_features(project, report, kind="dji", extractor="sift", max_features=8192, upright=None, progress=None,
+                   token=None):
     """DJI: upright SIFT (the gimbal keeps the horizon level) and an OPENCV camera refined against the
     priors. Videos without metadata: oriented SIFT (handheld footage rolls) and a RADIAL camera (one
     focal length: without priors, separate fx / fy drift apart on short sequences). upright None = by kind.
-    progress(done, total, image name): features.extract's progress."""
+    extractor: features.EXTRACTORS (COLMAP's SIFT), learned.METHODS (sfm/learned.py; max_features / upright do
+    not apply) or "auto" (auto_matching). progress(done, total, image name)."""
     video = kind == "video"
     upright = (kind == "dji") if upright is None else upright
     cam = known_camera(project)  # ROS camera_info: fixed intrinsics
     model = cam["model"] if cam else ("RADIAL" if video else "OPENCV")
-    stats = features.extract(project, max_num_features=max_features, upright=upright, extractor=extractor,
-                             camera_model=model, camera_params=cam["params"] if cam else None, progress=progress)
+    auto = None
+    if extractor == "auto":  # auto_matching: ALIKED for several passes / flights, SIFT otherwise
+        auto = auto_matching(project)
+        extractor = "aliked-lightglue" if auto["learned"] else "sift"
+        log(f"features: auto: {auto['reason']}")
+    if extractor in learned.METHODS:
+        poses = json.load(open(os.path.join(project, "poses.json")))
+        stats = learned.extract(project, extractor, features.camera_groups(poses), camera_model=model,
+                                camera_params=cam["params"] if cam else None, progress=progress, token=token)
+    else:
+        learned.forget(project)
+        stats = features.extract(project, max_num_features=max_features, upright=upright, extractor=extractor,
+                                 camera_model=model, camera_params=cam["params"] if cam else None, progress=progress)
     stats["camera"] = {"model": model, "known": bool(cam)}
+    if auto:
+        stats["auto"] = auto
     log(f"features: {stats}")
     report.set("features", stats)
 
@@ -112,19 +127,55 @@ PAIR_MODES = {
 }
 
 
-def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
-    """pairs.txt for the match stage; mode: PAIR_MODES."""
+def _ground(meta):
+    """(the reference ground height, the ground per source) for the look-at pairs: each flight's own takeoff height
+    (its heights are rel_alt + its altitude offset), so pairs between flights do not depend on that offset being
+    right (pairs module doc)."""
+    z = meta["ground_z"] if "ground_z" in meta else -meta["enu_origin_lla"][2]
+    return z, {s: z + float(src.get("alt_offset_m") or 0.0) for s, src in enumerate(meta.get("sources") or [])} or z
+
+
+AUTO_MIN_FAR_PAIRS = 20
+AUTO_FAR_SHARE = 0.01  # of the photos
+
+
+def auto_matching(project):
+    """Extractor / dense matcher "auto" (the user's choice, 2026-10-28): learned features + RoMa (sfm/learned.py) only
+    for photos taken in several flights or passes over the same ground, SIFT otherwise. The test: look-at pairs from
+    the priors (the pairs SfM matches) whose photos are more than learned.FAR_S apart on the project timeline, at least
+    max(AUTO_MIN_FAR_PAIRS, AUTO_FAR_SHARE of the photos) of them; without pose priors, covisible pairs of an earlier
+    model instead (pairs.covisible). Videos DJI split from one flight do not count (their pieces follow each other).
+    Returns {"learned": bool, "far_pairs": n, "reason": text}; SIFT when the matchers are not installed."""
+    pri, meta = priors_mod.load(project)
+    need = max(AUTO_MIN_FAR_PAIRS, int(AUTO_FAR_SHARE * len(pri)))
+    if priors_mod.has_poses(pri):
+        pp = pairs.select(pri, _ground(meta)[1])
+        far = sum(1 for a, b in pp if abs(pri[a].time - pri[b].time) > learned.FAR_S)
+        what = "look-at pairs"
+    else:
+        far = len(pairs.covisible(project, pri, per_photo=pairs.COVIS_PER_PHOTO, min_gap_s=learned.FAR_S))
+        what = "covisible pairs of the earlier model"
+    if far < need:
+        return {"learned": False, "far_pairs": far,
+                "reason": f"{far:,} {what} > {learned.FAR_S:.0f} s apart (< {need}): one pass, SIFT"}
+    why = learned.available()
+    if why:
+        return {"learned": False, "far_pairs": far, "reason": f"several passes, but {why}: SIFT"}
+    return {"learned": True, "far_pairs": far,
+            "reason": f"{far:,} {what} > {learned.FAR_S:.0f} s apart: several passes / flights, ALIKED + RoMa"}
+
+
+def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10, covis_per_photo=pairs.COVIS_PER_PHOTO):
+    """pairs.txt for the match stage; mode: PAIR_MODES. covis_per_photo: on a re-run, up to that many pairs per photo
+    between passes (> pairs.COVIS_GAP_S apart) that see the same surface in the earlier model (pairs.covisible;
+    0 = none)."""
     if mode not in PAIR_MODES:
         raise ValueError(f"pairs mode must be one of {tuple(PAIR_MODES)}")
     names = priors_mod.by_order(pri)
     seqs = [[n for n in names if pri[n].source == s] for s in sorted({pri[n].source for n in names})]
     rep = {"mode": mode}
     if mode == "auto" and priors_mod.has_poses(pri):  # DJI: look-at overlap from the priors
-        rep["ground_z"] = meta["ground_z"] if "ground_z" in meta else -meta["enu_origin_lla"][2]
-        # each flight's own takeoff height (its heights are rel_alt + its altitude offset): pairs between flights
-        # do not depend on that offset being right (pairs module doc)
-        ground = {s: rep["ground_z"] + float(src.get("alt_offset_m") or 0.0)
-                  for s, src in enumerate(meta.get("sources") or [])} or rep["ground_z"]
+        rep["ground_z"], ground = _ground(meta)
         pp = pairs.select(pri, ground)
         terrain = _terrain(project)
         if terrain is not None:  # a re-run: look-ats on the surface of the earlier model, added to the flat ones
@@ -138,6 +189,18 @@ def stage_pairs(project, report, pri, meta, mode="auto", neighbors=10):
     else:  # sequential, or auto without priors (exhaustive when small)
         pp = pairs.sequential(seqs, overlap=neighbors, exhaustive_below=150 if mode == "auto" else 0)
         rep["neighbors"] = neighbors
+    covis_path = os.path.join(project, "pairs_covis.json")
+    if os.path.exists(covis_path):
+        os.remove(covis_path)
+    if covis_per_photo > 0:
+        cv = pairs.covisible(project, pri, covis_per_photo)
+        if cv:
+            before = len(pp)
+            pp = sorted(set(pp) | {tuple(sorted((a, b))) for a, b, _ in cv})
+            json.dump({"per_photo": covis_per_photo, "pairs": cv}, open(covis_path, "w"))
+            rep.update(covis_pairs=len(cv), covis_new=len(pp) - before, covis_per_photo=covis_per_photo)
+            log(f"pairs: {len(cv):,} pairs between passes that see the same surface in the earlier model "
+                f"({len(pp) - before:,} new)")
     pairs.write(project, pp)
     report.set("pairs", {"num_pairs": len(pp), **rep})
     log(f"pairs: {len(pp)} ({mode})")
@@ -193,13 +256,33 @@ def _watch_matches(db_path, total, progress, done, every=0.25):
             progress(min(n, total), total)
 
 
-def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, token=None, progress=None):
+def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, token=None, progress=None,
+                dense="off", dense_per_photo=learned.DEFAULT_DENSE_PER_PHOTO):
     """Match the pairs in pairs.txt and verify them geometrically (two-view geometry, RANSAC).
     max_ratio: Lowe's ratio test; guided: re-match along the estimated geometry (more inliers, slower);
     min_inliers: a verified pair needs this many. token: Stop through pycolmap's cancellation token.
-    progress(pairs done, total): polled from the database a few times a second."""
+    Features of a learned method (sfm/learned.py) are matched with LightGlue (max_ratio / guided do not apply).
+    dense: learned.DENSE, for the pairs between passes that stay unlinked (dense_per_photo per photo), or "auto":
+    roma when auto_matching found several passes (the features stage's decision when it made one).
+    progress(pairs done, total[, unit]): polled from the database a few times a second."""
     db_path = os.path.join(project, "database.db")
     copy_db(os.path.join(project, "features.db"), db_path)
+    if dense == "auto":  # as the features stage decided (auto_matching), else decided now
+        auto = report.data.get("features", {}).get("auto") or auto_matching(project)
+        dense = "roma" if auto["learned"] else "off"
+        log(f"match: dense matcher auto: {dense} ({auto['reason']})")
+    method = learned.method_of(project)
+    if method:
+        t0 = time.time()
+        st = learned.match(project, method, min_inliers=min_inliers, dense="off", token=token,
+                           progress=progress and (lambda text, k, n: progress(k, n, text)))
+        if dense != "off":
+            st["dense"] = learned.densify(project, dense, min_inliers, dense_per_photo, token=token,
+                                          progress=progress and (lambda text, k, n: progress(k, n, text)))
+        stats = {**match_stats(db_path, time.time() - t0), **st, "min_inliers": int(min_inliers)}
+        log(f"match: {stats}")
+        report.set("match", stats)
+        return
     opts = pycolmap.ImportedPairingOptions()
     opts.match_list_path = os.path.join(project, "pairs.txt")
     m = pycolmap.FeatureMatchingOptions()
@@ -224,8 +307,11 @@ def stage_match(project, report, max_ratio=0.8, guided=False, min_inliers=15, to
         if watcher is not None:  # its last count must end before the database is opened again (kladno_dira: the
             watcher.join(timeout=120)  # stats' open failed with "database is locked" on the 10 GB database)
     jobs.check(token)
-    stats = {**match_stats(db_path, time.time() - t0), "max_ratio": float(max_ratio), "guided": bool(guided),
-             "min_inliers": int(min_inliers)}
+    stats = {"max_ratio": float(max_ratio), "guided": bool(guided), "min_inliers": int(min_inliers)}
+    if dense != "off":  # RoMa on SIFT's unlinked pairs between passes
+        stats["dense"] = learned.densify(project, dense, min_inliers, dense_per_photo, token=token,
+                                         progress=progress and (lambda text, k, n: progress(k, n, text)))
+    stats = {**match_stats(db_path, time.time() - t0), **stats}
     log(f"match: {stats}")
     report.set("match", stats)
 
@@ -711,6 +797,7 @@ def stage_reconstruct(project, report, progress=None, token=None, mapper="increm
 
 def stage_export(project, report, rec=None, lidar=True, drop_isolated=True, progress=None):
     """transforms.json + sparse_pc.ply; lidar: LiDAR points (kind rosbag) join the splat's initial cloud.
+    The photos the user excluded (modelforge/exclude.py) are always left out, the same way.
     drop_isolated: leave out photos no other pass ties in whose ground lies off the other passes' (sfm.isolated); the
     points are then triangulated again from the kept photos alone (poses fixed, as refine's final triangulation,
     into sparse/export), so the left-out photos neither add points nor pull any into place.
@@ -725,38 +812,47 @@ def stage_export(project, report, rec=None, lidar=True, drop_isolated=True, prog
     world = {"video": "local: up-oriented, arbitrary scale", "rosbag": "the bag's world frame"}.get(kind, "ENU")
     iso = None
     shutil.rmtree(os.path.join(project, "sparse", "export"), ignore_errors=True)  # only this export's model counts
+    t0 = time.time()
+    model = {rec.image(i).name for i in rec.reg_image_ids()}
+    user = sorted(exclude.names(project) & model)  # the photos the user left out (modelforge/exclude.py)
     if drop_isolated and kind != "video":  # metres (the cover distance); a video's frame has no scale
-        t0 = time.time()
         times = {r["image"]: r.get("time_s") for r in json.load(open(os.path.join(project, "poses.json")))["images"]}
         iso = isolated.find(rec, times, progress=progress)
-        iso["points_before"] = rec.num_points3D()
-        db_path = os.path.join(project, "database.db")
-        if iso["drop"] and os.path.exists(db_path):
-            log(f"export: triangulating again without the {len(iso['drop'])} photos left out")
-            for name in iso["drop"]:
-                rec.deregister_frame(rec.find_image_with_name(name).frame_id)
-            image_path = os.path.join(project, "images")
-            rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "export"),
-                                     refine.DEFAULT_ROUNDS[-1], refine=True,  # refine's final threshold (4 px)
-                                     progress=progress)
-            step("colours of the points from the photos")
-            rec.extract_colors_for_all_images(image_path)
-            rec.write(os.path.join(project, "sparse", "export"))  # View: snapshot "export"
-            iso["triangulated"] = True
-        elif iso["drop"]:  # no database (copied model): drop the points only they see
-            isolated.remove(rec, iso["drop"])
-        iso["points"] = rec.num_points3D()
+    drop = sorted(set(user) | set(iso["drop"] if iso else ()))
+    points_before, triangulated = rec.num_points3D(), False
+    db_path = os.path.join(project, "database.db")
+    if drop and os.path.exists(db_path):
+        log(f"export: triangulating again without the {len(drop)} photos left out")
+        for name in drop:
+            rec.deregister_frame(rec.find_image_with_name(name).frame_id)
+        image_path = os.path.join(project, "images")
+        rec = refine.triangulate(rec, db_path, image_path, os.path.join(project, "sparse", "export"),
+                                 refine.DEFAULT_ROUNDS[-1], refine=True,  # refine's final threshold (4 px)
+                                 progress=progress)
+        step("colours of the points from the photos")
+        rec.extract_colors_for_all_images(image_path)
+        rec.write(os.path.join(project, "sparse", "export"))  # View: snapshot "export"
+        triangulated = True
+    elif drop:  # no database (copied model): drop the points only they see
+        isolated.remove(rec, drop)
+    if iso:
+        iso["points_before"], iso["points"], iso["triangulated"] = points_before, rec.num_points3D(), triangulated
         iso["points_removed"] = iso["points_before"] - iso["points"]
         iso["seconds"] = round(time.time() - t0, 1)
         log(f"export: {len(iso['drop'])} of {iso['photos']} photos left out: weakly tied to other passes and over "
             f"{isolated.MAX_OFF:.0%} of their ground > {isolated.MAX_DZ} m off the others', also on open flat ground "
             f"({iso['isolated']} weakly tied, {iso.get('candidates', 0)} with their ground off); points {iso['points_before']:,} → {iso['points']:,}; stretches (t0, t1, photos, share of cells off) "
             f"{iso['stretches'][:10]}{' …' if len(iso['stretches']) > 10 else ''}")
+    if user:
+        log(f"export: {len(user)} photos excluded by the user (Sparse tab → Exclude photos); points "
+            f"{points_before:,} → {rec.num_points3D():,}")
     step("writing transforms.json + sparse_pc.ply")
     path = nerfstudio.export(rec, project, extra={"world": world, "source": "modelforge.pipeline"}, lidar=lidar,
-                             exclude=set(iso["drop"]) if iso else ())
+                             exclude=set(drop))
     n_lidar = json.load(open(path)).get("modelforge", {}).get("lidar_points_in_ply", 0)
-    rep = {"transforms": path, "frames": len(json.load(open(path))["frames"]), "lidar_points": n_lidar}
+    rep = {"transforms": path, "frames": len(json.load(open(path))["frames"]), "lidar_points": n_lidar,
+           "excluded": {"photos": len(user), "entries": exclude.load(project), "points_before": points_before,
+                        "points": rec.num_points3D(), "triangulated": triangulated}}
     if iso:
         rep["isolated"] = {k: v for k, v in iso.items() if k != "drop"} | {"dropped": len(iso["drop"]),
                                                                           "names": iso["drop"]}
@@ -826,8 +922,10 @@ def main():
                     help="images shared by consecutive chunks (default 100)")
     ap.add_argument("--polish-sweeps", type=int, default=chunked.Chunked.polish_sweeps,
                     help="window sweeps after the pose graph (default 1; 0 = none)")
-    ap.add_argument("--features", default="sift", choices=tuple(features.EXTRACTORS),
-                    help="feature extractor (default sift on the GPU; sift-robust: DSP + affine shape, CPU)")
+    ap.add_argument("--features", default="auto", choices=("auto",) + tuple(features.EXTRACTORS) + tuple(learned.METHODS),
+                    help="feature extractor (default auto: aliked-lightglue for several passes / flights over the same "
+                         "ground, sift otherwise; sift on the GPU; sift-robust: DSP + affine shape, CPU; "
+                         "gim-lightglue / aliked-lightglue: learned, matched with LightGlue, scripts/install_matchers)")
     ap.add_argument("--max-features", type=int, default=8192, help="max SIFT features per image (default 8192)")
     ap.add_argument("--upright", action=argparse.BooleanOptionalAction, default=None,
                     help="one keypoint orientation (default: on for DJI, off for videos without metadata)")
@@ -837,6 +935,14 @@ def main():
     ap.add_argument("--ratio", type=float, default=0.8, help="Lowe's ratio test for matching (default 0.8)")
     ap.add_argument("--guided", action="store_true", help="guided matching: more inliers, slower")
     ap.add_argument("--min-inliers", type=int, default=15, help="inliers a verified pair needs (default 15)")
+    ap.add_argument("--dense", default="auto", choices=("auto",) + tuple(learned.DENSE),
+                    help="dense matching (RoMa) of the pairs between passes / flights that stay unlinked (default auto: "
+                         "roma when the features' auto choice found several passes)")
+    ap.add_argument("--dense-per-photo", type=int, default=learned.DEFAULT_DENSE_PER_PHOTO,
+                    help=f"dense pairs per photo at most (default {learned.DEFAULT_DENSE_PER_PHOTO})")
+    ap.add_argument("--covis-pairs", type=int, default=pairs.COVIS_PER_PHOTO,
+                    help="re-runs: pairs per photo between passes that see the same surface in the earlier model "
+                         f"(default {pairs.COVIS_PER_PHOTO}; 0 = none)")
     ap.add_argument("--mapper", default="incremental", choices=tuple(reconstruct.MAPPERS),
                     help="SfM mapper for videos without metadata (default incremental; global: faster on large sets)")
     ap.add_argument("--no-relative", action="store_true", help="refine without relative (consecutive-frame) priors")
@@ -860,9 +966,10 @@ def main():
     if "features" in stages:
         stage_features(args.project, report, kind, args.features, args.max_features, args.upright)
     if "pairs" in stages:
-        stage_pairs(args.project, report, pri, meta, args.pairs, args.neighbors)
+        stage_pairs(args.project, report, pri, meta, args.pairs, args.neighbors, covis_per_photo=args.covis_pairs)
     if "match" in stages:
-        stage_match(args.project, report, args.ratio, args.guided, args.min_inliers)
+        stage_match(args.project, report, args.ratio, args.guided, args.min_inliers, dense=args.dense,
+                    dense_per_photo=args.dense_per_photo)
     if "refine" in stages:
         model = robust.PriorModel(use_relative=not args.no_relative, calibrate=not args.no_calibration,
                                   estimate_systematic=not args.no_systematic, estimate_drift=not args.no_drift)

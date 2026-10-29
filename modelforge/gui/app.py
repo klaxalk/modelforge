@@ -9,6 +9,7 @@ may be new or empty: the Ingest tab builds it from one or more videos.
 import argparse
 import html
 import json
+import math
 import os
 import re
 import threading
@@ -18,20 +19,25 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, difix, jobs, memory, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, difix, jobs, memory, ortho, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
-from modelforge.sfm import chunked, features, reconstruct
+from modelforge.sfm import chunked, features, learned, reconstruct
+from modelforge.sfm import pairs as pairs_mod
 from modelforge.gui import data as gdata
 from modelforge.gui.data import Project
+from modelforge.gui import map as map_mod
 from modelforge.gui import skybox
+from modelforge.gui.map import MapPanel
 from modelforge.gui.hardware import HardwarePanel
 from modelforge.gui.jobqueue import QueuePanel
 from modelforge.gui.lod import SplatLod
 from modelforge.gui.videos import VideosPanel
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
+from modelforge.gui.rig import RigPanel
 from modelforge.gui.semantic import SemanticPanel
+from modelforge.gui.exclude import COLOR as EXCLUDED_COLOR, ExcludePanel
 from modelforge.gui.subset import RegisterPanel, SubsetPanel
 from modelforge.gui import views as views_mod
 from modelforge.gui.tiepoints import TiePointsPanel
@@ -47,8 +53,8 @@ SUNLIGHT = {"off": False, "traced from the SfM mesh": True, "learned per Gaussia
 
 QUICK_SHORT = {"Cameras": "Cams", "Residuals": "Resid", "Trajectory": "Traj"}  # quick bar labels (two short rows)
 STAGE_HINTS = {
-    "features": "SIFT keypoints for every image into features.db (upright, up to 8192 per image, one shared "
-                "camera). A few minutes on CPU.",
+    "features": "Keypoints for every image into features.db: SIFT (upright, up to 8192 per image) or a learned "
+                "extractor (Features → Extractor), one camera per lens. Minutes.",
     "pairs": "Choose image pairs to match from the priors: time neighbours within each source plus views whose "
              "look-at points overlap (catches revisits and links sources). Seconds.",
     "match": "Match the selected pairs and verify them geometrically into database.db. The slowest SfM stage "
@@ -97,6 +103,8 @@ STAGE_HINTS = {
     "register": "Place the extracted photos not in use into the refined model (matched to the model photos nearest "
                 "in time, located by PnP, the model unchanged) and add them to transforms.json for the splat. A new "
                 "refine makes them stale: register again.",
+    "ortho": "The splat rendered straight down with an orthographic camera (splat/ortho.png), the Map window's "
+             "orthophoto layer and its GeoTIFF export. Seconds to a minute on the GPU.",
     "splatmesh": "Mesh from the splat: depth rendered at every camera, fused into a TSDF, marching cubes "
                  "(splatmesh/mesh.ply, vertex colours). Seconds to a minute on the GPU.",
     "all": "Full pipeline: sparse → SfM mesh (holes patched; the splat's depth prior) → splat → "
@@ -116,6 +124,9 @@ NEXT_STEP = {
     "splat-resume": "View tab → Dense / splat → **Splat (ENU)**; Export tab",
     "analyze": "Sparse tab → Images used → Selection **keyframes**, then Use these images",
     "semantic": "Search tab (left): type a query, **Search**",
+    "images": "Sparse tab → Images used shows the images in use; next: **Run SfM (all)**",
+    "difix-suggest": "Difix tab: the target views list; next: **Refine splat with Difix**",
+    "ortho": "Map window (quick bar **Map**) → Background and layers → Orthophoto of the splat; Export GeoTIFF",
     "splatmesh": "View tab → Dense / splat → Mesh **splat**; Export tab; optional: **Patch holes**",
     "register": "Splat tab: **Train + export splat** trains on the model photos + the registered ones",
     "difix": "View tab → Dense / splat → **Splat**: look from the target views; Difix tab → **Undo** restores the splat",
@@ -135,8 +146,16 @@ PRIOR_COLOR = (150, 150, 150)
 MOVE_SPEED = 5.0  # m/s, keyboard movement in the 3D view (viser's own is 2)
 PHOTO_PANEL_WIDTH = 420  # px, the Photo window right of the quick bar
 SELECTED_COLOR = (255, 255, 255)
+# more cameras than this: each layer is one wireframe node (berlin_all, 29.5k photos: two frustum nodes per photo
+# made viser replay 266k messages on every browser connect), without thumbnails or clicks
+MAX_FRUSTA = 2000
+FAR_EXTENTS = 8.0  # the far clipping plane at this many scene extents (at least viser's 1000 m)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
+
+
+PANEL_SETTINGS = tuple(f"{p}.{n}" for p in ("subset", "register.sel")
+                       for n in ("g_mode", "g_level", "g_every", "g_offset", "g_range"))  # kept by queued entries
 
 
 def _is_input(h):
@@ -199,9 +218,14 @@ def _fov_aspect(intr):
     return 2 * np.arctan(intr["height"] / 2 / fy), intr["width"] / intr["height"]
 
 
+GRAPH_EDGES = ("between passes", "all")  # View → Pose graph
+GRAPH_MAX_EDGES = 300_000  # lines sent to the browser at most (the strongest pairs)
+
+
 class App:
     def __init__(self, project_path, port=8080, root=None):
         self.path = project_path
+        self._splat_variant = None  # Difix tab → Compare: None = the project's splat, else difix.BACKUP
         self.root = root or os.path.dirname(os.path.abspath(project_path))
         self.project = Project(project_path) if os.path.exists(os.path.join(project_path, "poses.json")) else None
         self.server = viser.ViserServer(host="0.0.0.0", port=port, label="ModelForge")
@@ -231,6 +255,8 @@ class App:
         if self.project:
             names = self.project.snapshot_names()
             self.load_snapshot(self._main_snapshot(names))
+        if self.project is None:
+            self._draw_grid()  # under the Ingest plan's tracks
         self._refresh_dense()
         self._set_plan_visible(self.project is None)  # the default view (_default_view): no flight plan
         self.server.on_client_connect(self._on_connect)
@@ -289,7 +315,7 @@ class App:
                 "round N; round_N = after its bundle adjustment; calib_N = the calibration subset of a chunked refine; "
                 "posegraph = a chunked refine after the pose graph and polish; "
                 "refined = final model.")
-            self.g_snapshot.on_update(lambda _: self.load_snapshot(self.g_snapshot.value))
+            self.g_snapshot.on_update(lambda _: self._snapshot_picked())
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
                 self.g_points = gui.add_checkbox("Points", initial_value=True,
@@ -305,12 +331,34 @@ class App:
                                                hint="Red segments from each prior position to the estimated one.")
                 self.g_traj = gui.add_checkbox("Trajectories", initial_value=True,
                                                hint="Grey: prior path; blue: estimated path.")
+                self.g_grid = gui.add_checkbox(
+                    "Ground grid", initial_value=True,
+                    hint="A faint grid just under the lowest point of the camera path (cell size in the status line "
+                         "of View stats: a round number of metres, every 10th line darker).")
+                self.g_grid.on_update(lambda _: self._draw_grid())
                 self.g_plan = gui.add_checkbox(
                     "Flight plan", initial_value=self.ingest.g_show.value,
                     hint="The Ingest plan: each source's camera track (in its colour inside the range, grey "
                          "outside) and dots at the planned image positions. Same as the Ingest tab's "
                          "\"Show flight plan in 3D\" and the quick bar's Plan.")
                 self.g_scale = gui.add_slider("Camera size", min=0.2, max=5.0, step=0.1, initial_value=1.0)
+            with gui.add_folder("Pose graph", expand_by_default=False):
+                self.g_graph = gui.add_checkbox(
+                    "Pose graph", initial_value=False,
+                    hint="A line between the cameras of every verified photo pair (database.db: what matching and "
+                         "geometric verification linked), at the snapshot's camera positions. Colour by inlier "
+                         "matches: red few, yellow, green many (log scale).")
+                self.g_graph_edges = gui.add_dropdown(
+                    "Edges", options=GRAPH_EDGES, initial_value=GRAPH_EDGES[0],
+                    hint="between passes = pairs of two flights or more than "
+                         f"{learned.FAR_S:.0f} s apart on the timeline: what ties revisits together (the neighbours "
+                         "along the path are always linked). all = every verified pair.")
+                self.g_graph_min = gui.add_slider(
+                    "Min inliers", min=15, max=1000, step=5, initial_value=15,
+                    hint="Only pairs with at least this many verified inlier matches (15 = every verified pair).")
+                self.g_graph_md = gui.add_markdown("")
+                for h in (self.g_graph, self.g_graph_edges, self.g_graph_min):
+                    h.on_update(lambda _: self._draw_graph())
             with gui.add_folder("Dense / splat"):
                 self.g_dense_pts = gui.add_checkbox("Dense points", initial_value=False, disabled=True,
                                                     hint="dense/fused.ply (subsampled to 1.5M points). Enabled once "
@@ -360,7 +408,7 @@ class App:
                 self.g_mesh_tex.on_update(lambda _: self._draw_mesh())
                 for h in (self.g_dense_pts, self.g_mesh, self.g_splat):  # keep the quick bar in step
                     h.on_update(lambda _: self._sync_quickbar())
-                self.g_splat.on_update(lambda _: self._draw_splat())
+                self.g_splat.on_update(lambda _: (self._draw_splat(), self._difix_compare_status()))
             self.g_color = gui.add_dropdown("Color cameras by", options=COLOR_BY, initial_value="time",
                                            hint="Deviation from the prior, mean reprojection error, capture "
                                                 "time, source (video piece) or camera (drone model + resolution: each has its own intrinsics).")
@@ -420,7 +468,7 @@ class App:
                          "Orbit.")
                 self.g_fly.on_click(lambda e: self.toggle_fly(e.client))
                 self.g_fly_speed = gui.add_slider(
-                    "Speed (m/s)", min=0.1, max=20.0, step=0.1, initial_value=0.5,
+                    "Speed (m/s)", min=0.1, max=20.0, step=0.1, initial_value=2.0,
                     hint="Speed along the camera path (scene units per second for videos without metadata). "
                          "Turns on the spot count 0.02 m per degree, so they take time too; jumps between videos "
                          "are shortened to 2 m. Can be changed while flying.")
@@ -458,6 +506,8 @@ class App:
             self.views = ViewsPanel(self, gui)
         with self.left.add_tab("Search", viser.Icon.SEARCH):  # semantic search, its own tab after View
             self.semantic = SemanticPanel(self, gui)
+        with self.left.add_tab("Rig", viser.Icon.ROBOT):  # articulated objects cut out of the splat (gui/rig.py)
+            self.rig = RigPanel(self, gui)
         self.lod = SplatLod(self)
         self._mem = memory.Sampler()  # peaks of the running job's stages (memory.record)
 
@@ -467,6 +517,10 @@ class App:
                                          hint="Magnification of the red reprojection-residual lines.")
             self.g_gain.on_update(lambda _: self.select(self.selected) if self.selected is not None else None)
             self.g_image = gui.add_image(np.zeros((54, 96, 3), np.uint8), label="observations")
+            b = gui.add_button("Exclude / include this photo", icon=viser.Icon.PHOTO_OFF,
+                               hint="Leave this photo out of the splat and everything after SfM, or take it back "
+                                    "(Sparse tab → Exclude photos; Apply there exports again).")
+            b.on_click(lambda _: self.selected is not None and self.exclude.pick(self.selected))
 
         with self.left.add_tab("Tie points", viser.Icon.TARGET):  # manual tie points (gui/tiepoints.py)
             self.tiepoints = TiePointsPanel(self, gui)
@@ -475,11 +529,9 @@ class App:
             self.g_sparse_md = gui.add_markdown("")
             self.subset = SubsetPanel(self, gui)
             self.g_buttons["analyze"] = self.subset.g_analyze
-            self.register = RegisterPanel(self, gui)
-            self.g_buttons["register"] = self.register.g_run
             b = gui.add_button("Run SfM (all)", icon=viser.Icon.PLAYER_TRACK_NEXT,
-                               hint="Runs features → pairs → match → refine → export in sequence (the SfM mesh is "
-                                    "its own tab: Sparse Mesh). About 15-20 min on CPU for 300 images; matching dominates.")
+                               hint="Runs features → pairs → match → refine → export → register more photos in "
+                                    "sequence (the SfM mesh is its own tab: Sparse Mesh). About 15-20 min on CPU for 300 images; matching dominates.")
             b.on_click(lambda _: self.run_stage("sfm"))
             self.g_buttons["sfm"] = b
             self.g_ba_iters = gui.add_number(
@@ -533,9 +585,15 @@ class App:
             self.g_skip_round.on_click(lambda _: self.skip_ba_round())
             with gui.add_folder("Features", expand_by_default=False):
                 self.g_extractor = gui.add_dropdown(
-                    "Extractor", options=tuple(features.EXTRACTORS), initial_value="sift",
-                    hint=" ".join(f"{k}: {v}." for k, v in features.EXTRACTORS.items())
-                    + " Learned features (ALIKED, LightGlue) need COLMAP built with ONNX, which this image is not.")
+                    "Extractor", options=("auto",) + tuple(features.EXTRACTORS) + tuple(learned.METHODS),
+                    initial_value="auto",
+                    hint="auto (default): aliked-lightglue when the photos come from several flights or passes over "
+                         f"the same ground (look-at pairs more than {learned.FAR_S:.0f} s apart), sift otherwise "
+                         "(the History line says which and why). "
+                    + " ".join(f"{k}: {v}." for k, v in {**features.EXTRACTORS, **learned.METHODS}.items())
+                    + " The learned ones are matched with LightGlue (Ratio test / Guided matching / Max features / "
+                      "Upright do not apply) and need scripts/install_matchers (their own environment under "
+                      "build/matchers). Register more photos uses the same features.")
                 self.g_max_features = gui.add_number(
                     "Max features", initial_value=8192, min=500, max=65536, step=500,
                     hint="Per image. More helps high-resolution or detailed scenes; fewer is faster.")
@@ -560,6 +618,24 @@ class App:
                 self.g_min_inliers = gui.add_number(
                     "Min inliers", initial_value=15, min=5, max=500, step=5,
                     hint="Geometric verification: consistent matches a pair needs to count (COLMAP's default 15).")
+                self.g_covis = gui.add_number(
+                    "Pairs between passes (per photo)", initial_value=pairs_mod.COVIS_PER_PHOTO, min=0, max=100, step=1,
+                    hint="When the project has an earlier SfM model: up to this many extra pairs per photo with photos "
+                         f"taken more than {pairs_mod.COVIS_GAP_S:.0f} s apart (or in another flight) that see the "
+                         "same surface in that model. On berlin_all only 6 % of such pairs were matched before, and "
+                         "63 % of those tried were linked. 0 = none.")
+                self.g_dense = gui.add_dropdown(
+                    "Dense matcher (hard pairs)", options=("auto",) + tuple(learned.DENSE), initial_value="auto",
+                    hint="After matching: the pairs between passes or flights that stay unlinked go through a dense "
+                         "matcher, at most the number below per photo. auto (default): roma when Extractor auto found "
+                         "several passes / flights, off otherwise. "
+                         + " ".join(f"{k}: {v}." for k, v in learned.DENSE.items())
+                         + " Its matches snap onto the photos' keypoints or become new ones. Needs "
+                           "scripts/install_matchers.")
+                self.g_dense_per_photo = gui.add_number(
+                    "Dense pairs per photo", initial_value=learned.DEFAULT_DENSE_PER_PHOTO, min=1, max=50, step=1,
+                    hint="At most this many dense pairs per photo (best covisibility first); berlin_all: 3 per photo "
+                         "= ~12k pairs, ~2 h.")
             self.g_mapper = gui.add_dropdown(
                 "Mapper", options=tuple(reconstruct.MAPPERS), initial_value="incremental",
                 hint="SfM for videos without metadata. "
@@ -577,6 +653,9 @@ class App:
                                     "poses.json and refine settings (BA mode, chunk size, ...).")
             b.on_click(lambda _: self.run_stage("refine-resume"))
             self.g_buttons["refine-resume"] = b
+            self.register = RegisterPanel(self, gui)  # after export: the SfM's last step
+            self.g_buttons["register"] = self.register.g_run
+            self.exclude = ExcludePanel(self, gui)  # photos left out of transforms.json (gui/exclude.py)
 
         with tabs.add_tab("Sparse Mesh", viser.Icon.TRIANGLES):  # the mesh from the SfM points, after Sparse
             gui.add_markdown("A surface from the SfM points (after **export**): the splat's depth prior (Splat tab) "
@@ -585,6 +664,12 @@ class App:
                                hint=STAGE_HINTS["sfmmesh-all"])
             b.on_click(lambda _: self.run_stage("sfmmesh-all"))
             self.g_buttons["sfmmesh-all"] = b
+            self.g_sfmmesh_method = gui.add_dropdown(
+                "Mesh type", options=sfm_mesh.METHODS, initial_value="poisson",
+                hint="poisson (default): COLMAP's Poisson over the oriented SfM points, a smooth closed surface "
+                     "trimmed back to where points are; holes can be patched from it. delaunay: COLMAP's Delaunay "
+                     "mesher on the sparse model (a graph cut along the tracks' rays): open surfaces, sharper edges, "
+                     "but only as fine as the SfM points (its vertices are the points), rougher, and no hole patching.")
             b = gui.add_button("Build mesh", hint=STAGE_HINTS["sfmmesh"])
             b.on_click(lambda _: self.run_stage("sfmmesh"))
             self.g_buttons["sfmmesh"] = b
@@ -815,6 +900,22 @@ class App:
                                hint="Add every view saved in the left panel's Views tab to the targets (names "
                                     "already here are skipped).")
             b.on_click(lambda _: self.difix_views.add_from(views_mod.FILE))
+            with gui.add_folder("Suggest target views", expand_by_default=True):
+                self.g_difix_suggest_n = gui.add_number(
+                    "How many", initial_value=difix.SUGGEST_N, min=1, max=50, step=1,
+                    hint="Views to suggest. Each covers about one photo's footprint.")
+                self.g_difix_suggest = gui.add_button(
+                    "Suggest views where the splat is thin", icon=viser.Icon.SPARKLES,
+                    hint="Finds where the splat has few Gaussians on the SfM mesh (gaps, smeared foliage) and adds "
+                         "a target view for each such spot, looking at it square-on from the photos' usual "
+                         "distance, within the height flown there and with a clear line of sight. Replaces the "
+                         "views suggested before; views saved by hand stay.")
+                self.g_difix_suggest.on_click(lambda _: threading.Thread(target=self._difix_suggest,
+                                                                          daemon=True).start())
+                self.g_difix_clear = gui.add_button_group("", options=("Clear suggested", "Clear all views"))
+                self.g_difix_clear.on_click(lambda ev: self._difix_clear(ev.target.value == "Clear all views",
+                                                                         ev.client))
+                self.g_difix_suggest_md = gui.add_markdown("")
             with gui.add_folder("Settings", expand_by_default=False):
                 self.g_difix_steps = gui.add_number(
                     "Fine-tune steps", initial_value=difix.STEPS, min=500, max=50000, step=500,
@@ -841,6 +942,13 @@ class App:
                 hint="Restore the splat as it was before the first Difix refinement (refining again starts from the "
                      "current one).")
             self.g_difix_undo.on_click(lambda _: self._difix_undo())
+            self.g_difix_compare = gui.add_button_group(
+                "Compare", options=("After Difix", "Before Difix"), visible=False,
+                hint="Show the splat after the Difix refinement or the one from before it in the 3D view, at the same "
+                     "camera, to flip between them (the View's Splat layer; with level of detail each gets its own, "
+                     "built the first time). The files stay as they are; the search highlight shows on After only.")
+            self.g_difix_compare.on_click(lambda ev: self._difix_compare(ev.target.value == "Before Difix"))
+            self.g_difix_compare_md = gui.add_markdown("")
             self.g_difix_md = gui.add_markdown("")
 
         with tabs.add_tab("Splat mesh", viser.Icon.CUBE):
@@ -969,10 +1077,9 @@ class App:
         with self.log_panel.add_tab("Log", viser.Icon.TERMINAL_2):
             gui.add_markdown(f"_last {LOG_LINES} lines of the running job, newest first_")
             self.g_log = gui.add_markdown("")
-        # the hardware monitor is its own window right of the log: a floating panel cannot be split
-        # into columns (viser splits only docked panels), so two windows sit side by side
-        self.hw_panel = gui.add_panel()
-        with self.hw_panel.add_tab("Hardware", viser.Icon.CPU):
+        # the hardware monitor: a second tab of the log window (the user asked, 2026-10-27; it was its own window
+        # right of the log)
+        with self.log_panel.add_tab("Hardware", viser.Icon.CPU):
             self.hardware = HardwarePanel(self, gui, plot_aspect=0.3)  # the bottom window is low
         # the photo nearest to the flight's current point (View → Fly), right of the quick bar
         self.photo_panel = gui.add_panel()
@@ -983,6 +1090,8 @@ class App:
         self._photo_shown = None
         self.tiepoints.make_window(self.photo_panel)  # its second tab: the Tie point view (opened by the Tie points tab)
         self.photo_panel_tab = "Photo"  # the tab the server last asked the browsers to show (show_tab)
+        self.map = MapPanel(self)  # the 2D map window (quick bar Map)
+        self.map_open = False
         self._place_panels()
 
     def _place_panels(self):
@@ -991,8 +1100,6 @@ class App:
         self.server.gui.main_panel.dock_right()
         self.log_panel.float(x=8, y=-8, width=760, height=260)  # negative y: measured from the bottom
         self.log_panel.minimize()  # folded by default; one click opens it
-        self.hw_panel.float(x=776, y=-8, width=480, height=260)
-        self.hw_panel.minimize()
         # viser gives every button of a group the same width (the longest label: ~72 px for "· Thumbs") and wraps
         # the rest onto further rows, stretching a short last row; 12 buttons at 6 per row give an even 2 x 6 grid
         # (the user found one row of 13 too wide, ~1250 px)
@@ -1000,6 +1107,8 @@ class App:
         self.quick.float(x=8, y=8, width=24 + 72 * per_row, height=136)
         self.photo_panel.float(x=16 + 24 + 72 * per_row, y=8, width=PHOTO_PANEL_WIDTH,
                                height=round(PHOTO_PANEL_WIDTH / self.aspect) + 96)
+        self.map.panel.float(x=8, y=152, width=map_mod.WINDOW_WIDTH, height=map_mod.WINDOW_WIDTH + 330)
+        self.map.panel.minimize()  # the quick bar's Map opens it
 
     def _show_photo(self, i):
         """Photo window: image i of the project (the camera the flight is nearest to). Decoded only when it
@@ -1045,6 +1154,8 @@ class App:
         self.dark = bool(dark)
         self.server.gui.configure_theme(control_width="large", dark_mode=self.dark)
         self._save_setting("dark_mode", self.dark)
+        if hasattr(self, "g_grid"):
+            self._draw_grid()  # its colours follow the theme
 
     def plot_template(self):
         return "plotly_dark" if self.dark else "plotly_white"
@@ -1127,14 +1238,17 @@ class App:
             self._default_view()
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.semantic.clear_for_switch()  # the old project's search markers and results
+            self.rig.close()
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self.views.refresh()  # this project's saved views, tie points, Difix and registration state
             self.difix_views.refresh()
             self.tiepoints.refresh()
+            self._splat_variant = None
             self._refresh_difix()
             self._refresh_register()
             self._show_project()
+            self.map.reset()
             self._history_lines, self._log_lines = [], []
             self.g_history.content, self.g_log.content = "_nothing run in this session_", ""
             self.g_state.content = "⚪ **idle**"
@@ -1178,9 +1292,75 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _refresh_register(self):
-        """Sparse tab → Register more photos: pool, analysis, status."""
+        """Sparse tab → Register more photos: pool, analysis, status; Exclude photos."""
         if self.path and hasattr(self, "register"):
             self.register.refresh()
+        if hasattr(self, "exclude"):
+            self.exclude.refresh()
+
+    def _register_steps(self):
+        """Run SfM (all) / the full pipeline end with Register more photos (the user asked, 2026-10-26), after the
+        overlap analysis when its Selection is keyframes and no current analysis exists."""
+        from modelforge.sfm import overlap
+        try:
+            pool = projects.extracted_images(self.path) if self.path else []
+        except (OSError, ValueError, KeyError):
+            pool = []
+        if not pool:
+            return []  # nothing extracted (a step with nothing to add is skipped when it runs)
+        need = self.register.sel.mode() == "keyframes" and not overlap.is_current(self.path)
+        return (["analyze"] if need else []) + ["register"]
+
+    def _difix_suggest(self, in_job=False):
+        """Difix tab → Suggest views where the splat is thin (difix.suggest_views): the button runs it in a thread,
+        a queue entry as the job stage "difix-suggest" (in_job: errors raised, the History line returned)."""
+        path = self.path
+        why = difix.can_suggest(path) if path else "no project open"
+        if why:
+            self.g_difix_suggest_md.content = f"⚠ {why}"
+            if in_job:
+                raise RuntimeError(why)
+            return
+        self.g_difix_suggest.disabled = True
+        self.g_difix_suggest_md.content = "⏳ looking for thin splat on the SfM mesh …"
+        try:
+            views, st = difix.suggest_views(path, n=int(self.g_difix_suggest_n.value), on_line=self._on_log)
+            if path != self.path:
+                return
+            difix.add_suggested(path, views)
+            self.difix_views.refresh()
+            self.g_difix_suggest_md.content = (
+                f"✅ {len(views)} views added (thin: {st['thin_share']:.0%} of the mesh's surface; each view about "
+                f"{st.get('footprint_m', 0):.0f} m across), {st['seconds']:.0f} s" if views else
+                f"⚪ nothing thin enough to suggest ({st['thin_share']:.1%} of the surface)")
+            return self.g_difix_suggest_md.content
+        except Exception as e:  # noqa: BLE001 - shown in the tab
+            traceback.print_exc()
+            self.g_difix_suggest_md.content = f"❌ {e}"
+            if in_job:
+                raise
+        finally:
+            self.g_difix_suggest.disabled = False
+
+    def _difix_clear(self, everything, client=None):
+        """Difix tab → Clear suggested (the generated targets; those saved by hand stay) / Clear all views (asks
+        first: views saved by hand cannot be regenerated)."""
+        path = self.path
+        if not path:
+            return
+
+        def clear():
+            n = difix.clear_views(path, suggested_only=not everything)
+            self.difix_views.refresh()
+            self.g_difix_suggest_md.content = (f"🗑 {n} target view{'s' * (n != 1)} removed"
+                                               + ("" if everything else " (suggested; those saved by hand stay)"))
+        if not everything or client is None:
+            clear()
+            return
+        with client.gui.add_modal("Clear all Difix views?") as m:
+            client.gui.add_markdown("Remove **every** Difix target view, also those saved by hand? There is no undo.")
+            row = client.gui.add_button_group("", options=("Clear all", "Cancel"))
+        row.on_click(lambda ev: (m.close(), clear() if ev.target.value == "Clear all" else None))
 
     def _refresh_difix(self):
         """The Difix tab's status line and Undo (after a refinement, on a project switch)."""
@@ -1188,12 +1368,36 @@ class App:
             return
         r = difix.refined(self.path)
         self.g_difix_undo.disabled = not r["backup"]
+        self.g_difix_compare.visible = bool(r["backup"])  # shown once there is a splat from before Difix
+        if not r["backup"] and self._splat_variant:  # undone / another project: back to the project's splat
+            self._difix_compare(False)
+        self._difix_compare_status()
         i = r["info"]
         self.g_difix_md.content = (
             f"Last refinement {i.get('time', '')}: towards {i['targets']} views ({', '.join(i.get('views', [])[:6])}"
             f"{' …' if len(i.get('views', [])) > 6 else ''}), {i['rounds']} rounds, {i['steps']:,} steps, "
             f"{_fmt_s(i['seconds'])}; renders before / after Difix in `{i.get('previews', difix.WORK)}`"
             if i else ("The splat has been refined before (Undo restores the original)." if r["backup"] else ""))
+
+    def _difix_compare(self, before):
+        """Difix tab → Compare: draw the splat from before Difix (difix.BACKUP) or the project's in the View."""
+        if before and difix.baseline(self.path) is None:
+            before = False
+        self._splat_variant = difix.BACKUP if before else None
+        if before and not self.g_splat.value:
+            self.g_splat.value = True  # its update draws the splat
+        else:
+            self._draw_splat()
+        self._sync_quickbar()
+        self._difix_compare_status()
+
+    def _difix_compare_status(self):
+        if not self.path or difix.baseline(self.path) is None:
+            self.g_difix_compare_md.content = ""
+            return
+        self.g_difix_compare_md.content = (
+            "Showing: **before Difix** (`" + difix.BACKUP + "`)" if self._splat_variant else
+            "Showing: **after Difix** (the project's splat)") + ("" if self.g_splat.value else " · Splat layer off")
 
     def _difix_undo(self):
         if self.running:
@@ -1219,7 +1423,7 @@ class App:
         for h in list(self.cam_handles.values()) + list(self.prior_handles.values()):
             h.remove()
         self.cam_handles, self.prior_handles, self.selected, self.snap = {}, {}, None, None
-        for name in ("/points", "/corrections", "/traj", "/dense"):
+        for name in ("/points", "/corrections", "/traj", "/dense", "/cams_lines", "/priors_lines", "/grid"):
             self.server.scene.remove_by_name(name)
         self._drawn = {}
         self._dense_lines = {}
@@ -1294,7 +1498,10 @@ class App:
     def _on_connect(self, client):
         if self._flight is None and not self.orbit_on:  # else it joins the flight / orbit
             self.recenter(client)
-        client.camera.on_update(lambda _: (self._carry_pivot(client), self.lod.on_camera(client)))
+        else:
+            self._set_far([client])
+        client.camera.on_update(lambda _: (self._carry_pivot(client), self.lod.on_camera(client),
+                                           self.map.on_camera(client)))
 
     def _speed_html(self):
         orbit = float(self.g_orbit_speed.value) if getattr(self, "orbit_on", False) else 0.0
@@ -1359,12 +1566,23 @@ class App:
         queued entry keeps (gui/jobqueue.py)."""
         out = {n: _jsonable(getattr(self, n).value) for n in self._settings_names}
         out["semantic.g_in_all"] = bool(self.semantic.g_in_all.value)
+        for n in PANEL_SETTINGS:  # Sparse tab → Images used / Register more photos (their own objects)
+            out[n] = _jsonable(self._handle(n).value)
         return out
+
+    def _handle(self, name):
+        """The input of a setting's name: "g_x" on the app, "semantic.g_x" / "register.sel.g_x" on a panel."""
+        obj = self
+        for part in name.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                return None
+        return obj
 
     def _apply_settings(self, d):
         """Put settings of _settings back into the tabs (those that no longer exist or no longer fit are left)."""
         for n, v in d.items():
-            h = getattr(self.semantic, n.split(".", 1)[1], None) if n.startswith("semantic.") else getattr(self, n, None)
+            h = self._handle(n)
             if h is None or not _is_input(h):
                 continue
             try:
@@ -1488,7 +1706,12 @@ class App:
 
     def _pivot_click(self, ev):
         """Ctrl + click: the clicked spot becomes the point the view orbits and zooms about (camera stays put); the
-        Tie points tab lists the photos that see it."""
+        Tie points tab lists the photos that see it. While the Rig tab picks a joint, the click goes there."""
+        try:
+            if self.rig.on_pick(ev.ray_origin, ev.ray_direction):
+                return
+        except Exception:  # noqa: BLE001 - a pick never breaks navigation
+            traceback.print_exc()
         hit = self.ray_hit(ev.ray_origin, ev.ray_direction)
         if hit is None:
             return
@@ -1558,6 +1781,20 @@ class App:
                 pass
         threading.Thread(target=run, daemon=True).start()
 
+    def _set_far(self, clients=None, frame=None):
+        """The far clipping plane from the scene's size: viser's default 1000 m cut the far parts of large
+        flights (berlin_all) off while turning the view."""
+        frame = frame or self._view_frame()
+        if frame is None:
+            return
+        far = max(1000.0, FAR_EXTENTS * frame[1])
+        self.server.initial_camera.far = far
+        for c in clients if clients is not None else list(self.server.get_clients().values()):
+            try:
+                c.camera.far = far
+            except Exception:  # the browser went away
+                pass
+
     def recenter(self, client=None):
         """Center button (and on connect / project switch): look at the scene from the south, above it,
         far enough to see all of it. client None = every browser. Stops that browser's orbit / flight."""
@@ -1566,6 +1803,7 @@ class App:
             return
         mid, extent = frame
         clients = [client] if client is not None else list(self.server.get_clients().values())
+        self._set_far(clients, frame)
         self._stop_fly()
         for c in clients:
             try:
@@ -1589,6 +1827,8 @@ class App:
             self._draw_points()
             self._draw_cameras()
             self._draw_lines()
+            self._draw_grid()
+            self._draw_graph()
             self._update_stats()
             if self.selected is not None:
                 self.select(self.selected)
@@ -1603,6 +1843,22 @@ class App:
             except RuntimeError:
                 pass
         return "refined" if "refined" in names else names[-1]
+
+    def _snapshot_picked(self):
+        """The Snapshot dropdown changed: load it, unless it is what is shown already (a live refine set it)."""
+        if self.snap is not None and self.snap.name == self.g_snapshot.value:
+            return
+        self.load_snapshot(self.g_snapshot.value)
+
+    def _show_snapshot_name(self, name):
+        """A live refine loaded snapshot `name` itself: list it and show it as picked (no second load). Before, the
+        dropdown kept the list from when the project opened ("priors" only after new images) while the View
+        showed the refine's snapshots."""
+        names = tuple(self.project.snapshot_names())
+        if tuple(self.g_snapshot.options) != names:
+            self.g_snapshot.options = names
+        if name in names and self.g_snapshot.value != name:
+            self.g_snapshot.value = name
 
     def refresh_snapshot_list(self, select=None):
         names = tuple(self.project.snapshot_names())
@@ -1656,10 +1912,63 @@ class App:
                                           point_size=self.g_point_size.value, precision="float32",
                                           visible=bool(self.g_points.value and len(s.points)))
 
+    def _batched(self):
+        return self.project is not None and len(self.project.names) > MAX_FRUSTA
+
+    def _shapes(self, s):
+        """Per image (vertical field of view, aspect) of its camera."""
+        intr = s.intrinsics or {}
+        shapes = {cid: _fov_aspect(c) for cid, c in intr.get("cameras", {}).items()}
+        n = len(self.project.names)
+        if not shapes:
+            return np.full(n, self.fov), np.full(n, self.aspect)
+        fa = np.array([shapes.get(int(c), (self.fov, self.aspect)) for c in intr["by_image"]], float)
+        return fa[:, 0], fa[:, 1]
+
+    def _draw_camera_lines(self, cams=None):
+        """Many cameras: the shown cameras and the prior cameras as one wireframe line-segment node each."""
+        s = self.snap
+        if s is None:
+            return
+        cams = cams or s.cams
+        fov, aspect = self._shapes(s)
+        scale = 0.6 * self.g_scale.value
+        colors = self._camera_colors().copy()
+        if self.selected is not None:
+            colors[self.selected] = SELECTED_COLOR
+        pc = self.project.prior_cams
+        for name, c, on, sc, col in (("/cams_lines", cams, self.g_cams.value, scale, colors),
+                                     ("/priors_lines", pc, self.g_priors.value, 0.8 * scale, None)):
+            v = c.valid & bool(on)
+            if not v.any():
+                self.server.scene.remove_by_name(name)
+                continue
+            hh = sc * np.tan(fov[v] / 2)
+            hw = hh * aspect[v]
+            sx, sy = np.array([-1, 1, 1, -1]), np.array([-1, -1, 1, 1])
+            corners = np.stack([hw[:, None] * sx, hh[:, None] * sy, np.full((len(hh), 4), sc)], -1)  # (k, 4, 3) camera
+            corners = np.einsum("kij,kcj->kci", c.R_wc[v], corners) + c.centers[v][:, None]
+            apex = np.repeat(c.centers[v][:, None], 4, axis=1)
+            seg = np.concatenate([np.stack([apex, corners], 2),
+                                  np.stack([corners, np.roll(corners, -1, axis=1)], 2)], 1)  # (k, 8, 2, 3)
+            seg_col = np.repeat((col[v] if col is not None else np.tile(np.array([PRIOR_COLOR], np.uint8),
+                                                                       (int(v.sum()), 1)))[:, None, None], 8, 1)
+            self.server.scene.add_line_segments(name, seg.reshape(-1, 2, 3).astype(np.float32),
+                                                colors=np.repeat(seg_col, 2, 2).reshape(-1, 2, 3),
+                                                thickness=1.0, thickness_units="screen")
+
     def _draw_cameras(self):
         with self.lock:
             if self.snap is None:  # a toggle while the project is still loading
                 return
+            if self._batched():
+                for h in list(self.cam_handles.values()) + list(self.prior_handles.values()):
+                    h.remove()
+                self.cam_handles, self.prior_handles = {}, {}
+                self._draw_camera_lines()
+                return
+            for name in ("/cams_lines", "/priors_lines"):  # a project with many cameras was shown before
+                self.server.scene.remove_by_name(name)
             s, n = self.snap, len(self.project.names)
             colors = self._camera_colors()
             scale = 0.6 * self.g_scale.value
@@ -1710,6 +2019,91 @@ class App:
             for name in ("/traj/prior", "/traj/estimate"):
                 self.server.scene.add_line_segments(name, np.zeros((0, 2, 3), np.float32), colors=(0, 0, 0))
 
+    def _draw_graph(self):
+        """View → Pose graph (the user asked, 2026-10-29): the verified pairs as lines between the snapshot's
+        cameras, coloured by inliers; between passes only by default. At most GRAPH_MAX_EDGES, the strongest."""
+        name = "/pose_graph"
+        if not hasattr(self, "g_graph"):
+            return
+        if not self.g_graph.value or self.project is None or self.snap is None:
+            self.server.scene.remove_by_name(name)
+            self.g_graph_md.content = ""
+            return
+        try:
+            i, j, n = self.project.pose_graph()
+        except Exception as e:  # sqlite busy / a database being rewritten: say so, try again on the next toggle
+            self.server.scene.remove_by_name(name)
+            self.g_graph_md.content = f"database.db not readable: {e}"
+            return
+        if not len(i):
+            self.server.scene.remove_by_name(name)
+            self.g_graph_md.content = "No verified pairs (database.db): run matching first."
+            return
+        pr = self.project
+        far = (pr.source[i] != pr.source[j]) | (np.abs(pr.time[i] - pr.time[j]) > learned.FAR_S)
+        cams = self.snap.cams
+        sel = n >= int(self.g_graph_min.value)
+        if self.g_graph_edges.value == GRAPH_EDGES[0]:
+            sel &= far
+        sel &= cams.valid[i] & cams.valid[j]
+        k = np.flatnonzero(sel)
+        cut = len(k) > GRAPH_MAX_EDGES
+        if cut:
+            k = k[np.argsort(-n[k])[:GRAPH_MAX_EDGES]]
+        nfar = int(far.sum())
+        linked = np.zeros(len(pr.names), bool)
+        linked[i[far]] = linked[j[far]] = True
+        lines = [f"{len(i):,} verified pairs, {nfar:,} between passes · {int(linked.sum()):,} of {len(pr.names):,} "
+                 f"photos linked to another pass",
+                 f"shown: {len(k):,} edges" + (f" (the {GRAPH_MAX_EDGES:,} strongest)" if cut else "") +
+                 (f", inliers median {int(np.median(n[k]))}" if len(k) else "")]
+        self.g_graph_md.content = "  \n".join(lines)
+        if not len(k):
+            self.server.scene.remove_by_name(name)
+            return
+        seg = np.stack([cams.centers[i[k]], cams.centers[j[k]]], 1).astype(np.float32)
+        t = np.clip(np.log(n[k] / 15.0) / np.log(1000 / 15.0), 0, 1)  # 15 -> 0, 1000+ -> 1
+        col = np.stack([np.where(t < 0.5, 255, 255 * (1 - t) * 2), np.where(t < 0.5, 510 * t, 220),
+                        np.full_like(t, 40)], 1).clip(0, 255).astype(np.uint8)  # red -> yellow -> green
+        self.server.scene.add_line_segments(name, seg, colors=np.repeat(col[:, None], 2, 1), thickness=1.0,
+                                            thickness_units="screen")
+
+    def _grid_path(self):
+        """The camera path's centres: the snapshot's and the priors' (the Ingest plan's tracks without images)."""
+        if self.project is None:
+            prev = self.ingest.prev
+            return np.concatenate([x["track"] for x in prev["sources"]]) if prev and prev["sources"] else None
+        parts = [c.centers[c.valid] for c in (self.snap.cams if self.snap else None, self.project.prior_cams)
+                 if c is not None]
+        pts = np.concatenate(parts) if parts else np.zeros((0, 3))
+        return pts[np.all(np.isfinite(pts), axis=1)]
+
+    def _draw_grid(self):
+        """View → Ground grid (the user asked, 2026-10-28): a faint grid in the horizontal plane just under the
+        lowest point of the path, over its extent + a margin; the cell a round number (1, 2, 5 x 10^k) near 1/40
+        of the extent, every 10th line a section."""
+        pts = self._grid_path() if self.g_grid.value else None
+        if pts is None or len(pts) < 2:
+            self.server.scene.remove_by_name("/grid")
+            self.grid_cell = None
+            return
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        extent = max(float(np.max(hi[:2] - lo[:2])), 1e-3)
+        raw = extent / 40
+        mag = 10 ** math.floor(math.log10(raw))
+        cell = next(m * mag for m in (1, 2, 5, 10) if m * mag >= raw)
+        section = 10 * cell
+        size = (np.ceil((hi[:2] - lo[:2] + 0.4 * extent) / section) * section).astype(float)  # 20 % margin each side
+        centre = np.round((lo[:2] + hi[:2]) / 2 / section) * section  # lines on round coordinates
+        z = float(lo[2]) - max(0.5, 0.01 * extent)
+        dark = self.dark
+        self.server.scene.add_grid(
+            "/grid", width=float(size[0]), height=float(size[1]), plane="xy", position=(*centre, z),
+            cell_size=cell, section_size=section, cell_thickness=0.6, section_thickness=1.0,
+            cell_color=(58, 58, 64) if dark else (222, 222, 226), section_color=(82, 82, 90) if dark else (196, 196, 204),
+            fade_distance=float(3 * extent + section), fade_strength=1.0, fade_from="camera", shadow_opacity=0.0)
+        self.grid_cell = cell
+
     def _update_stats(self):
         s = self.snap
         pos, rot = self.deviations()
@@ -1740,6 +2134,8 @@ class App:
                 if d["max"] >= 0.05:
                     lines.append(f"source {int(k) + 1} position drift: up to {d['max']:.2f} m "
                                  f"(height range {d['range_z']:.2f} m, {d['knots']} knots)")
+        if getattr(self, "grid_cell", None):
+            lines.append(f"ground grid: {self.grid_cell:g} m cells, {10 * self.grid_cell:g} m sections")
         self.g_stats.content = "  \n".join(lines)
 
     def _prior_model(self, snapshot):
@@ -1754,6 +2150,8 @@ class App:
     # ------------------------------------------------------------- inspect
     def select(self, i):
         prev, self.selected = self.selected, i
+        if self._batched():
+            self._draw_camera_lines()
         for j in (prev, i):
             if j is not None and j in self.cam_handles:
                 self._recolor(j)
@@ -1763,7 +2161,10 @@ class App:
         pos, rot = self.deviations()
         src = self.project.source_names[self.project.source[i]] if self.project.source[i] < len(
             self.project.source_names) else ""
-        md = [f"**{name}** · {src} t = {self.project.pts[i]:.2f} s"]
+        md = [f"**{name}** · {src} t = {self.project.pts[i]:.2f} s (project time {self.project.time[i]:.2f} s)"]
+        mask = getattr(getattr(self, "exclude", None), "mask", None)
+        if mask is not None and i < len(mask) and mask[i]:
+            md.append("⛔ **excluded** from the splat and after (Sparse tab → Exclude photos)")
         if self.snap.cams.valid[i] and self.snap.name != "priors" and self.project.has_priors:
             md.append(f"prior deviation: {pos[i]:.2f} m, {rot[i]:.2f}°")
         if st:
@@ -1773,6 +2174,14 @@ class App:
         self.g_inspect_md.content = "  \n".join(md)
 
     def _camera_colors(self):
+        colors = self._camera_colors_by_value()
+        mask = getattr(getattr(self, "exclude", None), "mask", None)
+        if mask is not None and len(mask) == len(colors) and mask.any():  # left out of the splat: dark grey
+            colors = colors.copy()
+            colors[mask] = EXCLUDED_COLOR
+        return colors
+
+    def _camera_colors_by_value(self):
         if self.g_color.value in ("source", "camera"):  # one colour per source / per camera (multi-camera DJI)
             names, idx = ((self.project.source_names, self.project.source) if self.g_color.value == "source" else
                           (self.project.camera_names, self.project.camera))
@@ -1792,6 +2201,9 @@ class App:
         if self.snap is None:  # nothing drawn yet (e.g. the kind switched the colouring at startup)
             return
         colors = self._camera_colors()
+        if self._batched():
+            self._draw_camera_lines()
+            return
         for i, h in self.cam_handles.items():
             h.color = SELECTED_COLOR if i == self.selected else tuple(int(c) for c in colors[i])
 
@@ -1906,7 +2318,11 @@ class App:
                         self._history(f"⚠️ **flight check** skipped: `{e}`")
                     self.ingest.plan_now()
                 self._begin_stage("extract", 0, 1)
+                chosen = {n: getattr(self.subset, n).value for n in ("g_mode", "g_level", "g_every", "g_offset")}
                 self.ingest.extract_now()
+                for n, v in chosen.items():  # the panel's (or a queued entry's) choice, not the defaults
+                    if getattr(self.subset, n).value != v:
+                        getattr(self.subset, n).value = v
                 self._history(f"✅ **extract** · {len(self.project.names)} images")
             report = pipeline.Report(project)
             pri = self.project.priors
@@ -1914,11 +2330,17 @@ class App:
             given = list(stage) if isinstance(stage, (list, tuple)) else None  # a stage list (main's --run)
             if given:
                 stage, seq = " + ".join(given), given
-            elif stage == "all":  # Run SfM (all) stops at export; the full pipeline builds the SfM mesh too
-                seq, skipped = list(sfm) + ["sfmmesh", "sfmmesh-fill"], []  # the splat's depth prior, holes patched
-                if self.subset.keyframes_selected():  # Images used = keyframes: choose them first
+            elif stage == "all":  # Run SfM (all) stops after registering; the full pipeline builds the SfM mesh too
+                seq = list(sfm) + self._register_steps() + ["sfmmesh", "sfmmesh-fill"]  # the splat's depth prior
+                skipped = []
+                # Images used, only while none was chosen yet (the user asked, 2026-10-26): keyframes (after the
+                # analysis) or every N-th as the panel says; a selection already made stays as it is
+                if self.subset.selection_made():
+                    self._history("⚪ **images used** · a selection was made before: kept (Sparse tab → Images used "
+                                  "to change it)")
+                elif self.subset.keyframes_selected():
                     seq = ["analyze", "images"] + seq
-                elif self.subset._images:  # every N-th: applied too when it differs from the images in use
+                elif self.subset._images:
                     seq = ["images"] + seq
                 if splat.available() is None:
                     seq.append("splat")  # the mesh from the splat (Splat mesh tab) is its own thing, run by hand
@@ -1935,12 +2357,15 @@ class App:
                         seq += list(pipeline.DENSE_STAGES)
                     else:
                         skipped.append("COLMAP dense (no CUDA)")
+                seq = [s for i, s in enumerate(seq) if s != "analyze" or "analyze" not in seq[:i]]  # once
                 for sk in skipped:
                     self._history(f"⚪ **skipped** {sk}")
             elif stage == "sfm" or stage in SFM_BUTTONS:
-                seq = sfm if stage == "sfm" else (stage,)
+                if stage in ("refine", "reconstruct"):  # a queue entry: the sparse method of the project's kind
+                    stage = sfm[3]
+                seq = list(sfm) + self._register_steps() if stage == "sfm" else (stage,)
             elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix", "register",
-                           "sfmmesh-fill", "sfmmesh-colour"):
+                           "sfmmesh-fill", "sfmmesh-colour", "images", "difix-suggest", "ortho"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
                 seq = ["sfmmesh", "sfmmesh-fill"]
@@ -1959,18 +2384,22 @@ class App:
                 if st == "features":
                     self._in_job("modelforge.pipeline:stage_features", kind=self._sparse_kind(),
                               extractor=self.g_extractor.value, max_features=int(self.g_max_features.value),
-                              upright=bool(self.g_upright.value), callbacks={"progress": self._on_features_progress})
+                              upright=bool(self.g_upright.value), token=worker.TOKEN,
+                              callbacks={"progress": self._on_features_progress})
                 elif st == "reconstruct":
                     self._in_job("modelforge.pipeline:stage_reconstruct", mapper=self.g_mapper.value, token=worker.TOKEN,
                               callbacks={"progress": self._on_reconstruct_event})
                 elif st == "pairs":
                     self._in_job("modelforge.pipeline:stage_pairs", pri=worker.PRIORS, meta=worker.META,
-                              mode=self.g_pairs.value, neighbors=int(self.g_neighbors.value))
+                              mode=self.g_pairs.value, neighbors=int(self.g_neighbors.value),
+                              covis_per_photo=int(self.g_covis.value))
                 elif st == "match":
                     self._in_job("modelforge.pipeline:stage_match", max_ratio=float(self.g_ratio.value),
                               guided=bool(self.g_guided.value), min_inliers=int(self.g_min_inliers.value),
+                              dense=self.g_dense.value, dense_per_photo=int(self.g_dense_per_photo.value),
                               token=worker.TOKEN,
-                              callbacks={"progress": lambda k, n: self._on_count_progress("match", "pair", k, n)})
+                              callbacks={"progress": lambda k, n, unit="pair":
+                                         self._on_count_progress("match", unit, k, n)})
                 elif st == "refine":
                     self._skip, self._skip_round = threading.Event(), threading.Event()
                     self.g_skip.disabled = self.g_skip_round.disabled = False
@@ -1988,6 +2417,7 @@ class App:
                 elif st == "export":
                     self._in_job("modelforge.pipeline:stage_export", drop_isolated=bool(self.g_drop_isolated.value),
                               callbacks={"progress": self._on_export_progress})
+                    self.exclude.status()  # applied now
                 elif st == "analyze":
                     from modelforge.sfm import overlap
                     if stage == "all" and overlap.is_current(project):  # the full pipeline reuses a current one
@@ -2035,11 +2465,17 @@ class App:
                             raise
                     elif st == "sfmmesh":
                         self._in_job("modelforge.sfm_mesh:run", report=None, token=worker.TOKEN,
-                                  callbacks={"on_line": self._on_sfm_mesh_line})
+                                  method=self.g_sfmmesh_method.value, callbacks={"on_line": self._on_sfm_mesh_line})
                     else:
+                        if sfm_mesh.method(project) == "delaunay":  # nothing to patch from
+                            if stage == "sfmmesh-fill":  # the button: say so as a failure
+                                raise RuntimeError("a Delaunay SfM mesh cannot be patched (Mesh type poisson can)")
+                            self._history("⚪ **patch holes** skipped: the SfM mesh is Delaunay")
+                            continue
                         if not sfm_mesh.can_fill(project):  # none yet, or built before patching existed
                             self._on_log("sfm mesh: no mesh to patch yet: building it first")
                             self._in_job("modelforge.sfm_mesh:run", report=None, token=worker.TOKEN,
+                                      method=self.g_sfmmesh_method.value,
                                       callbacks={"on_line": self._on_sfm_mesh_line})
                         self._in_job("modelforge.sfm_mesh:fill", report=None,
                                   max_hole=float(self.g_fill_max.value) or None, token=worker.TOKEN,
@@ -2049,17 +2485,32 @@ class App:
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
                 elif st == "register":
+                    self.register.refresh()  # the images in use and the analysis may have changed in this run
+                    if stage != "register" and not self.register.pending():  # in a sequence: nothing to add
+                        self._history("⚪ **register more photos** · the selection holds no photos beyond those in use")
+                        continue
                     self._in_job("modelforge.sfm.register:run", report=None, **self.register.job_kwargs(),
                                  token=worker.TOKEN, callbacks={"on_line": self._on_log, "on_progress": lambda k, n:
                                                                 self._on_count_progress("register", "photo", k, n)})
                     report = pipeline.Report(project)
                     self._refresh_register()
+                elif st == "ortho":
+                    meta = ortho.run(project, on_line=self._on_log, token=self._token)
+                    self._history(f"✅ **orthophoto** · {meta['gaussians']:,} gaussians, {meta['mpp'] * 100:.1f} cm per "
+                                  f"pixel, {meta['seconds']:.0f} s")
+                    self.map.redraw()
+                    continue
+                elif st == "difix-suggest":
+                    self._history("✅ **suggest Difix views** · " + (self._difix_suggest(in_job=True) or "")
+                                  .lstrip("✅⚪ "))
+                    continue
                 elif st == "difix":
                     difix.run(project, self.difix_views.views(), steps=int(self.g_difix_steps.value),
                               rounds=int(self.g_difix_rounds.value), shift_m=float(self.g_difix_shift.value),
                               difix_width=difix.WIDTHS[self.g_difix_width.value], on_line=self._on_log,
                               job=self._token, on_progress=lambda ph, k, n: self._on_count_progress("difix", ph, k, n))
                     report = pipeline.Report(project)
+                    self._splat_variant = None  # show the new result
                     self._refresh_dense()
                     self._refresh_difix()
                 elif st in ("splatmesh", "splatmesh-fill"):
@@ -2119,6 +2570,12 @@ class App:
                      "details in the Log folder and the server console")
         finally:
             pipeline.LISTENERS.remove(self._on_log)
+            if final is None or not final.startswith("✅"):  # stopped / failed: list what the job wrote anyway
+                try:
+                    if self.project is not None and self.path == project:
+                        self.refresh_snapshot_list()
+                except Exception:  # noqa: BLE001 - a view refresh never breaks the GUI
+                    traceback.print_exc()
             self._end_job(final, project)
 
     def _flight_check(self):
@@ -2307,7 +2764,8 @@ class App:
                  self.g_tiles_view.value),  # View: Tile boundaries
                 ("Orbit", True, self.orbit_on),
                 ("Center", True, False),
-                ("Fly", self.project is not None, self._flight is not None))
+                ("Fly", self.project is not None, self._flight is not None),
+                ("Map", True, getattr(self, "map_open", False)))
 
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
@@ -2326,7 +2784,7 @@ class App:
                 hint="Splat, Mesh, Dense (fused points), Points (sparse), Cams (cameras), Thumbs (their "
                      "thumbnails, with the cameras on), Resid (red prior → refined segments), Traj (trajectories), "
                      "Plan (the Ingest flight plan), Tiles (the splat tiles' boundaries); Orbit, Center (look at the whole scene), Fly (the camera "
-                     "path). ● on, ○ off, · nothing yet. Same as the View tab.")
+                     "path), Map (the 2D map window). ● on, ○ off, · nothing yet. Same as the View tab.")
         long = {v: k for k, v in QUICK_SHORT.items()}
 
         def click(e):
@@ -2370,6 +2828,13 @@ class App:
             self.toggle_fly(client)
         elif name == "Center":
             self.recenter(client)
+        elif name == "Map":
+            self.map_open = not self.map_open
+            if self.map_open:
+                self.map.panel.expand()
+                self.map.redraw()
+            else:
+                self.map.panel.minimize()
         self._sync_quickbar()
 
     def _set_plan_visible(self, on):
@@ -2897,13 +3362,21 @@ class App:
         try:
             if st == "features":
                 return (f"{r['images']} images, {r['keypoints']:,} keypoints"
-                        + (f" ({r['extractor']}{', upright' if r.get('upright') else ''})" if "extractor" in r else ""))
+                        + (f" ({r['extractor']}{', upright' if r.get('upright') else ''})" if "extractor" in r else "")
+                        + (f", {r['cached']:,} from the cache" if r.get("cached") else "")
+                        + (f" · auto: {r['auto']['reason']}" if r.get("auto") else ""))
             if st == "pairs":
                 return f"{r['num_pairs']:,} pairs ({r.get('mode', 'auto')})" + (
                     f", {r['num_pairs'] - r['flat_pairs']:,} of them from the terrain of the earlier model"
-                    if "flat_pairs" in r else "")
+                    if "flat_pairs" in r else "") + (
+                    f", {r['covis_new']:,} new between passes from the earlier model" if r.get("covis_new") else "")
             if st == "match":
-                return f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
+                d = r.get("dense") or {}
+                return (f"{r['verified_pairs']:,} verified pairs, {r['inlier_matches']:,} inlier matches"
+                        + (f" ({r['method']})" if r.get("method") else "")
+                        + (f" · {d['method']}: {d.get('linked', 0):,} of {d['pairs']:,} unlinked pairs between passes "
+                           f"linked ({d['candidates']:,} candidates, {d.get('keypoints_added', 0):,} keypoints added, "
+                           f"{d.get('seconds', 0):.0f} s)" if d else ""))
             if st == "refine":
                 f = r["final"]
                 if f["points3D"] < 100:  # nothing for dense / splat to start from
@@ -2977,6 +3450,9 @@ class App:
                         f"with {r['faces_added']:,} faces; mesh {r['faces']:,} faces")
             if st == "sfmmesh":
                 r = rep["sfm_mesh"]
+                if r.get("method") == "delaunay":
+                    return (f"{r['faces']:,} faces from {r['points']:,} SfM points ({r['model']}), Delaunay, cut "
+                            f"{r['trim_dist']:.2f} from the points")
                 return (f"{r['faces']:,} faces from {r['points']:,} SfM points ({r['model']}), Poisson depth "
                         f"{r['depth']} (cells {r['cell']:.2f}), cut {r['trim_dist']:.2f} from the points")
             if st == "splatmesh-fill":
@@ -3078,6 +3554,7 @@ class App:
                 # than converting the Reconstruction (8000 images: 8 s instead of 4.5 min under the lock)
                 if os.path.isdir(os.path.join(self.path, "sparse", name)):
                     self.snap = self.project.load_snapshot(name)
+                    self._show_snapshot_name(name)
                 elif not isinstance(ev.get("rec"), dict):  # in-process: the live Reconstruction
                     self.snap = self.project.snapshot_from_reconstruction(name, ev["rec"])
                 self._draw_points()
@@ -3090,6 +3567,11 @@ class App:
     def _update_cameras_live(self, rec):
         """Move existing frustums to the poses Ceres is currently evaluating (cheap: no re-adding)."""
         cams = self.project.poses_from_reconstruction(rec)
+        if self._batched():
+            with self.lock:
+                self._draw_camera_lines(cams)
+            self._draw_lines(cams)
+            return
         with self.lock:  # a redraw (View toggles, a snapshot) replaces the frustums meanwhile
             handles = list(self.cam_handles.items())
         for i, h in handles:
@@ -3104,6 +3586,8 @@ class App:
     # ------------------------------------------------------------- dense / splat
     def _refresh_dense(self):
         self.dense = gdata.dense_artifacts(self.path)
+        if hasattr(self, "g_difix_compare"):  # a new splat: the Difix baseline may be stale (Compare, Undo)
+            self._refresh_difix()
         meshes = tuple(self.dense["meshes"])
         self.g_dense_pts.disabled = self.dense["fused"] is None
         self.g_splat.disabled = self.dense["splat"] is None
@@ -3121,6 +3605,7 @@ class App:
         self._refresh_splat_plan()
         self._sync_resume()
         self.semantic.refresh()
+        self.rig.refresh()
         self._sync_tile_choice()
         has_mesh = sfm_mesh.depth_cloud(self.path) is not None
         self.g_splat_mesh_prior.disabled = not has_mesh
@@ -3380,11 +3865,16 @@ class App:
             self.lod.hide()
             self._draw_live_splat()
             return
-        key = ((self._file_key(self.dense["splat"]), self.g_splat_all.value, self.g_splat_lod.value,
-                int(self.g_lod_budget.value)) if self.g_splat.value and self.dense["splat"] else None)
+        variant = self._splat_variant
+        src = os.path.join(self.path, variant) if variant else self.dense["splat"]  # Difix tab → Compare: before
+        if variant and not os.path.exists(src):
+            variant, src = None, self.dense["splat"]
+        key = ((self._file_key(src), self.g_splat_all.value, self.g_splat_lod.value,
+                int(self.g_lod_budget.value)) if self.g_splat.value and src else None)
         if self._unchanged("splat", key):
             return
-        self._splat_total = gdata.splat_count(self.dense["splat"]) if key is not None else 0
+        self.lod.splat = variant
+        self._splat_total = gdata.splat_count(src) if key is not None else 0
         idx = None
         if key is not None and self.lod.wanted(self._splat_total):
             idx = self.lod.ready()
@@ -3396,11 +3886,11 @@ class App:
             return
         self.lod.hide()
         if key is not None:
-            c, cov, rgb, op = gdata.load_splat(self.dense["splat"], self._splat_limit(gdata.SPLAT_SHOWN))
-            total = gdata.splat_count(self.dense["splat"])
+            c, cov, rgb, op = gdata.load_splat(src, self._splat_limit(gdata.SPLAT_SHOWN))
+            total = gdata.splat_count(src)
             self._splat_shown = (c, cov, rgb, op, gdata.splat_subset(total, self._splat_limit(gdata.SPLAT_SHOWN)))
             self.redraw_splat_decorated()
-            self._dense_status("splat", f"splat: {total:,} gaussians" + (
+            self._dense_status("splat", ("before Difix: " if variant else "") + f"splat: {total:,} gaussians" + (
                 f" ({len(c):,} shown; View → All gaussians for all)" if len(c) < total else "") + (
                 "; building the level of detail …" if self.lod.building else ""))
         else:
@@ -3413,8 +3903,17 @@ class App:
         if lod.idx is None:
             return
         levels = np.bincount(list(lod.drawn.values()), minlength=len(lod.idx["levels"]))
-        self._dense_status("splat", f"splat: {lod.idx['gaussians']:,} gaussians, level of detail: {lod.total():,} "
+        self._dense_status("splat", ("before Difix: " if lod.splat else "") +
+                           f"splat: {lod.idx['gaussians']:,} gaussians, level of detail: {lod.total():,} "
                                     f"shown, cells per level (fine → coarse) {' / '.join(map(str, levels))}")
+
+    def decorate(self, centers, cov, rgb, op, idx, parent=None):
+        """The splat arrays to send: the search's highlight, then without a shown rig's object."""
+        c, cov, rgb, op = self.semantic.decorate(centers, cov, rgb, op, idx, parent)
+        if self.rig.shown:  # the search may have dropped Gaussians ("matches only"): then the rig's mask cannot map
+            if len(c) == len(centers):
+                c, cov, rgb, op = self.rig.decorate(c, cov, rgb, op, idx, parent)
+        return c, cov, rgb, op
 
     def redraw_splat_decorated(self):
         """Send the loaded splat again with the semantic search applied (no file reload)."""
@@ -3424,7 +3923,7 @@ class App:
         shown = getattr(self, "_splat_shown", None)
         if shown is None or not self.g_splat.value or getattr(self, "_splat_live_on", False):
             return
-        c, cov, rgb, op = self.semantic.decorate(*shown)
+        c, cov, rgb, op = shown[:4] if self._splat_variant else self.decorate(*shown)  # scores: the project's
         self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
 
     def serve_forever(self):

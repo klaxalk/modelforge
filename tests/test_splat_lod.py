@@ -86,7 +86,8 @@ def test_view_draws_cells(tmp_path, monkeypatch):
     monkeypatch.setattr(splat_lod, "CELL_MAX", 16000)
     monkeypatch.setattr(glod, "SETTLE", 0.05)
     real_build = splat_lod.build
-    monkeypatch.setattr(splat_lod, "build_in", lambda folder: real_build(folder, cell_max=16000))
+    monkeypatch.setattr(splat_lod, "build_in", lambda folder, splat=None: real_build(folder, cell_max=16000,
+                                                                                  splat=splat))
     monkeypatch.setenv("MODELFORGE_INPROCESS", "1")
     app = App(p, port=free_port())
     try:
@@ -129,6 +130,29 @@ def test_view_draws_cells(tmp_path, monkeypatch):
         app.semantic.g_near.value = False
         app.redraw_splat_decorated()
         assert len(app.lod.drawn) == len(app.lod.idx["cells"]) and idx_n > 0
+        # Difix tab → Compare: the splat from before Difix (here: every other Gaussian), with its own level of detail
+        import plyfile
+        from modelforge import difix
+        sp = os.path.join(p, "splat", "splat_enu.ply")
+        g = plyfile.PlyData.read(sp)["vertex"].data
+        plyfile.PlyData([plyfile.PlyElement.describe(np.ascontiguousarray(g[::2]), "vertex")]).write(os.path.join(p, difix.BACKUP))
+        app._refresh_difix()
+        assert app.g_difix_compare.visible and "after Difix" in app.g_difix_compare_md.content
+        app._difix_compare(True)
+        t0 = time.time()
+        while (app.lod.idx is None or app.lod.idx["gaussians"] != len(g[::2])) and time.time() - t0 < 120:
+            time.sleep(0.2)
+            app._draw_splat()
+        assert app.lod.splat == difix.BACKUP and app.lod.idx["gaussians"] == len(g[::2])
+        assert "before Difix" in app.g_dense_md.content and "before Difix" in app.g_difix_compare_md.content
+        assert os.path.isdir(splat_lod.lod_dir(p, difix.BACKUP)) and splat_lod.index(p) is not None  # both kept
+        app._difix_compare(False)
+        assert app.lod.splat is None and app.lod.idx["gaussians"] == idx_n
+        app._difix_compare(True)
+        difix.undo(p)  # the splat from before is the project's again, and so is its level of detail
+        assert splat_lod.index(p)["gaussians"] == len(g[::2]) and not os.path.isdir(splat_lod.lod_dir(p, difix.BACKUP))
+        app._refresh_difix()
+        assert app._splat_variant is None and not app.g_difix_compare.visible
         app.g_splat_lod.value = False  # off: the subset / all as before
         app._draw_splat()
         assert app.lod.idx is None and app._splat_shown is not None

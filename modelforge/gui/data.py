@@ -7,6 +7,7 @@ frustum convention: wxyz = scalar-first quaternion of R_wc, position = center.
 import json
 import os
 import re
+import sqlite3
 import struct
 from dataclasses import dataclass, field
 
@@ -72,7 +73,8 @@ def _slerp(q0, q1, u):
     return (np.sin((1 - u) * th) * q0 + np.sin(u * th) * q1) / np.sin(th)
 
 
-ROT_M_PER_DEG = 0.02  # Fly: a turn on the spot counts as this much path per degree (25 deg/s at 0.5 m/s)
+PAIR_ID = 2147483647  # COLMAP's pair_id = image_id1 * PAIR_ID + image_id2
+ROT_M_PER_DEG = 0.02  # Fly: a turn on the spot counts as this much path per degree (100 deg/s at 2 m/s)
 
 
 class FlightPath:
@@ -290,6 +292,34 @@ class Project:
         self.has_priors = priors_mod.has_poses(self.priors)  # False: video without metadata
         self.source_offsets = {}
         self.apply_source_offsets()
+
+    def pose_graph(self):
+        """The verified pairs of database.db as (i, j, inliers) arrays, i < j indices into names (View → Pose
+        graph); empty without a database. Cached while the file stays the same (size + mtime)."""
+        db = os.path.join(self.path, "database.db")
+        try:
+            st = os.stat(db)
+        except OSError:
+            return np.zeros(0, int), np.zeros(0, int), np.zeros(0, int)
+        key = (st.st_size, st.st_mtime)
+        if getattr(self, "_graph_key", None) == key:
+            return self._graph
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+        try:
+            ids = {iid: self.index.get(name, -1) for iid, name in con.execute("SELECT image_id, name FROM images")}
+            rows = np.array(con.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0").fetchall(),
+                            np.int64).reshape(-1, 2)
+        finally:
+            con.close()
+        a, b = rows[:, 0] // PAIR_ID, rows[:, 0] % PAIR_ID
+        lut = np.full(max(ids, default=0) + 1, -1)
+        lut[list(ids)] = list(ids.values())
+        ok = (a < len(lut)) & (b < len(lut))
+        i, j, n = lut[a[ok]], lut[b[ok]], rows[ok, 1]
+        keep = (i >= 0) & (j >= 0)
+        i, j, n = i[keep], j[keep], n[keep]
+        self._graph_key, self._graph = key, (np.minimum(i, j), np.maximum(i, j), n)
+        return self._graph
 
     def apply_source_offsets(self):
         """Prior cameras shifted by the per-flight position offsets the refine found (report.json refine.prior_model

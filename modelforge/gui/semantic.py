@@ -32,6 +32,8 @@ class SemanticPanel:
         self.feats, self.encoder, self.rel, self.query = None, semantic.TextEncoder(), None, ""
         self.means, self.objs, self._markers, self._frames, self._spin = None, [], [], [], None
         self.surface = None  # semantic.Surface (distances to the mesh, measured for the matches), False: no mesh
+        self.tree = None  # semantic_tree.Tree: the search scores only the Gaussians that can match
+        self._emb, self._floor, self._scored = None, None, None  # the last query's embeddings, floor, share scored
         with contextlib.nullcontext():  # the panel fills its own tab
             self.g_md = gui.add_markdown("")
             self.g_text_md = gui.add_markdown("")
@@ -51,8 +53,9 @@ class SemanticPanel:
                                              "Enter searches.")
             self.g_query.on_update(lambda e: self._query_typed(e.client))
             self.g_search = gui.add_button("Search", icon=viser.Icon.SEARCH,
-                                           hint="Score every Gaussian against the query. The first search loads "
-                                                "the text model (~1 min); later ones take a moment.")
+                                           hint="Score the Gaussians against the query: through the features' "
+                                                "octree, only those that can match. The first search loads the "
+                                                "text model (~1 min); later ones take a moment.")
             self.g_search.on_click(lambda e: self.search(e.client))
             self.g_thr = gui.add_slider(
                 "Threshold", min=0.5, max=0.95, step=0.01, initial_value=0.6,
@@ -97,7 +100,7 @@ class SemanticPanel:
     # ------------------------------------------------------------ state
     def refresh(self):
         """Status of the project's features (after a project switch, a new splat or a compute)."""
-        self.feats, self.rel, self.means, self.surface = None, None, None, None
+        self.feats, self.rel, self.means, self.surface, self.tree = None, None, None, None, None
         self._set_objects([])
         st = semantic.status(self.app.path) if self.app.path else "none"
         why = semantic.available()
@@ -121,6 +124,7 @@ class SemanticPanel:
             if path == self.app.path:
                 self._features()
                 self._splat_means()
+                self._tree()
                 srf = self._surface()
                 if srf is not None:
                     srf.index()  # the k-d tree (seconds for large meshes) before the first search
@@ -131,6 +135,29 @@ class SemanticPanel:
         if self.feats is None:
             self.feats = semantic.Features(self.app.path)
         return self.feats
+
+    def _tree(self):
+        """The features' octree (semantic_tree; built and saved when missing, ~3 s per 200k Gaussians), or None."""
+        if self.tree is None:
+            from modelforge import semantic_tree
+            try:
+                self.tree = semantic_tree.load_or_build(self.app.path, self._features(), self._splat_means())
+            except Exception:  # noqa: BLE001 - the search then scores every Gaussian
+                traceback.print_exc()
+                self.tree = False
+        return self.tree or None
+
+    def _score(self, floor):
+        """The relevance of the last query: through the octree exactly where >= floor (0 below), else every
+        Gaussian."""
+        tree, feats = self._tree(), self._features()
+        self._floor = floor if tree is not None else None
+        if tree is None:
+            self._scored = None
+            return feats.relevance(self._emb[0], self._emb[1:])
+        rel, st = tree.relevance(feats, self._emb[0], self._emb[1:], floor)
+        self._scored = st["scored"] / max(1, st["seen"])
+        return rel
 
     # ------------------------------------------------------------ search
     def unload(self, reason=""):
@@ -183,7 +210,8 @@ class SemanticPanel:
                     self.g_result.content = "⏳ waiting for the text model to load …"
                 emb = self.encoder.encode([q] + list(semantic.NEGATIVES))
                 self.g_result.content = "⏳ scoring …"
-                self.rel, self.query = self._features().relevance(emb[0], emb[1:]), q
+                self._emb = emb
+                self.rel, self.query = self._score(min(float(self.g_thr.value), semantic.AUTO_FLOOR)), q
                 absent = False
                 if self.g_auto.value:
                     thr, why = semantic.auto_threshold(self._splat_means(), self._rel()[0],
@@ -195,9 +223,13 @@ class SemanticPanel:
                 self._update_objects()
                 if absent:
                     self._set_objects([])
-                    self.g_result.content = (f"**{q}**: probably not in the scene (best relevance "
-                                             f"{float(self._rel()[0].max()):.2f} < {semantic.ABSENT})")
+                    top = float(self._rel()[0].max())
+                    best = f"{top:.2f}" if top >= (self._floor or 0) else f"below {self._floor:.2f}"
+                    self.g_result.content = (f"**{q}**: probably not in the scene (best relevance {best} < "
+                                             f"{semantic.ABSENT})")
                 self.g_result.content += f" · {time.time() - t0:.1f} s"
+                if self._scored is not None:
+                    self.g_result.content += f" (octree: {100 * self._scored:.1f} % of the Gaussians scored)"
                 self.g_text_md.content = "text model: ✅ ready"
                 if self.objs and client is not None and not absent:  # a new search: go to the best object
                     self.g_objects.value = self.g_objects.options[0]
@@ -210,7 +242,7 @@ class SemanticPanel:
         threading.Thread(target=work, daemon=True).start()
 
     def clear(self):
-        self.rel, self.query = None, ""
+        self.rel, self.query, self._emb = None, "", None
         self.g_result.content = ""
         self._set_objects([])
         self._redraw()
@@ -219,6 +251,7 @@ class SemanticPanel:
         """Another project opens: drop the search, its markers and the loaded features at once (the markers
         are scene nodes outside the app's layers, so clearing the scene does not remove them)."""
         self.feats, self.rel, self.means, self.surface, self.query = None, None, None, None, ""
+        self.tree, self._emb = None, None
         self.g_result.content = ""
         self._set_objects([])
 
@@ -239,6 +272,9 @@ class SemanticPanel:
         only, with a mesh). (relevance, Gaussians dropped above the threshold)."""
         if self.rel is None:
             return None, 0
+        floor = getattr(self, "_floor", None)
+        if floor is not None and self._emb is not None and float(self.g_thr.value) < floor:
+            self.rel = self._score(float(self.g_thr.value))  # the slider went below what the octree scored
         srf = self._surface() if self.g_near.value else None
         if srf is None or len(srf.d) != len(self.rel):
             return self.rel, 0

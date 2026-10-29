@@ -1,0 +1,30 @@
+#!/bin/bash
+# UniRig (github.com/VAST-AI-Research/UniRig, MIT) for the Rig tab's "Propose joints" (modelforge/rig_unirig.py), in
+# its own Python 3.11 environment under build/unirig: bpy 4.2 needs 3.11, the image has 3.12. Nothing in the image
+# changes. Run in the dev container: MODELFORGE_GPU=1 scripts/dev scripts/install_unirig  (~10 GB, ~10 min)
+# --vlm also downloads the vision model the Rig tab plans motions with (Qwen2.5-VL-7B-Instruct, Apache-2.0, ~16 GB,
+# modelforge/rig_vlm.py), which runs in the same environment.
+set -e
+mkdir -p /workspace/build/unirig
+cd /workspace/build/unirig
+export UV_PYTHON_INSTALL_DIR=/workspace/build/unirig/python UV_CACHE_DIR=/workspace/build/unirig/uv_cache
+[ -x uvtool/bin/uv ] || python3 -m pip install --quiet --target uvtool uv
+UV="env PYTHONPATH=/workspace/build/unirig/uvtool python3 -m uv"
+$UV python install 3.11
+[ -d venv ] || $UV venv venv --python 3.11
+[ -d UniRig ] || git clone --depth 1 https://github.com/VAST-AI-Research/UniRig.git
+P="$UV pip install --python venv/bin/python"
+$P torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+$P -r <(grep -v -e flash_attn -e '^bpy' UniRig/requirements.txt)
+$P bpy==4.2.0 --extra-index-url https://download.blender.org/pypi/
+$P spconv-cu126
+$P torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+$P numpy==1.26.4 psutil
+$P "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
+venv/bin/python -c "import torch, flash_attn, spconv, torch_scatter, torch_cluster, bpy; print('UniRig environment OK:', torch.__version__, bpy.app.version_string)"
+if [ "$1" = "--vlm" ]; then
+    $P accelerate
+    HF_HOME=/workspace/build/hf_cache venv/bin/python -c "from huggingface_hub import snapshot_download; \
+print(snapshot_download('Qwen/Qwen2.5-VL-7B-Instruct', allow_patterns=['*.json', '*.safetensors', '*.txt', 'LICENSE*']))"
+fi
+echo INSTALL-DONE

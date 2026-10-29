@@ -112,10 +112,10 @@ def test_feature_progress(tmp_path):
 
 
 def test_levels_ordered():
-    """extra dense keeps more keyframes than dense, dense >= normal >= sparse; dense stays the default."""
+    """extra dense keeps more keyframes than dense, dense >= normal >= sparse; sparse is the default."""
     ims = images(40)
     data = table(ims, lambda i, j: max(0.0, 0.45 - 0.05 * (j - i - 1)))
     n = {lv: len(overlap.select_keyframes(ims, data, min_overlap=v)) for lv, v in overlap.LEVELS.items()}
     assert n["extra dense"] > n["dense"] >= n["normal"] >= n["sparse"]
-    assert overlap.DEFAULT_LEVEL == "dense" and list(overlap.LEVELS)[0] == "extra dense"
+    assert overlap.DEFAULT_LEVEL == "sparse" and list(overlap.LEVELS)[0] == "extra dense"
     assert set(overlap.QUALITY) == set(overlap.LEVELS)

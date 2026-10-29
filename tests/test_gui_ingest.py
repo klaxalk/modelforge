@@ -96,3 +96,52 @@ def test_extract_and_run_first_stages(app):
     p.extract()  # project has images now: needs the overwrite box
     assert "Overwrite" in p.g_status.content
     assert np.all(np.isfinite(app.project.prior_cams.centers))
+
+
+def test_ingest_folder_filter(tmp_path):
+    """The Ingest tab's Folder narrows the Video list to one folder's clips (by file name); a rescan keeps the
+    folder (its count updated); Add as source resolves the name to the clip's path."""
+    from modelforge.dji import ingest
+    from modelforge.gui.ingest import ALL_FOLDERS, IngestPanel
+
+    class W:
+        def __init__(self, value=""):
+            self.value, self.options, self.content = value, (), ""
+    root = tmp_path / "data"
+    for rel in ("videos/a/one.MP4", "videos/a/two.MP4", "videos/b/three.MP4"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"")
+    panel = IngestPanel.__new__(IngestPanel)
+    panel.app = type("A", (), {"root": str(root)})()
+    panel.path, panel.kind = str(root / "proj"), "dji"
+    panel.g_folder, panel.g_video, panel.g_video_path, panel.g_status = W(ALL_FOLDERS), W(), W(), W()
+    panel.rescan()
+    folders = panel.g_folder.options  # (rescan also lists the working directory's data/: the real library)
+    mine = [o for o in folders if str(tmp_path.name) in o]
+    assert folders[0] == ALL_FOLDERS and len(mine) == 2 and any(o.endswith("a (2)") for o in mine)
+    assert sum(str(tmp_path.name) in v for v in panel.g_video.options) == 3  # all folders: paths
+    panel.g_folder.value = next(o for o in mine if o.endswith("a (2)"))
+    panel._filter_videos()
+    assert panel.g_video.options == ("one.MP4", "two.MP4")
+    (root / "videos/a/four.MP4").write_bytes(b"")
+    panel.rescan()
+    assert panel.g_folder.value.endswith("a (3)") and len(panel.g_video.options) == 3
+    added = []
+    panel.sources = []
+    panel.add_source = lambda video=None, _orig=IngestPanel.add_source: added.append(
+        video or panel._video_paths.get(panel.g_video.value))
+    panel.g_video.value = "two.MP4"
+    panel.add_source()
+    assert added[0].endswith(os.path.join("videos", "a", "two.MP4"))
+
+    # Add all in folder: the folder's clips, those already sources skipped; refused on "all folders"
+    del panel.add_source
+    panel._sources_added = lambda n: added.append(n)
+    panel.sources = [ingest.Source(panel._video_paths["two.MP4"])]
+    panel.add_folder()
+    assert sorted(os.path.basename(s.video) for s in panel.sources) == ["four.MP4", "one.MP4", "two.MP4"]
+    assert added[-1] == 2 and "added 2" in panel.g_status.content and "1 skipped" in panel.g_status.content
+    panel.g_folder.value = ALL_FOLDERS
+    panel._filter_videos()
+    panel.add_folder()
+    assert len(panel.sources) == 3 and "pick a Folder" in panel.g_status.content

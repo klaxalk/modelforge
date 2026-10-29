@@ -38,7 +38,8 @@ FINAL = (
 )
 INTERMEDIATE = (
     ("images", "extracted frames"),
-    ("features.db", "SIFT features"),
+    ("features.db", "features (SIFT or learned keypoints)"),
+    ("features_learned", "learned features (descriptors per photo) and dense (RoMa) matches"),
     ("database.db", "matches"),
     ("pairs.txt", "pair list"),
     ("sparse/round_*", "refinement rounds"),
@@ -53,6 +54,7 @@ INTERMEDIATE = (
     ("transforms_x*.json", "multi-camera training datasets (cameras at the training size)"),
     ("splat/splat.ply", "splat (nerfstudio frame)"),
     ("splat/lod", "splat level of detail (View; built again when shown)"),
+    ("splat/lod_pre_difix", "level of detail of the splat from before Difix (Difix tab → Compare; built again when shown)"),
     ("sky", "sky masks for splat training"),
     ("previous", "archived earlier extractions"),
     ("extracted", "all extracted frames (a subset of them is in images/)"),
@@ -179,7 +181,8 @@ def apply_subsample(path, every=1, offset=0, start=None, end=None, names=None, s
         keep = subsample_selection(poses["images"], every, offset, start, end)
     if not keep:
         raise ValueError("no images left with these settings")
-    stale = [n for n in ingest.OUTPUTS if n not in ("images", "poses.json", "poses.csv", POOL, "analysis")]
+    stale = [n for n in ingest.OUTPUTS  # the analysis and the learned features belong to the pool's photos: kept
+             if n not in ("images", "poses.json", "poses.csv", POOL, "analysis", "features_learned")]
     archived = ingest.archive_outputs(path, stale)
     images = os.path.join(path, "images")
     shutil.rmtree(images, ignore_errors=True)  # hard links only: the pool keeps the files

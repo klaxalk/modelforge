@@ -192,6 +192,7 @@ def test_subsample(tmp_path):
         f.write("image,source,time_s\n" + "".join(f"{im['image']},{im['source']},{im['time_s']}\n" for im in images))
     touch(os.path.join(p, "features.db"))
     touch(os.path.join(p, "sparse", "refined", "images.bin"))
+    touch(os.path.join(p, "features_learned", "aliked-lightglue", "v0_00001.jpg.npz"))  # the per-photo cache
 
     keep = projects.subsample_selection(images, every=3)
     assert [images[k]["image"] for k in keep] == ["v0_00000.jpg", "v0_00003.jpg", "v0_00006.jpg", "v0_00009.jpg",
@@ -202,6 +203,7 @@ def test_subsample(tmp_path):
     n, total, archived = projects.apply_subsample(p, every=2, offset=1)
     assert (n, total) == (8, 16) and archived and os.path.exists(os.path.join(archived, "features.db"))
     assert not os.path.exists(os.path.join(p, "features.db")) and not os.path.exists(os.path.join(p, "sparse"))
+    assert os.path.exists(os.path.join(p, "features_learned", "aliked-lightglue", "v0_00001.jpg.npz"))  # kept
     poses = json.load(open(os.path.join(p, "poses.json")))
     assert [im["image"] for im in poses["images"]][:2] == ["v0_00001.jpg", "v0_00003.jpg"]
     assert poses["ground_z"] == -5.0 and poses["subsample"]["every"] == 2
@@ -272,7 +274,8 @@ def test_gui_subsample(tmp_path):
         n = len(app.project.names)
         s = app.subset
         assert f"all **{n}**" in s.g_md.content
-        assert s.g_mode.value.startswith("keyframes") and s.g_level.value == "dense"  # the default
+        assert s.g_mode.value.startswith("keyframes") and s.g_level.value == "sparse"  # the default
+        assert not s.selection_made()  # nothing chosen yet: Run full pipeline would analyze + select
         s.g_mode.value = "every N-th image"
         s.g_every.value = 4
         assert f"of {n} images" in s.g_preview.content
@@ -284,6 +287,7 @@ def test_gui_subsample(tmp_path):
         assert f"now using {k} of {n}" in s.g_preview.content, s.g_preview.content
         assert len(app.project.names) == k and f"**{k}** of {n}" in s.g_md.content
         assert not os.path.exists(os.path.join(real, "sparse"))  # the old results moved to previous/
+        assert s.selection_made()  # Run full pipeline now keeps the images in use
         # Run full pipeline's first step applies the panel's choice: every 2nd now (before, only keyframes were)
         s.g_every.value = 2
         used, total, what = s.apply_selection()

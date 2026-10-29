@@ -156,6 +156,10 @@ def run(project, width=WIDTH, dims=DIMS, version=VERSION, on_line=print, on_prog
         _work(job, dict(_camera_arrays(project), **splat_mesh.load_splat(sp)), out_dir, params,
               _liner(on_line, on_progress))
         stats = json.load(open(os.path.join(out_dir, "stats.json")))
+    from modelforge import semantic_tree
+    tree = semantic_tree.build_for(project, on_line=on_line)  # the search index (semantic_tree)
+    stats["octree"] = {"cells": int(len(tree.level)), "clusters": int(len(tree.mu)),
+                       "seconds": round(float(tree.seconds), 1)}
     meta = {**stats, "splat": fp, "negatives": list(NEGATIVES), "seconds_total": round(time.time() - t0, 1)}
     json.dump(meta, open(os.path.join(out_dir, "meta.json"), "w"), indent=1)
     from modelforge.pipeline import Report
@@ -244,20 +248,23 @@ class Features:
             "nd,de,ne->n", self.f, self.basis.T @ self.basis, self.f)
         self.norm = np.sqrt(np.maximum(rec_sq, 1e-12)).astype(np.float32)
 
-    def cosine(self, emb):
-        """(N, Q) cosine of every Gaussian's (reconstructed) feature with unit text embeddings (Q, D)."""
+    def cosine(self, emb, idx=None):
+        """(N, Q) cosine of every Gaussian's (reconstructed) feature with unit text embeddings (Q, D); with idx
+        only those Gaussians' rows."""
         emb = np.atleast_2d(np.asarray(emb, np.float32))
-        dots = self.mean @ emb.T + self.f @ (self.basis.T @ emb.T)  # (N, Q)
-        c = dots / self.norm[:, None]
-        c[~self.seen] = -1.0
+        sl = slice(None) if idx is None else idx
+        dots = self.mean @ emb.T + self.f[sl] @ (self.basis.T @ emb.T)  # (N, Q)
+        c = dots / self.norm[sl, None]
+        c[~self.seen[sl]] = -1.0
         return c
 
-    def relevance(self, q_emb, neg_embs, temperature=TEMPERATURE):
-        """LERF-style relevance in [0, 1] per Gaussian: min over negatives of sigmoid(T (cos_q - cos_neg))."""
-        c = self.cosine(np.vstack([q_emb, neg_embs]))
+    def relevance(self, q_emb, neg_embs, temperature=TEMPERATURE, idx=None):
+        """LERF-style relevance in [0, 1] per Gaussian (with idx: of those): min over negatives of
+        sigmoid(T (cos_q - cos_neg))."""
+        c = self.cosine(np.vstack([q_emb, neg_embs]), idx)
         r = 1.0 / (1.0 + np.exp(-temperature * (c[:, :1] - c[:, 1:])))
         out = r.min(1)
-        out[~self.seen] = 0.0
+        out[~self.seen[slice(None) if idx is None else idx]] = 0.0
         return out
 
 

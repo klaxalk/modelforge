@@ -89,3 +89,21 @@ exactly as from its button (no second implementation of the stages); it writes
 - Checked by hand (`build/queue_check/stop.py`): a refine of another project, stopped after 25 s → "stopped" within
   ~1 s, the queue paused. Tests: `test_queued_entries_run_with_their_settings` (the second project's entry runs in
   its own process, the GUI keeps its project), `test_external_entry_survives_a_gui_restart`.
+
+**Stages and settings, 2026-10-26 (the user asked):** the Stage list follows the full pipeline's order and covers its steps:
+- Run full pipeline;
+- Run SfM (all);
+- the overlap analysis; Images used (apply the selection);
+- features, pairs, match, refine (the project's sparse method: videos get reconstruct), resume refine, export;
+- register more photos;
+- the SfM mesh, all or each step (build, patch holes, colour);
+- set up tiles, train / resume splat;
+- semantic features;
+- Difix: suggest target views (job stage `difix-suggest`) and refine the splat;
+- the splat mesh (build, patch holes);
+- COLMAP dense.
+
+An entry now also keeps the Sparse tab's Images used and Register more photos selections (`app.PANEL_SETTINGS`, by
+dotted names: `subset.g_level`, `register.sel.g_mode`, ...). Before, they came from whatever the panels showed when
+the entry ran. The full pipeline keeps the Images used choice across its extraction (the panel's refresh used to reset
+it to the defaults).

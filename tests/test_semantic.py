@@ -205,3 +205,45 @@ def test_text_model_unloads_for_jobs_and_loads_on_typing(monkeypatch):
     assert panel.encoder.proc is None and "unloaded for splat" in panel.g_text_md.content
     panel._query_typed(None)
     assert started == [1]
+
+
+def test_octree_search_is_exact_above_the_floor(tmp_path):
+    """semantic_tree: built over clustered features in space, every Gaussian at or above the floor is found with
+    the full scan's relevance, far fewer are scored, and the tree is saved and reloaded until features.npz
+    changes."""
+    from modelforge import semantic_tree
+    rng = np.random.default_rng(3)
+    n, D, dims = 30000, 48, 12
+    centres = rng.normal(size=(12, D))
+    lab = rng.integers(0, 12, n)
+    full = centres[lab] + 0.15 * rng.normal(size=(n, D))
+    means = rng.uniform(-50, 50, (12, 3))[lab] + rng.normal(size=(n, 3)) * 4  # each kind in its own place
+    mean = full.mean(0)
+    _, _, vt = np.linalg.svd(full - mean, full_matrices=False)
+    basis = vt[:dims].T
+    weight = np.ones(n, np.float32)
+    weight[:50] = 0
+    p = str(tmp_path)
+    os.makedirs(os.path.join(p, semantic.DIR))
+    np.savez(os.path.join(p, semantic.DIR, "features.npz"), feats=((full - mean) @ basis).astype(np.float16),
+             weight=weight, pca_mean=mean.astype(np.float32), pca_basis=basis.astype(np.float32),
+             explained=np.float32(0.9))
+    f = semantic.Features(p)
+    lines = []
+    tree = semantic_tree.load_or_build(p, f, means, on_line=lines.append)
+    assert lines and len(tree.level) > 1 and tree.nchild[0] > 0
+    assert sorted(tree.order) == list(np.flatnonzero(f.seen))  # every seen Gaussian in exactly one leaf
+    unit = lambda v: v / np.linalg.norm(v)  # noqa: E731
+    negs = np.stack([unit(full.mean(0) + rng.normal(size=D)) for _ in range(4)])
+    for k in range(4):
+        q = unit(centres[k] + 0.3 * rng.normal(size=D))
+        exact = f.relevance(q, negs)
+        for floor in (0.55, 0.6):
+            rel, st = tree.relevance(f, q, negs, floor)
+            m = exact >= floor
+            assert m.any() and np.allclose(rel[m], exact[m], atol=1e-5) and np.all(rel[~m] <= exact[~m] + 1e-6)
+            assert st["scored"] < 0.5 * st["seen"]
+    again = semantic_tree.load_or_build(p, f, means, on_line=lines.append)
+    assert len(lines) == 1 and np.array_equal(again.order, tree.order)  # loaded, not built
+    os.utime(os.path.join(p, semantic.DIR, "features.npz"), (1, 1))
+    assert semantic_tree.Tree.load(p, semantic_tree._key(p, n), f) is None  # new features: stale

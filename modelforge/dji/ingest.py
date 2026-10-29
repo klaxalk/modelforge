@@ -49,6 +49,7 @@ OUTPUTS = ("images", "poses.json", "poses.csv", "features.db", "database.db", "d
            "export", "images_*", "transforms_x*.json", "splatmesh", "sfmmesh", "tiles",  # images_N: downscaled frames for splat training
            "extracted",  # all extracted frames while a subset is in use (projects.apply_subsample)
            "analysis",  # their overlap analysis (sfm/overlap.py)
+           "features_learned", "pairs_covis.json",  # learned features / matches (sfm/learned.py), covisible pairs
            "sky")  # sky masks of the photos (sky.py)
 VIDEO_EXTS = (".mp4", ".mov")
 
@@ -125,7 +126,10 @@ def find_videos(root):
 
 # --- one analysed video ---------------------------------------------------------
 
-NO_YAW_AXIS = ("neo",)  # model names (lower case) whose gimbal cannot yaw
+# model names (lower case) whose camera heading is the aircraft yaw: the NEO's gimbal cannot yaw; the Mavic 3's
+# follows the aircraft and reports yaw in a reference that shifts per flight (-4.6 to -49 deg off the aircraft yaw
+# on 21 clips, while the aircraft yaw matched the course within ~1 deg in straight flight)
+NO_YAW_AXIS = ("neo", "mavic3", "mavic 3")
 YAWING_GIMBAL = ("mavic4", "mavic 4")  # model names whose gimbal yaw is the camera's true heading
 
 
@@ -179,7 +183,8 @@ class Clip:
     def yaw_source(self, setting="auto"):
         """The camera heading source for this clip, "aircraft" or "gimbal". "auto" decides by the model
         whether the gimbal can yaw (its yaw is then the camera's own heading): the NEO / NEO2 gimbal has
-        no yaw axis and reports yaw in an offset reference (aircraft yaw - 36.5 deg), the Mavic 4's gimbal
+        no yaw axis and reports yaw in an offset reference (aircraft yaw - 36.5 deg), the Mavic 3's reference
+        shifts per flight (so the 20 deg rule below would pick it on some flights), the Mavic 4's gimbal
         turns 360 deg. Unknown models: the gimbal unless its yaw sits over 20 deg from the aircraft yaw
         for the whole clip (an offset reference). The data alone cannot tell: on the Mavic 4 clips the
         difference was 1.4-5.1 deg with the same ~1 deg spread as the NEO2's offset."""
@@ -483,6 +488,38 @@ def preview(plan, yaw_source="auto", step=3, origin=None):
         out.append({"track": track, "track_valid": sp.valid[idx], "samples": samples,
                     "sample_frames": centers, "track_frames": idx})
     return {"origin": origin, "sources": out}
+
+
+def sources_in_area(sources, settings, polygon, origin, by="look-at", min_s=5.0, gap_s=3.0, step=3):
+    """Sources for the parts of the flights that look into a polygon (ENU x / y; the map's rectangle, the user
+    asked, 2026-10-27): per video of `sources` (all of its clip, not only the current ranges), the frames whose
+    look-at point (the optical axis on the ground at the flight's takeoff height; by="position": the drone itself)
+    lies inside, as time stretches (gaps < gap_s joined, stretches < min_s dropped), one Source per stretch keeping
+    the video's lead, SRT and altitude offset. Videos with no stretch inside are left out. Returns (sources,
+    {video: [(t0, t1)]})."""
+    from modelforge import map2d
+    out, found, seen = [], {}, set()
+    for src in sources:
+        if src.video in seen:
+            continue
+        seen.add(src.video)
+        c = load_clip(src.video, src.lead, src.srt)
+        tel = c.telemetry(settings.yaw_source)
+        k = np.flatnonzero(tel["valid"])[::step]
+        if not len(k):
+            continue
+        a = tel["a"][k]
+        C = enu(a[:, 0], a[:, 1], a[:, 2] + float(src.alt_offset or 0.0), origin)
+        xy = C[:, :2]
+        if by == "look-at":
+            axis = ex.optical_axis_enu(tel["yaw"][k], tel["pitch"][k])
+            xy = xy + look_at_depth({"a": a, "pitch": tel["pitch"][k]})[:, None] * axis[:, :2]
+        pieces = map2d.runs(map2d.inside_polygon(xy, polygon), c.pts[k], min_s, gap_s)
+        if pieces:
+            found[src.video] = pieces
+            out += [Source(src.video, round(t0, 2), round(t1, 2), True, src.lead, src.srt, src.alt_offset)
+                    for t0, t1 in pieces]
+    return out, found
 
 
 # --- extraction --------------------------------------------------------------------
