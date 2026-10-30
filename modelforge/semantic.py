@@ -269,15 +269,18 @@ class Features:
 
 
 def search_mesh(project):
-    """(path, voxel m) of the mesh that prunes search results: the mesh from the splat (its TSDF voxel), else
+    """(path, voxel m) of the mesh that prunes search results, the most accurate first: the LiDAR mesh (its TSDF
+    voxel; measured, so it beats any mesh from the photos), the mesh from the splat (its TSDF voxel), the SfM mesh,
     COLMAP's Delaunay / Poisson mesh (voxel = median edge length); None without a mesh."""
-    sm = os.path.join(project, "splatmesh", "mesh.ply")
-    if os.path.exists(sm):
-        try:
-            voxel = float(json.load(open(os.path.join(project, "splatmesh", "stats.json")))["voxel_m"])
-        except (OSError, ValueError, KeyError):
-            voxel = None
-        return sm, voxel or _edge_length(sm)
+    for sub, stats, key in (("lidarmesh", "stats.json", "voxel"), ("splatmesh", "stats.json", "voxel_m"),
+                            ("sfmmesh", None, None)):
+        p = os.path.join(project, sub, "mesh.ply")
+        if os.path.exists(p):
+            try:
+                voxel = float(json.load(open(os.path.join(project, sub, stats)))[key]) if stats else None
+            except (OSError, ValueError, KeyError, TypeError):
+                voxel = None
+            return p, voxel or _edge_length(p)
     for m in ("delaunay", "poisson"):
         p = os.path.join(project, "dense", f"meshed-{m}.ply")
         if os.path.exists(p):

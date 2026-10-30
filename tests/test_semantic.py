@@ -3,6 +3,7 @@ staleness, and the View tab panel (synthetic features; the C-RADIOv3 run needs t
 
 import json
 import os
+import shutil
 
 import numpy as np
 
@@ -139,6 +140,11 @@ def test_surface_distance_and_near_mesh_filter(tmp_path):
     sv["x"], sv["y"], sv["z"] = [5, 5, 5, 5], [5, 5, 5, 5], [0.0, 0.5, 2.0, 30.0]  # on, near, off, a floater
     plyfile.PlyData([plyfile.PlyElement.describe(sv, "vertex")]).write(os.path.join(p, "splat", "splat_enu.ply"))
     assert semantic.search_mesh(p)[1] == 0.25
+    os.makedirs(os.path.join(p, "lidarmesh"))  # a LiDAR mesh comes first
+    shutil.copy(os.path.join(p, "splatmesh", "mesh.ply"), os.path.join(p, "lidarmesh", "mesh.ply"))
+    json.dump({"voxel": 0.02}, open(os.path.join(p, "lidarmesh", "stats.json"), "w"))
+    assert semantic.search_mesh(p) == (os.path.join(p, "lidarmesh", "mesh.ply"), 0.02)
+    shutil.rmtree(os.path.join(p, "lidarmesh"))
     means = np.c_[sv["x"], sv["y"], sv["z"]]
     srf = semantic.Surface(p, means)
     d = srf.distance(np.array([True, True, False, False]))  # only what is asked for

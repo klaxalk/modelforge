@@ -68,12 +68,12 @@ class SemanticPanel:
                      "is probably not in the scene. Move the slider afterwards to adjust.")
             self.g_near = gui.add_checkbox(
                 "Near the mesh only", initial_value=True,
-                hint="Ignore matching Gaussians farther than the tolerance from the mesh (the mesh from the splat, "
-                     "else COLMAP's): floaters, haze and stray specks drop out, objects come out cleaner. Untick "
+                hint="Ignore matching Gaussians farther than the tolerance from the mesh (the LiDAR mesh, else the "
+                     "mesh from the splat, the SfM mesh, COLMAP's): floaters, haze and stray specks drop out, objects come out cleaner. Untick "
                      "for things the mesh misses (distant terrain beyond its range, wires, glossy surfaces).")
             self.g_tol = gui.add_number("Mesh tolerance (voxels)", initial_value=3.0, min=0.5, step=0.5,
                                         hint="How far from the mesh a match may be, in the mesh's voxels (the "
-                                             "splat mesh's TSDF voxel, e.g. 11 cm).")
+                                             "LiDAR / splat mesh's TSDF voxel, e.g. 2 / 11 cm).")
             self.g_mode = gui.add_dropdown("Show", options=MODES, initial_value=MODES[0],
                                            hint="highlight in red: the whole splat, matches tinted by relevance. "
                                                 "matches only: hide everything else.")

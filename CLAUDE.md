@@ -2058,7 +2058,7 @@ fine detail, a sidecar so the normal splat export stays unchanged):
     k ≈ 12.
 - **Near the mesh only** (default on, tolerance 3 mesh voxels; the user asked to prune with the mesh):
   matches whose centre is farther than the tolerance from the mesh count as 0 for the highlight, the counts
-  and the objects. `semantic.search_mesh`: the splat mesh (its TSDF voxel) else COLMAP's Delaunay / Poisson
+  and the objects. `semantic.search_mesh`: the LiDAR mesh (its TSDF voxel; first since 2026-10-30), else the splat mesh (its TSDF voxel), the SfM mesh, COLMAP's Delaunay / Poisson
   (median edge length); `Surface`: nearest mesh vertex per Gaussian (OpenCV FLANN, approximate), **measured
   only for the matches** (relevance ≥ min(threshold, the auto floor 0.55)) and remembered while the mesh and the
   splat stay the same; the k-d tree is built in the background when a project opens (~15 s at 12M vertices).
