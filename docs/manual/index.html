@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ModelForge Manual</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 9.5v13L16 29 4 22.5v-13z' fill='%23f28c28'/%3E%3Cpath d='M16 16 28 9.5M16 16v13M16 16 4 9.5' stroke='%23fff' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #fbfaf8; --panel: #f2f0ec; --text: #23211e; --muted: #6b665e; --line: #dedad3;
+  --accent: #c9620f; --accent-soft: #fbe9d8; --code: #efece6; --ok: #2f7d4f; --warn: #a3520a;
+  --sidebar-w: 270px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17171a; --panel: #1f1f23; --text: #e6e3de; --muted: #9a958d; --line: #33333a;
+    --accent: #f29a4a; --accent-soft: #3a2a1c; --code: #26262b; --ok: #6cc28f; --warn: #f0a35c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17171a; --panel: #1f1f23; --text: #e6e3de; --muted: #9a958d; --line: #33333a;
+  --accent: #f29a4a; --accent-soft: #3a2a1c; --code: #26262b; --ok: #6cc28f; --warn: #f0a35c;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 16px; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15.5px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.88em; }
+code { background: var(--code); padding: 0.1em 0.35em; border-radius: 4px; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.35em; background: var(--panel); }
+pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+pre code { background: none; padding: 0; }
+
+nav#toc { position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-w); overflow-y: auto;
+  background: var(--panel); border-right: 1px solid var(--line); padding: 18px 14px 40px; }
+nav#toc .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.1em; margin-bottom: 12px; }
+nav#toc .brand svg { width: 26px; height: 26px; }
+nav#toc input { width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font: inherit; font-size: 0.92em; margin-bottom: 10px; }
+nav#toc ol { list-style: none; padding: 0; margin: 0; }
+nav#toc li a { display: block; padding: 3px 8px; border-radius: 5px; color: var(--text); font-size: 0.93em; }
+nav#toc li a:hover { background: var(--accent-soft); text-decoration: none; }
+nav#toc li a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav#toc li li a { padding-left: 22px; color: var(--muted); font-size: 0.87em; }
+nav#toc .theme { margin-top: 16px; font-size: 0.85em; color: var(--muted); }
+nav#toc .theme button { font: inherit; background: none; border: 1px solid var(--line); color: var(--text);
+  border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+
+main { margin-left: var(--sidebar-w); max-width: 940px; padding: 28px 44px 120px; }
+h1 { font-size: 2em; margin: 0 0 4px; }
+h2 { font-size: 1.45em; margin: 2.4em 0 0.5em; padding-top: 0.6em; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12em; margin: 1.7em 0 0.4em; }
+h4 { font-size: 1em; margin: 1.3em 0 0.3em; color: var(--muted); }
+.lead { color: var(--muted); font-size: 1.05em; margin-top: 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.8em 0 1.2em; font-size: 0.92em; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+th { background: var(--panel); }
+.note, .tip, .warn { border-left: 4px solid; border-radius: 6px; padding: 9px 13px; margin: 1em 0; background: var(--panel); }
+.note { border-color: var(--accent); }
+.tip { border-color: var(--ok); }
+.warn { border-color: var(--warn); }
+.note b:first-child, .tip b:first-child, .warn b:first-child { margin-right: 4px; }
+.flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 1em 0; }
+.flow span { background: var(--accent-soft); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; font-size: 0.9em; }
+.flow i { color: var(--muted); font-style: normal; }
+.layout { display: grid; grid-template-columns: 1fr 2.2fr 1fr; grid-template-rows: auto 1fr auto; gap: 6px;
+  margin: 1em 0; font-size: 0.85em; min-height: 230px; }
+.layout div { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); }
+.layout .l { grid-row: 1 / 4; } .layout .r { grid-row: 1 / 4; grid-column: 3; }
+.layout .q { grid-column: 2; } .layout .v { grid-column: 2; background: var(--bg); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; } .layout .b { grid-column: 2; }
+.hidden { display: none !important; }
+footer { margin-top: 4em; color: var(--muted); font-size: 0.85em; }
+
+@media (max-width: 860px) {
+  nav#toc { position: static; width: auto; border-right: none; border-bottom: 1px solid var(--line); max-height: 45vh; }
+  main { margin-left: 0; padding: 18px 16px 80px; }
+  .layout { grid-template-columns: 1fr; } .layout .l, .layout .r, .layout .q, .layout .v, .layout .b { grid-row: auto; grid-column: auto; }
+}
+</style>
+</head>
+<body>
+<nav id="toc">
+  <div class="brand">
+    <svg viewBox="0 0 32 32"><path d="M16 3 28 9.5v13L16 29 4 22.5v-13z" fill="#f28c28"/><path d="M16 16 28 9.5M16 16v13M16 16 4 9.5" stroke="#fff" stroke-width="1.5" fill="none"/></svg>
+    ModelForge
+  </div>
+  <input id="filter" type="search" placeholder="Filter sections…" aria-label="Filter sections">
+  <ol id="toc-list"></ol>
+  <div class="theme">Theme: <button id="theme-btn" type="button">auto</button></div>
+</nav>
+
+<main>
+<h1>ModelForge manual</h1>
+<p class="lead">From drone footage to an aligned point cloud, mesh and Gaussian splat, in one web GUI.</p>
+
+<section id="overview">
+<h2>Overview</h2>
+<p>ModelForge turns drone video (DJI, with its flight metadata), plain video (phone, action camera) and ROS bags into
+3D models. Unlike the usual <em>video → frames → COLMAP → nerfstudio</em> chain, it keeps the flight metadata DJI
+drones record: every photo starts at its GPS / attitude pose, and the bundle adjustment refines it with
+self-calibrating pose priors. The results live in one local metric frame (ENU: east, north, up, in metres), so the
+point cloud, meshes, splat and cameras line up with each other and with the map.</p>
+
+<div class="flow">
+  <span>Videos / bags</span><i>→</i><span>Ingest (photos + priors)</span><i>→</i><span>Sparse (SfM)</span><i>→</i>
+  <span>Sparse mesh</span><i>→</i><span>Gaussian splat</span><i>→</i><span>Search · Splat mesh · Export</span>
+</div>
+
+<h3>What you get</h3>
+<table>
+<tr><th>Product</th><th>Where</th><th>What it is</th></tr>
+<tr><td>Refined cameras + sparse points</td><td><code>sparse/</code>, <code>transforms.json</code>, <code>sparse_pc.ply</code></td><td>The SfM model and a nerfstudio dataset in ENU.</td></tr>
+<tr><td>SfM mesh</td><td><code>sfmmesh/</code></td><td>A Poisson (or Delaunay) surface over the sparse points, optionally coloured from the photos. Also the depth prior for the splat.</td></tr>
+<tr><td>Gaussian splat</td><td><code>splat/splat_enu.ply</code></td><td>Trained with nerfstudio's splatfacto (with modelforge's plugin), in tiles for large flights.</td></tr>
+<tr><td>Splat mesh</td><td><code>splatmesh/</code></td><td>A TSDF mesh fused from depth rendered from the splat.</td></tr>
+<tr><td>Dense mesh (optional)</td><td><code>dense/</code></td><td>COLMAP multi-view stereo, Delaunay / Poisson mesh, texture.</td></tr>
+<tr><td>Exports</td><td><code>export/</code></td><td>Meshes as glb / obj / ply, splats as ply / .splat, an orthophoto GeoTIFF, <code>georef.json</code>.</td></tr>
+</table>
+</section>
+
+<section id="start">
+<h2>Getting started</h2>
+<h3>Start the GUI</h3>
+<p>Everything runs in the Docker dev container (with a GPU: the CUDA image). From the repository root:</p>
+<pre><code>MODELFORGE_GPU=1 scripts/dev python -m modelforge.gui.app [PROJECT] --root data --port 8080</code></pre>
+<p>Then open <a href="/">http://localhost:8080</a>. Without <code>PROJECT</code> the GUI reopens the project you had
+open last. <code>--run STAGE,STAGE</code> starts those stages at once as one job.</p>
+<div class="tip"><b>Tip.</b> After the GUI was restarted (or updated), hard-reload the page with
+<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>: the browser otherwise keeps the old page code.</div>
+
+<h3>The screen</h3>
+<div class="layout">
+  <div class="l"><b>Left panel</b><br>Projects · Videos · Ingest · View · Views · Search · Rig · Inspect · Tie points · Export · Settings</div>
+  <div class="q"><b>Quick bar</b> (top of the 3D view): Splat, Mesh, Dense, Points, Cams, Thumbs, Resid, Traj, Plan, Tiles, Orbit, Center, Fly, Map</div>
+  <div class="v">3D view</div>
+  <div class="b"><b>Log / Hardware</b> window (bottom, starts minimized) · <b>Photo</b> window (folded)</div>
+  <div class="r"><b>Right panel</b><br>run state + progress<br>Run full pipeline · Stop<br>Sparse · Sparse Mesh · Splat · Difix · Splat mesh · Dense<br>Queue · History</div>
+</div>
+<ul>
+<li><b>Left panel:</b> everything about data, viewing and exporting.</li>
+<li><b>Right panel:</b> runs the methods. The run state above the tabs stays visible on every tab: the stage, its
+progress and a detail line, then ✅ finished / ❌ failed / ⏹ stopped. <b>History</b> lists the finished stages with
+their key numbers.</li>
+<li><b>Quick bar:</b> one-click toggles for the View tab's layers and the camera modes.</li>
+<li><b>Log / Hardware:</b> the last 200 log lines (newest first), and live CPU, RAM, GPU load and memory.</li>
+<li>Every control has a hover hint: rest the mouse on it for an explanation.</li>
+<li>The browser tab's title shows the running job and its percentage (a green dot on the icon; red after a failure),
+and a browser notification tells you when a queue entry ends.</li>
+</ul>
+
+<h3>Navigating the 3D view</h3>
+<table>
+<tr><th>Action</th><th>How</th></tr>
+<tr><td>Orbit / pan / zoom</td><td>Left drag / right drag / wheel (around a pivot point)</td></tr>
+<tr><td>Set the pivot</td><td><kbd>Ctrl</kbd> + click on the scene (a yellow ball shows it for 2 s)</td></tr>
+<tr><td>Move</td><td><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>, <kbd>R</kbd> / <kbd>F</kbd> up / down, arrows turn. Speed: View → Move speed</td></tr>
+<tr><td>Frame everything</td><td>Quick bar <b>⌖ Center</b></td></tr>
+<tr><td>Turn around the scene</td><td>Quick bar <b>Orbit</b> (speed in View → Orbit); you can still zoom and drag meanwhile</td></tr>
+<tr><td>Fly the camera path</td><td>Quick bar <b>Fly</b> (View → Fly: speed, loop, the camera's field of view, Position slider). Dragging pauses the flight for you.</td></tr>
+<tr><td>Saved views</td><td>Left panel → <b>Views</b>: save, glide back, rename, delete</td></tr>
+</table>
+</section>
+
+<section id="workflow">
+<h2>A first project, step by step</h2>
+<ol>
+<li><b>Upload the videos</b> (left → Videos → <b>＋ Upload</b>, or copy them under <code>data/videos/</code>). DJI clips
+need no SRT file; it helps if present.</li>
+<li><b>Create a project</b> (left → Projects → Create; pick its <b>Kind</b>: DJI, video or ROS bag).</li>
+<li><b>Add sources</b> (left → Ingest): pick a clip and <b>Add as source</b>, or a Folder and <b>Add all in folder</b>.
+Trim each source's time range with its slider; check the plan in 3D.</li>
+<li><b>Press Run full pipeline</b> (right panel). It extracts the photos, picks the photos to use (keyframes),
+runs SfM, the SfM mesh, the splat, the semantic features and colours the mesh. Watch the progress above the
+tabs.</li>
+<li><b>Look at the result</b>: the quick bar's <b>Splat</b>, <b>Mesh</b>, <b>Cams</b>; <b>Fly</b> along the path.</li>
+<li><b>Export</b> (left → Export): mesh and splat files to <code>export/</code> or straight to your browser.</li>
+</ol>
+<div class="note"><b>Long runs.</b> Large flights take hours (SfM) to days (splats of tens of thousands of photos).
+Put stages in the <a href="#queue">Queue</a>, and check the memory estimate the GUI shows before heavy stages.</div>
+</section>
+
+<section id="projects">
+<h2>Projects and data</h2>
+<h3>Projects tab</h3>
+<p>Lists the project folders under the data root (any folder with <code>ingest.json</code> or <code>poses.json</code>).
+<b>Open</b> switches the whole GUI to a project; <b>Create</b> makes a new one (optionally copying the open project's
+sources); <b>Rename</b> and <b>Delete</b> (with a confirmation) act on the selected folder. The status shows sources,
+photo count, stages done and the size of final vs. intermediate files. <b>Clean intermediates</b> deletes databases,
+depth maps, training runs and <code>previous/</code>, keeping photos, sources and final results.</p>
+
+<h3>Project kinds</h3>
+<table>
+<tr><th></th><th>DJI</th><th>Video</th><th>ROS bag</th></tr>
+<tr><td>Input</td><td>DJI MP4 (+ optional SRT)</td><td>Any video, no metadata</td><td>ROS 1 <code>.bag</code> / ROS 2 (sqlite3, MCAP)</td></tr>
+<tr><td>Pose priors</td><td>GPS + attitude from the video's metadata track</td><td>None</td><td>TF or odometry (or none)</td></tr>
+<tr><td>Photo spacing</td><td>Distance + rotation</td><td>Optical-flow motion</td><td>Distance + rotation, or motion</td></tr>
+<tr><td>Sparse method</td><td>Prior-guided refinement</td><td>Incremental / global / hierarchical SfM</td><td>Refinement (with poses) or SfM</td></tr>
+<tr><td>World frame</td><td>ENU, metres</td><td>Up-oriented, arbitrary scale</td><td>The bag's world frame</td></tr>
+</table>
+<h3 id="drones">Supported drones and metadata</h3>
+<p>For DJI projects the pose priors come from the <b>djmd</b> metadata track inside the MP4 (one record per frame:
+camera, aircraft at 10 Hz, gimbal at 10 Hz). The <code>.SRT</code> sidecar is optional: it only gives the telemetry
+lead and the start time more precisely.</p>
+<table>
+<tr><th>Model (as the clip names it)</th><th>Status</th><th>Camera heading from</th><th>Notes</th></tr>
+<tr><td>DJI NEO2 (<code>DJI NEO2</code>)</td><td>Supported, the reference model</td><td>Aircraft yaw (the gimbal has no yaw axis)</td><td>Decoder reverse engineered on it; SRT lead 21.6 frames</td></tr>
+<tr><td>DJI Mavic 4 Pro (<code>DJI Mavic4 Pro L3A</code>)</td><td>Supported</td><td>Gimbal yaw (360° gimbal, true heading)</td><td>Other record layout; ISO / shutter / f-number in other fields; lead by optical flow without SRT</td></tr>
+<tr><td>DJI Mavic 3 (<code>DJIMavic3</code>)</td><td>Supported</td><td>Aircraft yaw (its gimbal yaw reference shifts per flight)</td><td>Latitude / longitude stored in radians (detected per clip and converted); camera record without a header. Checked against its SRT: 2–3 cm median</td></tr>
+<tr><td>Other DJI models</td><td>Tried, not verified</td><td>Gimbal yaw, unless it is over 20° off the aircraft yaw</td><td>Records are found by their type, so similar layouts may work; check the priors in the Ingest 3D plan</td></tr>
+</table>
+<p>What is read per frame: position (latitude, longitude), altitude above take-off (barometer-fused <code>rel_alt</code>)
+and the take-off altitude, velocity (NED), aircraft and gimbal attitude, and the camera settings (ISO, exact shutter,
+f-number) used for the exposure correction. The aircraft and gimbal data lead the images by ~0.7 s; the lead is
+estimated per clip (SRT, else optical flow, else a default) and removed.</p>
+<p>Not supported: clips that zoom during recording (refused). Other sources: plain videos (project kind
+<b>video</b>, no metadata) and ROS 1 / ROS 2 bags (kind <b>ROS bag</b>, poses from TF or odometry). A project may mix
+drones / cameras; each camera gets its own intrinsics.</p>
+
+<h3>Videos tab (the library)</h3>
+<p>A file manager over <code>data/videos/</code>: folders, <b>＋ Upload</b> (streaming and resumable: pick the same file
+again after a dropped connection or reload), clip details (length, resolution, recording time, SRT, which projects use
+it), add to the open project, download, rename, move, delete. Renaming or moving a clip keeps the projects using it
+pointing at it. ROS bags (an <code>.mcap</code>, a <code>.bag</code> or a bag folder uploaded as a zip) are listed
+too.</p>
+
+<h3>What a project folder holds</h3>
+<table>
+<tr><th>Path</th><th>Content</th></tr>
+<tr><td><code>ingest.json</code></td><td>The editable plan: sources and sampling settings</td></tr>
+<tr><td><code>extracted/</code>, <code>images/</code>, <code>poses.json</code></td><td>All extracted photos (the pool) / the photos in use, and their priors</td></tr>
+<tr><td><code>features.db</code>, <code>database.db</code>, <code>pairs.txt</code></td><td>Features and matches (COLMAP databases)</td></tr>
+<tr><td><code>sparse/</code></td><td>Refinement snapshots and the refined model</td></tr>
+<tr><td><code>transforms.json</code>, <code>sparse_pc.ply</code></td><td>The nerfstudio dataset</td></tr>
+<tr><td><code>sfmmesh/</code>, <code>splat/</code>, <code>tiles/</code>, <code>splatmesh/</code>, <code>dense/</code></td><td>Products of each stage</td></tr>
+<tr><td><code>export/</code></td><td>Final exported files</td></tr>
+<tr><td><code>report.json</code></td><td>Numbers of every stage (shown in History)</td></tr>
+<tr><td><code>previous/</code></td><td>Results moved aside by a re-extraction or a new choice of photos: never deleted silently</td></tr>
+</table>
+</section>
+
+<section id="ingest">
+<h2>Ingest: from video to photos</h2>
+<p>The Ingest tab turns sources into photos with pose priors. Every edit is saved to <code>ingest.json</code>.</p>
+<h3>Sources</h3>
+<ul>
+<li>A <b>source</b> is a video (or bag) plus a time range. The same video may appear several times (<b>Add piece</b>).</li>
+<li>Each source has a range slider, Enabled, a telemetry lead override and an <b>Altitude offset</b> (auto or metres).</li>
+<li><b>Folder</b> narrows the clip list; <b>Add all in folder</b> adds every clip of that folder.</li>
+<li>Sources are ordered by recording time. The first one sets the origin of the local frame.</li>
+<li><b>Frame preview</b>: scrub through a source; <b>Start here</b> / <b>End here</b> set its range.</li>
+</ul>
+<h3>Sampling</h3>
+<ul>
+<li><b>Number of photos</b> (default 300) over all sources, or a fixed spacing in metres.</li>
+<li><b>Distance</b> sampling (default) spaces photos by flown distance plus a credit for rotation, so turns get photos
+too; <b>time</b> sampling spaces them evenly in time. Each photo is the sharpest frame in its window.</li>
+<li>Yaw source <b>auto</b> picks aircraft or gimbal yaw per drone model.</li>
+</ul>
+<h3>Several flights</h3>
+<p>Flights are aligned by their take-off altitudes; an implausible difference is refused with a warning (set it
+by hand per source). <b>Flight alignment → Check flight alignment</b> measures the height offsets between flights from
+a small set of shared photos; Run full pipeline runs it for multi-flight DJI projects.</p>
+<h3>Extract</h3>
+<p><b>Extract</b> writes the photos and <code>poses.json</code>. Re-extracting needs <b>Overwrite</b>; the old photos and
+everything derived from them move to <code>previous/</code>.</p>
+<h3>ROS bags</h3>
+<p>The <b>ROS bag</b> folder sets the image topic (compressed or raw), camera_info, the pose source (TF world frame,
+odometry, or none), an optional mount rotation (<b>Extrinsic RPY</b>) and the point-cloud topics. LiDAR scans are
+merged into <code>lidar/cloud.ply</code> and used by dense and the splat (depth supervision).</p>
+<div class="tip"><b>Mount check.</b> A camera mounted 90° / 180° off shows as many good matches but almost no 3D
+points and a runaway focal length. The refine's History line then says the priors do not fit the images: try a yaw of
+180 in Extrinsic RPY.</div>
+</section>
+
+<section id="sparse">
+<h2>Sparse: structure from motion</h2>
+<p><b>Run SfM (all)</b> runs features → pairs → match → refine → export → register more photos. Each stage also has
+its own button. The refinement is live: cameras move in the 3D view as bundle adjustment runs.</p>
+
+<h3>Images used</h3>
+<p>Extract once, then run on a subset. <b>Selection</b>:</p>
+<ul>
+<li><b>keyframes</b> (default): an overlap analysis of all extracted photos picks a photo whenever the overlap with
+the last one drops to the chosen <b>Keyframe density</b> (extra dense / dense / normal / sparse).</li>
+<li><b>every N-th image</b>, with a start offset and a time range.</li>
+</ul>
+<p>Applying a new selection moves the old results to <code>previous/</code>. Run full pipeline picks keyframes only the
+first time; later it keeps the photos in use.</p>
+
+<h3>Features and matching</h3>
+<ul>
+<li><b>Extractor auto</b> (default): SIFT for a single pass; <b>ALIKED + LightGlue</b> with the <b>RoMa</b> dense
+matcher when the flight revisits ground from other passes or other flights (different heights, directions, days).
+The choice is shown in History.</li>
+<li>Pairs come from time neighbours plus photos looking at the same spot (from the priors, later from the terrain of
+an earlier model) and <b>Pairs between passes</b> that see the same surface in an earlier model.</li>
+<li>RoMa's matches are checked against the earlier model (they must land within 10 m), because over flat ground they
+can "match" photos hundreds of metres apart.</li>
+</ul>
+
+<h3>Refinement (DJI and ROS bags with poses)</h3>
+<p>Every photo starts at its prior pose. Rounds of triangulation and bundle adjustment follow, with 6-DoF absolute
+and relative prior terms whose uncertainties are calibrated from the data. Along the way it estimates:</p>
+<ul>
+<li>the camera's mounting (boresight) and the telemetry time offset;</li>
+<li>a position offset per flight;</li>
+<li>slow position drift within a flight, so revisits merge instead of forming offset copies;</li>
+<li>outlier priors, which are rejected.</li>
+</ul>
+<table>
+<tr><th>Control</th><th>Meaning</th></tr>
+<tr><td>BA mode <b>auto</b> / global / chunked</td><td>Global if the estimated memory fits, else chunks of photos joined by a pose graph with loop closures and flight heights</td></tr>
+<tr><td>BA iterations (500)</td><td>A cap per round; BA normally stops earlier when the cameras settle</td></tr>
+<tr><td><b>Skip this BA round</b> / <b>Skip refinement</b></td><td>End the running BA (or all remaining rounds) with the current state, without failing</td></tr>
+<tr><td><b>Resume refine</b></td><td>Continue a stopped refine from its last checkpoint</td></tr>
+<tr><td>Export: leave out isolated photos</td><td>Drops photos whose ground lies in an offset copy no other pass ties in</td></tr>
+</table>
+<h3>Heights between flights</h3>
+<p>GPS positions of different flights agree to about a metre, but their barometric heights can be metres apart, and
+an unaligned flight leaves a second copy of the ground above or below the first. Heights are aligned in four
+places, each from shared image content (there is no ICP of point clouds):</p>
+<ol>
+<li><b>Ingest:</b> every flight is lifted by the difference of its take-off altitude to the first flight's
+(refused when implausible; per source by hand: Altitude offset).</li>
+<li><b>Flight alignment → Check flight alignment</b> (Ingest tab, and Run full pipeline for multi-flight DJI
+projects): a small SfM over photos of ground several flights saw, solving one <i>vertical-only</i> offset per flight;
+trusted offsets are applied to sources on auto.</li>
+<li><b>Refinement:</b> a position offset per flight from the points seen twice (copies of the same ground), and
+position drift within a flight from revisits, so copies merge.</li>
+<li><b>Chunked refinement: flight heights in the pose graph</b> (on by default). The pose graph lets every flight's
+height move as a whole (a free offset per flight) while consecutive photos keep the barometer's height differences,
+so a flight tied to another by matches on one stretch moves entirely, not only that stretch. The offsets go into the
+flights' priors, so the later bundle adjustments keep them. The log and the state line say "flight heights moved by
+up to … m".</li>
+</ol>
+<div class="tip"><b>Example: berlin_all</b> (21 Mavic 3 clips + 4 NEO2 clips over several days). Barometric heights
+were 5–10 m apart between days. Once the learned matching linked the flights, only the linked stretches were pulled
+to the other flight's height: refined camera heights jumped 6–7 m between consecutive photos, and buildings appeared
+stacked twice. With flight heights in the pose graph, flights DJI_0455–0458 moved down by 9.5–10.7 m as a whole,
+height jumps over 3 m between consecutive photos fell from 34 to 3, the passes now agree to 5 cm (median), and side
+views show a single roof and a single ground.</div>
+<p>To check a model: View → <b>Pose graph</b> with Edges "between passes" shows which flights are tied together; a
+building seen twice at different heights means a flight that is not.</p>
+<div class="note"><b>Not yet.</b> Flights that no image links tie to the others keep their barometric height. Aligning
+them to a terrain model (a national LiDAR elevation model) is planned.</div>
+
+<p>Video-kind projects (and bags without poses) use <b>Mapper</b> incremental / global / hierarchical instead.</p>
+
+<h3>Register more photos</h3>
+<p>Adds more extracted photos to a finished model by locating each against it (the model itself stays fixed), for a
+denser splat without a new SfM. Choose them like Images used. It is the last step of Run SfM (all).</p>
+
+<h3>Exclude photos (splat and after)</h3>
+<p>Leave out a photo (the one selected in Inspect) or a time range, then <b>Apply: export again</b>. The SfM model keeps
+them; the splat and meshes do not see them. Undo last / Include all.</p>
+
+<h3>Tie points</h3>
+<p>When two flights or passes do not join, click the same spot in photos of each (left → <b>Tie points</b>, the Photo
+window's Tie point tab: <kbd>Ctrl</kbd> + click the spot, open the photos that see it, click to record), then refine
+again. Two or more clicks per flight / pass.</p>
+</section>
+
+<section id="sparsemesh">
+<h2>Sparse Mesh</h2>
+<p>A surface over the SfM points, quick to build and used as a <b>depth prior</b> and as starting Gaussians for the
+splat.</p>
+<ul>
+<li><b>Run all</b>: build → patch holes → colour.</li>
+<li><b>Build mesh</b>: Poisson (default; closed, then trimmed away from the points) or Delaunay (visibility-based).</li>
+<li><b>Patch holes</b> up to <b>Max hole size (m)</b> (starts at the camera spacing).</li>
+<li><b>Colour from the photos</b>: projects every photo onto the mesh with occlusion; live while it runs, kept if
+stopped.</li>
+</ul>
+</section>
+
+<section id="splat">
+<h2>Splat: Gaussian splatting</h2>
+<p><b>Train + export splat</b> trains nerfstudio's splatfacto with modelforge's plugin, exports the splat and maps it
+to ENU. A <b>live preview</b> shows it growing in the 3D view every N steps.</p>
+
+<h3>The training plan</h3>
+<p>The tab works out a plan from the cameras and the GPU and shows why: image count, area, overlap, ground
+resolution, Gaussians needed, steps. Defaults:</p>
+<ul>
+<li><b>Iterations</b> 50,000 (per tile); 0 = automatic (20 per training photo).</li>
+<li><b>Downsample auto</b>: trains at ≤ 2700 px width (×2 for 4K).</li>
+<li><b>Densification</b> default (MCMC only when chosen: it tends to fog).</li>
+<li><b>Image cache auto</b>: GPU, RAM or disk, by what fits.</li>
+<li><b>Camera pose refinement</b> SO3xR3.</li>
+</ul>
+
+<h3>Priors and regularisation (on by default where available)</h3>
+<table>
+<tr><th>Option</th><th>Effect</th></tr>
+<tr><td>Depth prior: SfM mesh, dense (rendered depth)</td><td>The mesh's depth at every training pixel supervises the splat's depth (weight 0.1)</td></tr>
+<tr><td>Start from the SfM mesh too</td><td>Extra flat Gaussians where SfM points are thin</td></tr>
+<tr><td>Flatten Gaussians, No needles</td><td>Discs instead of blobs and spikes</td></tr>
+<tr><td>Sky masks</td><td>Sky pixels leave the colour loss; no Gaussians in the sky</td></tr>
+<tr><td>Exposure from the metadata</td><td>Per-photo brightness from shutter / ISO / aperture, relative to each camera's median</td></tr>
+<tr><td>Camera exposure → Brighten (stops)</td><td>Brighten or darken one camera's photos (e.g. a second drone)</td></tr>
+<tr><td>Sunlight learned per photo</td><td>Experimental: separate ambient and sun per photo</td></tr>
+</table>
+
+<h3>Tiles for large flights</h3>
+<p>Above ~800 photos the scene is split into <b>tiles</b> trained one after another and merged.</p>
+<ul>
+<li><b>Tile layout covisibility</b> (default): regions of photos that see the same things, with seams on flat
+ground; <i>rectangles</i> as the alternative.</li>
+<li><b>Photos per tile</b> (500). Photos join every tile they show a noticeable part of.</li>
+<li><b>Set up tiles</b> shows the cells (View → Tile boundaries). Click a tile's ball to leave it out (grey).</li>
+<li><b>Steps per round</b> (10,000): every tile advances that much per round, so the whole scene appears early and
+improves evenly. The merged splat is updated after each round.</li>
+<li><b>Train tiles</b>: all, or one tile again with the current settings.</li>
+</ul>
+
+<h3>Stop, Pause, Resume</h3>
+<p><b>Stop</b> saves a checkpoint and exports the partial splat (usable and exportable). <b>Pause</b> saves without the
+export. <b>Resume training</b> continues with the stored settings, step and optimiser state. For a queued training
+see <a href="#queue">Queue → Interrupting a long queued training</a>.</p>
+
+<h3>Difix (right panel)</h3>
+<p>Improves the splat from viewpoints away from the flight path: <b>Suggest target views</b> (or your own),
+<b>Refine splat with Difix</b>, <b>Compare before / after</b>, <b>Undo</b>.</p>
+</section>
+
+<section id="splatmesh">
+<h2>Splat mesh and COLMAP dense</h2>
+<h3>Splat mesh</h3>
+<p>A coloured mesh fused (TSDF) from depth rendered from the splat. <b>Quality</b> coarse / medium / fine sets the
+voxel; large scenes are fused in pieces automatically. <b>Patch holes</b> closes gaps up to a size.</p>
+<h3>Dense (COLMAP MVS)</h3>
+<p>Undistort → stereo (CUDA) → fusion → mesh (Delaunay / Poisson) → texture. <b>Quality</b> superfast (default, 320 px)
+to max (full resolution). Not part of Run full pipeline unless its "Include" box is ticked.</p>
+</section>
+
+<section id="view">
+<h2>Viewing and inspecting</h2>
+<h3>View tab</h3>
+<ul>
+<li><b>Snapshot</b>: priors, each refinement round, refined, export.</li>
+<li><b>Layers</b>: points, cameras (coloured by time, source, deviation or error), thumbnails, prior cameras, prior →
+refined lines, trajectories, flight plan, ground grid.</li>
+<li><b>Pose graph</b>: lines between matched photos, coloured by inliers; "between passes" shows how flights are
+tied together.</li>
+<li><b>Dense / splat</b>: splat, mesh (sfm / splat / dense; textured where possible), dense points; <b>Level of
+detail</b> for big splats (a budget of Gaussians around the camera).</li>
+<li><b>Sky box</b>: sunny / cloudy / overcast, the sun where it stood during the flight.</li>
+<li><b>Tile boundaries</b>, <b>Orbit</b>, <b>Fly</b>, <b>Move speed</b>, <b>Carry the pivot forward</b>.</li>
+</ul>
+<h3>Inspect</h3>
+<p>Click a camera to see its photo with its observations (green), residuals (red) and unmatched keypoints (grey).</p>
+<h3>Photo window</h3>
+<p>Shows the photo of the camera nearest to the flight while flying; also the Tie point tab.</p>
+<h3>Map</h3>
+<p>Quick bar <b>Map</b>: a 2D map (aerial or OSM tiles, with the splat's orthophoto) with the path, the cameras, your 3D
+camera, heat maps (photos per area, overlap, held-out quality), tiles and pins. Click to go there, draw an area to
+choose sources or photos.</p>
+</section>
+
+<section id="search">
+<h2>Semantic search</h2>
+<p>Left → <b>Search</b>: find things in the splat by words (“a car”, “gravel pile”, “a machine”).</p>
+<ol>
+<li><b>Compute semantic features</b> (once per splat; part of Run full pipeline).</li>
+<li>Type a query and press <kbd>Enter</kbd>. Matches turn red; objects get yellow turning markers, listed with their
+size; <b>◀ Go ▶</b> flies to the camera that saw each best.</li>
+<li><b>Auto threshold</b> picks the cut-off; set it by hand with the slider. <b>Near the mesh only</b> ignores
+floaters.</li>
+</ol>
+</section>
+
+<section id="rig">
+<h2>Rigs: moving parts</h2>
+<p>Left → <b>Rig</b> cuts an object found by Search out of the splat and lets you articulate it: joints by
+<kbd>Ctrl</kbd> + click (hinge axis, then the moving part), or proposed by UniRig / PartField, or from a template a
+vision model writes. A slider per joint, <b>Animate</b>, and export of the posed splat.</p>
+</section>
+
+<section id="export">
+<h2>Export</h2>
+<table>
+<tr><th>What</th><th>Formats</th><th>Notes</th></tr>
+<tr><td>Mesh</td><td>glb, obj (+ mtl + texture), ply</td><td>glb / obj are Y-up (east, up, −north) for Blender and glTF viewers; ply stays in ENU</td></tr>
+<tr><td>Splat</td><td>ply (standard 3DGS, all SH bands), .splat</td><td>ENU</td></tr>
+<tr><td>Orthophoto</td><td>GeoTIFF (UTM)</td><td>From the splat</td></tr>
+</table>
+<p>Files go to <code>PROJECT/export/</code>, or straight to the browser (several as a zip). <code>georef.json</code>
+records the ENU origin (latitude, longitude, altitude) and the axes of each file.</p>
+</section>
+
+<section id="queue">
+<h2>Queue, memory and long jobs</h2>
+<h3>Queue</h3>
+<p>Right panel → <b>Queue</b>: <b>Add to queue</b> stores a stage with the tabs' settings as they are now. <b>Start
+queue</b> runs the entries one after another. Entries of other projects run in their own process, so the view stays
+where it is. A browser notification tells when an entry ends. Progress shows on each entry's line.</p>
+<h3>Memory checks</h3>
+<p>Before heavy stages the GUI estimates the RAM needed (from this project's last run, the machine's records or a
+model) and asks if it may not fit; the queue waits until enough is free.</p>
+<h3>Interrupting a long queued training to work on something else</h3>
+<p>A splat that trains for days can be put aside and continued later without losing steps:</p>
+<ol>
+<li><b>Stop entry</b> (not <b>Pause queue</b>: that only keeps the queue from starting the <i>next</i> entry; the
+running one goes on). The running tile saves a checkpoint at its current step, <code>splat/resume.json</code> records
+the run (tiled, which tile, its own settings: steps per round, plan, depth prior, camera stops), and the finished tiles
+plus the partial one are merged into the splat, so it can be viewed meanwhile. This takes a few minutes; wait until the
+entry's line says stopped before starting heavy work. The queue pauses; later entries stay pending.</li>
+<li>Open another project and work there as usual.</li>
+<li>To continue: open the project and press <b>Splat → Resume training</b>, or add a <b>Resume splat</b> entry for it
+to the queue. Training goes on at the same tile, step and round, with the optimiser state and schedules intact; only
+the trainer's restart (a minute or two) is lost.</li>
+</ol>
+<p>Watch out for two things:</p>
+<ul>
+<li><b>Entries queued after the training</b> (semantic features, splat mesh, …) must not run on the half-trained
+splat: move the Resume splat entry above them before <b>Start queue</b>, or remove them and queue them again after
+it.</li>
+<li><b>Leave the project's <code>transforms.json</code> alone</b> until the training is finished: Export, Register
+more photos, Exclude photos → Apply or a new SfM change it, and Resume then refuses (the checkpoints belong to those
+cameras). Work in other projects is safe.</li>
+</ul>
+<h3>Stopping and restarting</h3>
+<ul>
+<li><b>Stop</b> asks first, then stops whatever runs. Training saves a checkpoint and keeps the partial splat.</li>
+<li>Jobs run in processes of their own: they survive a GUI restart, and the GUI reattaches to them.</li>
+<li>Before restarting the GUI, check <code>data/.modelforge_gui_busy.json</code>: extraction runs inside the GUI
+process and would be lost.</li>
+</ul>
+</section>
+
+<section id="cli">
+<h2>Command line</h2>
+<p>Every stage runs without the GUI too (inside the container via <code>scripts/dev</code>):</p>
+<pre><code># extract photos from videos (or --plan ingest.json)
+python -m modelforge.dji.extract A.MP4 [B.MP4 ...] -o PROJECT --num-images 300
+
+# SfM and later stages
+python -m modelforge.pipeline PROJECT --stages features,pairs,match,refine,export
+python -m modelforge.pipeline PROJECT --stages dense --dense-quality low
+
+# splat (wrapper running modelforge.splat in the CUDA container)
+scripts/splat PROJECT [--iterations N] [--tiles auto|on|off] [--round-steps N] [--resume]
+
+# meshes and exports
+python -m modelforge.sfm_mesh PROJECT [--fill [MAX]]
+python -m modelforge.splat_mesh PROJECT --quality medium
+python -m modelforge.export.products PROJECT --mesh-format glb --splat-format ply
+
+# GUI starting stages at once
+python -m modelforge.gui.app PROJECT --run export,sfmmesh,splat</code></pre>
+<p>Use <code>--help</code> on any of them for all options.</p>
+</section>
+
+<section id="troubleshooting">
+<h2>Troubleshooting</h2>
+<table>
+<tr><th>Symptom</th><th>Likely cause and fix</th></tr>
+<tr><td>The GUI looks old or a button is missing</td><td>Hard-reload: <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>.</td></tr>
+<tr><td>Buildings appear twice, stacked or shifted</td><td>Passes / flights not tied together. Check View → Pose graph "between passes"; refine again with Extractor auto (ALIKED + RoMa), add tie points, or let the export leave isolated photos out.</td></tr>
+<tr><td>Refine ends with almost no points</td><td>Priors do not fit the images (wrong camera mount, yaw source, lead), or too few photos (keyframes too sparse).</td></tr>
+<tr><td>Splat is blurry / smudgy</td><td>Large scene in one splat: use tiles. Check that the SfM is not split (see above). More steps help with a fixed scene unit.</td></tr>
+<tr><td>Some tiles or a camera are much darker</td><td>Different cameras with different exposure settings: Splat tab → Camera exposure, then export again.</td></tr>
+<tr><td>Fog in front of some views</td><td>Use default densification (not MCMC); keep the depth prior on.</td></tr>
+<tr><td>A job was killed (exit −9)</td><td>Out of memory. Lower the photo count, use chunked BA, the disk image cache, or add swap.</td></tr>
+<tr><td>A queue entry waits</td><td>It waits for free memory (its line says how much it needs).</td></tr>
+</table>
+</section>
+
+<section id="glossary">
+<h2>Glossary</h2>
+<table>
+<tr><td><b>ENU</b></td><td>Local east / north / up frame in metres, centred on the first photo.</td></tr>
+<tr><td><b>Prior</b></td><td>A pose from the drone's metadata, used as a soft constraint.</td></tr>
+<tr><td><b>SfM</b></td><td>Structure from motion: camera poses and sparse 3D points from the photos.</td></tr>
+<tr><td><b>BA</b></td><td>Bundle adjustment: the joint optimisation of cameras and points.</td></tr>
+<tr><td><b>Pass</b></td><td>A stretch of flight over some ground; a revisit is a later pass over the same ground.</td></tr>
+<tr><td><b>Splat</b></td><td>A 3D Gaussian splatting model: millions of coloured, semi-transparent ellipsoids.</td></tr>
+<tr><td><b>Tile</b></td><td>A part of a large scene trained as its own splat, then merged.</td></tr>
+<tr><td><b>GSD</b></td><td>Ground sampling distance: how much ground one pixel covers.</td></tr>
+<tr><td><b>Held-out photos</b></td><td>Photos not used in training, for measuring quality (PSNR, SSIM, LPIPS).</td></tr>
+</table>
+</section>
+
+<footer>ModelForge manual · served by the GUI at <code>/manual/index.html</code> · source <code>docs/manual/index.html</code></footer>
+</main>
+
+<script>
+(() => {
+  const sections = [...document.querySelectorAll("main section")];
+  const list = document.getElementById("toc-list");
+  const links = [];
+  for (const s of sections) {
+    const h = s.querySelector("h2");
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = "#" + s.id; a.textContent = h.textContent; li.appendChild(a);
+    const subs = [...s.querySelectorAll("h3")];
+    if (subs.length) {
+      const ol = document.createElement("ol");
+      subs.forEach((h3, i) => {
+        if (!h3.id) h3.id = s.id + "-" + i;
+        const l2 = document.createElement("li"), a2 = document.createElement("a");
+        a2.href = "#" + h3.id; a2.textContent = h3.textContent; l2.appendChild(a2); ol.appendChild(l2);
+      });
+      li.appendChild(ol);
+    }
+    list.appendChild(li);
+    links.push([s, a, li]);
+  }
+  // filter sections by text
+  document.getElementById("filter").addEventListener("input", e => {
+    const q = e.target.value.trim().toLowerCase();
+    for (const [s, , li] of links) {
+      const hit = !q || s.textContent.toLowerCase().includes(q);
+      s.classList.toggle("hidden", !hit); li.classList.toggle("hidden", !hit);
+    }
+  });
+  // highlight the section in view
+  const obs = new IntersectionObserver(entries => {
+    for (const en of entries) if (en.isIntersecting) {
+      for (const [, a] of links) a.classList.toggle("active", a.getAttribute("href") === "#" + en.target.id);
+    }
+  }, { rootMargin: "0px 0px -70% 0px" });
+  sections.forEach(s => obs.observe(s));
+  // theme: auto / light / dark, remembered per browser
+  const btn = document.getElementById("theme-btn"), order = ["auto", "light", "dark"];
+  let theme = "auto";
+  try { theme = localStorage.getItem("mf-manual-theme") || "auto"; } catch (e) {}
+  const apply = () => {
+    if (theme === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+    btn.textContent = theme;
+  };
+  btn.addEventListener("click", () => {
+    theme = order[(order.indexOf(theme) + 1) % 3]; apply();
+    try { localStorage.setItem("mf-manual-theme", theme); } catch (e) {}
+  });
+  apply();
+})();
+</script>
+</body>
+</html>

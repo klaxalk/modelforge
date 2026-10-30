@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Add a swap file on the fly (no reboot) and keep it across reboots.
+# Usage: scripts/add_swap [SIZE_GB] [FILE]   (default 32 GB at /swap2.img; asks for sudo)
+set -euo pipefail
+
+size_gb=${1:-32}
+file=${2:-/swap2.img}
+
+if swapon --show=NAME --noheadings | grep -qx "$file"; then
+  echo "$file is already in use as swap:"
+  swapon --show
+  exit 0
+fi
+if [ -e "$file" ]; then
+  echo "$file exists but is not active swap; remove it or pick another FILE" >&2
+  exit 1
+fi
+
+free_gb=$(df --output=avail -BG "$(dirname "$file")" | tail -1 | tr -dc 0-9)
+if [ "$free_gb" -lt $((size_gb + 20)) ]; then
+  echo "only ${free_gb} GB free on $(dirname "$file"); want ${size_gb} GB + 20 GB spare" >&2
+  exit 1
+fi
+
+echo "creating ${size_gb} GB swap at $file"
+sudo fallocate -l "${size_gb}G" "$file"
+sudo chmod 600 "$file"
+sudo mkswap "$file" >/dev/null
+sudo swapon "$file"
+
+if ! grep -qE "^\s*$file\s" /etc/fstab; then
+  echo "$file none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
+  echo "added $file to /etc/fstab"
+fi
+
+swapon --show
+free -h

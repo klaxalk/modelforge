@@ -127,6 +127,9 @@ RUN python /tmp/patch_viser_page.py \
 COPY docker/patch_viser_camera.py /tmp/patch_viser_camera.py
 RUN python /tmp/patch_viser_camera.py \
         "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/index.html"
+# The manual (docs/manual/, in the mounted repo) at http://localhost:8080/manual/index.html: viser serves its page
+# folder, and the GUI links there.
+RUN ln -s /workspace/docs/manual "$(python -c 'import os, viser; print(os.path.dirname(viser.__file__))')/client/build/manual"
 
 # Run as the host user so files written to the bind-mounted repo are not root-owned.
 RUN (getent passwd ${UID} | cut -d: -f1 | xargs -r userdel -r) 2>/dev/null; \

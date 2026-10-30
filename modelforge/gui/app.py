@@ -149,6 +149,9 @@ SELECTED_COLOR = (255, 255, 255)
 # more cameras than this: each layer is one wireframe node (berlin_all, 29.5k photos: two frustum nodes per photo
 # made viser replay 266k messages on every browser connect), without thumbnails or clicks
 MAX_FRUSTA = 2000
+# the manual (docs/manual/), served by viser through a link in its page folder (docker/Dockerfile)
+MANUAL_LINK = ('<div style="font-size:0.85em;margin:2px 0 4px"><a href="/manual/index.html" target="_blank" '
+               'rel="noopener">📖 Manual</a> <span style="opacity:.6">(opens in a new tab)</span></div>')
 FAR_EXTENTS = 8.0  # the far clipping plane at this many scene extents (at least viser's 1000 m)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
@@ -300,6 +303,7 @@ class App:
                                           "training saves a checkpoint at the current step, then exports that "
                                           "partial splat (shown and exportable; Splat tab → Resume continues).")
         self.g_stop.on_click(lambda ev: self._stop_clicked(ev.client))
+        gui.add_html(MANUAL_LINK)
         # Two panels: the right (main) one runs the methods, the left one holds everything else.
         self.left = gui.add_panel()
         tabs = gui.add_tab_group()
@@ -1080,6 +1084,7 @@ class App:
                                            hint="Dark or light theme for the whole GUI (panels, 3D view and plots), "
                                                 "for every open browser. Remembered across restarts.")
             self.g_dark.on_update(lambda _: self.set_dark(self.g_dark.value))
+            gui.add_html(MANUAL_LINK)
         with gui.add_folder("Queue", expand_by_default=False):
             self.queue = QueuePanel(self, gui)
         with gui.add_folder("History", expand_by_default=False):
