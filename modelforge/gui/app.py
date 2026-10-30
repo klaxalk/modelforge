@@ -19,7 +19,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, difix, exposure, jobs, memory, ortho, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, difix, exposure, jobs, lidar_mesh, memory, ortho, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, learned, reconstruct
@@ -97,6 +97,16 @@ STAGE_HINTS = {
                       "and head-on views weighted most. Writes a separate coloured copy and a denser preview (≤ 1M "
                       "faces); the splat's depth prior keeps using the mesh as it is. Needs nerfstudio's "
                       "environment. A few minutes for thousands of photos.",
+    "lidarmesh": "Mesh from the bag's LiDAR scans, placed with the finished SfM poses (Poses sfm): per photo the "
+                 "SfM's correction of the bag's camera pose (the camera mount's own rotation left out), interpolated "
+                 "to each scan's time; every scan's returns then integrated into a TSDF from the sensor (free space "
+                 "carved), marching cubes. lidarmesh/mesh.ply (grey = LiDAR intensity) and lidarmesh/cloud.ply (the "
+                 "corrected cloud). Needs nerfstudio's environment (Open3D, GPU). A few minutes.",
+    "lidarcloud": "Aggregate the bag's LiDAR scans into one point cloud, placed with the finished SfM poses (Poses), "
+                  "one point per voxel (Voxel): lidarmesh/cloud.ply, shown in 3D (Show the LiDAR cloud). The mesh "
+                  "step builds the same cloud first. Seconds to a minute.",
+    "lidarmesh-colour": "Colour the LiDAR mesh from the photos, as the SfM mesh (weighted mean of the photos that "
+                        "see each vertex, occlusion tested). A few minutes.",
     "difix": "Refine the finished splat towards the Difix tab's target views: renders moved step by step from the "
              "nearest photo towards each target, cleaned by Difix (a diffusion model), trained on together with the "
              "photos. Better from those views and near them; the splat before the first refinement is kept (Undo).",
@@ -135,6 +145,9 @@ NEXT_STEP = {
     "sfmmesh-fill": "View tab → Dense / splat → Mesh **sfm** (patched); next (optional): **Colour from the photos**",
     "sfmmesh-colour": "View tab → Dense / splat → Mesh **sfm** (coloured from the photos)",
     "sfmmesh-all": "View tab → Dense / splat → Mesh **sfm**; the Splat tab uses it as the depth prior",
+    "lidarmesh": "View tab → Dense / splat → Mesh **lidar**; next (optional): **Colour from the photos**",
+    "lidarcloud": "LiDAR Mesh tab → **Show the LiDAR cloud**; next: **Build LiDAR mesh**",
+    "lidarmesh-colour": "View tab → Dense / splat → Mesh **lidar** (coloured from the photos)",
     "splat-tiles": "View tab → **Tile boundaries**; Splat tab → Train tiles: all or one, then **Train + export splat**",
 }
 LOG_LINES = 200
@@ -152,6 +165,8 @@ MAX_FRUSTA = 2000
 # the manual (docs/manual/), served by viser through a link in its page folder (docker/Dockerfile)
 MANUAL_LINK = ('<div style="font-size:0.85em;margin:2px 0 4px"><a href="/manual/index.html" target="_blank" '
                'rel="noopener">📖 Manual</a> <span style="opacity:.6">(opens in a new tab)</span></div>')
+POINT_SIZE = 0.08  # sparse point size at Point size 1 over flights (m); smaller in a small scene (App._draw_points)
+CAM_SIZE = 0.6  # frustum depth at Camera size 1 for flights (m); smaller for close cameras (App._cam_size)
 FAR_EXTENTS = 8.0  # the far clipping plane at this many scene extents (at least viser's 1000 m)
 _ANCHORS = np.array([[48, 18, 59], [70, 134, 251], [27, 229, 181], [164, 252, 60],
                      [251, 185, 56], [228, 70, 11], [122, 4, 3]], float)  # turbo-like
@@ -326,7 +341,10 @@ class App:
             with gui.add_folder("Layers"):
                 self.g_points = gui.add_checkbox("Points", initial_value=True,
                                                  hint="Sparse 3D points of the snapshot.")
-                self.g_point_size = gui.add_slider("Point size", min=0.01, max=0.5, step=0.01, initial_value=0.08)
+                self.g_point_size = gui.add_slider(
+                    "Point size", min=0.1, max=5.0, step=0.1, initial_value=1.0,
+                    hint=f"Relative: 1 = {POINT_SIZE * 100:.0f} cm over flights, smaller in a small scene (0.2 % of the "
+                         "points' extent).")
                 self.g_cams = gui.add_checkbox("Cameras", initial_value=False,
                                                hint="Camera frustums of the snapshot; click one to inspect it.")
                 self.g_thumbs = gui.add_checkbox("Thumbnails", initial_value=False,
@@ -385,8 +403,9 @@ class App:
                     "All gaussians", initial_value=True,
                     hint=f"Show every Gaussian of the splat (when Level of detail is off or the splat fits its "
                          f"budget). Off: a random subset of at most "
-                         f"{gdata.SPLAT_SHOWN:,} (finished splat) or {gdata.LIVE_SPLAT_SHOWN:,} (live preview while "
-                         f"training), which keeps the browser responsive. Millions of Gaussians need a strong GPU "
+                         f"{gdata.SPLAT_SHOWN:,}, which keeps the browser responsive. The live preview while training "
+                         f"always sends at most {gdata.LIVE_SPLAT_SHOWN:,} (each update travels to the browser). "
+                         f"Millions of Gaussians need a strong GPU "
                          f"in the browser and take a while to send.")
                 self.g_splat_lod = gui.add_checkbox(
                     "Level of detail", initial_value=True,
@@ -498,6 +517,7 @@ class App:
                 self.g_fly_report.on_update(lambda e: self._fly_report(e.client_id, e.target.value))
             for h in (self.g_points, self.g_point_size):
                 h.on_update(lambda _: self._draw_points())
+            self.g_point_size.on_update(lambda _: (self._draw_dense_points(), self._draw_lidar_cloud()))
             for h in (self.g_points, self.g_cams, self.g_thumbs, self.g_corr, self.g_traj):
                 h.on_update(lambda _: self._sync_quickbar())
             for h in (self.g_cams, self.g_thumbs, self.g_priors, self.g_scale):
@@ -691,6 +711,44 @@ class App:
             b.on_click(lambda _: self.run_stage("sfmmesh-colour"))
             self.g_buttons["sfmmesh-colour"] = b
 
+        with tabs.add_tab("LiDAR Mesh", viser.Icon.RADAR):  # ROS bag projects: the scans with the SfM's poses
+            self.g_lidar_md = gui.add_markdown("")
+            self.g_lidar_poses = gui.add_dropdown(
+                "Poses", options=lidar_mesh.POSES, initial_value="sfm",
+                hint="sfm (default): every scan moved by the SfM's correction of the bag's poses around its time "
+                     "(needs a finished sparse reconstruction). bag: the scans as the bag's TF / odometry placed them "
+                     "(as the ingest did), for a comparison.")
+            self.g_lidar_voxel = gui.add_number(
+                "Voxel (m)", initial_value=0.0, min=0.0, step=0.005,
+                hint="The TSDF's voxel. 0 = auto: the median return range / 100, within 1-20 cm (kn_odin: 2.3 cm).")
+            self.g_lidar_range = gui.add_number(
+                "Max range (m)", initial_value=0.0, min=0.0, step=1.0,
+                hint="Returns farther from the sensor are left out. 0 = the Ingest tab's LiDAR max range.")
+            self.g_lidar_every = gui.add_number(
+                "Every N-th scan", initial_value=0, min=0, step=1,
+                hint=f"0 = auto: all scans, or every N-th so that at most {lidar_mesh.MAX_SCANS} per cloud topic are "
+                     "used.")
+            b = gui.add_button("Aggregate point cloud", icon=viser.Icon.CHART_DOTS_3, hint=STAGE_HINTS["lidarcloud"])
+            b.on_click(lambda _: self.run_stage("lidarcloud"))
+            self.g_buttons["lidarcloud"] = b
+            self.g_lidar_show = gui.add_checkbox(
+                "Show the LiDAR cloud", initial_value=False,
+                hint="The aggregated cloud in 3D (lidarmesh/cloud.ply), or the ingest's (lidar/cloud.ply: the bag's "
+                     "poses, at most 400 scans per topic) before one is built. At most 2M points are sent.")
+            self.g_lidar_colour = gui.add_dropdown(
+                "Colour by", options=("height", "intensity"), initial_value="height",
+                hint="height: a colour scale over the 2-98 % of the heights; intensity: grey, the LiDAR return "
+                     "strength.")
+            for h in (self.g_lidar_show, self.g_lidar_colour):
+                h.on_update(lambda _: self._draw_lidar_cloud())
+            self.g_lidar_cloud_md = gui.add_markdown("")
+            b = gui.add_button("Build LiDAR mesh", icon=viser.Icon.PLAYER_PLAY, hint=STAGE_HINTS["lidarmesh"])
+            b.on_click(lambda _: self.run_stage("lidarmesh"))
+            self.g_buttons["lidarmesh"] = b
+            b = gui.add_button("Colour from the photos", hint=STAGE_HINTS["lidarmesh-colour"])
+            b.on_click(lambda _: self.run_stage("lidarmesh-colour"))
+            self.g_buttons["lidarmesh-colour"] = b
+
         with tabs.add_tab("Splat", viser.Icon.SPARKLES):
             why = splat.available()
             gui.add_markdown("nerfstudio splatfacto: " + ("ready (GPU + nerfstudio found) · viewer on "
@@ -791,12 +849,18 @@ class App:
                      "(sparse_pc.ply, triangulated without the photos it left out). 0 = off (plain splatfacto). The depth error is "
                      "reported in the log and History.")
             self.g_splat_mesh_prior = gui.add_checkbox(
-                "Depth prior: SfM mesh", initial_value=False, disabled=True,
-                hint="The depth loss measures against the SfM mesh's vertices (Sparse tab → Run SfM mesh, holes "
-                     "patched) instead of the SfM points: evenly spaced, smoothed, and present in the patched holes. "
-                     "Ticked by itself once the project has an SfM mesh; ticking it sets Depth weight to "
-                     f"{splat.DEFAULT_LIDAR_DEPTH:g} when it is 0.")
+                "Depth prior: mesh", initial_value=False, disabled=True,
+                hint="The depth loss measures against a mesh (Prior mesh) instead of the SfM points: the SfM mesh "
+                     "(Sparse Mesh tab, holes patched: evenly spaced, smoothed, present in the patched holes) or the "
+                     "LiDAR mesh (LiDAR Mesh tab: measured). Ticked by itself once the project has one; ticking it "
+                     f"sets Depth weight to {splat.DEFAULT_LIDAR_DEPTH:g} when it is 0.")
             self.g_splat_mesh_prior.on_update(lambda _: self._mesh_prior_weight())
+            self.g_splat_prior_mesh = gui.add_dropdown(
+                "Prior mesh", options=lidar_mesh.PRIOR_MESHES, initial_value="auto",
+                hint="Which mesh the depth prior uses: auto = the LiDAR mesh when the project has one (ROS bag "
+                     "projects, LiDAR Mesh tab), else the SfM mesh; sfm / lidar = that one. The dense depth maps are "
+                     "rendered per mesh (sfmmesh/ or lidarmesh/depth_x<N>/). Starting Gaussians stay on the SfM mesh.")
+            self.g_splat_prior_mesh.on_update(lambda _: self._refresh_prior_mesh())
             self.g_splat_tile_mask = gui.add_checkbox(
                 "Tiles: train only the tile's pixels", initial_value=splat_tiles.TILE_MASK,
                 hint="Tiled runs with the dense mesh prior: each photo's pixels whose SfM-mesh surface lies in another "
@@ -810,10 +874,18 @@ class App:
                      "every pixel the mesh covers, instead of only its vertices (~1 pixel in 10 on a drone survey). "
                      "The maps are computed before training (CPU raycasting, ~0.1-0.3 s per photo; kept in "
                      "sfmmesh/depth_x<N>/, ~4 MB each at 1920 px, shared by the tiles).")
+            self.g_splat_normal = gui.add_number(
+                "Normal prior (weight)", initial_value=0.0, min=0.0, step=0.01,
+                hint="With the dense mesh prior: the splat's surface normals (from its rendered depth) pulled to the "
+                     "mesh's on its planar pixels (walls, floors, ceilings; edges and depth jumps left out), so flat "
+                     "low-texture surfaces render flat instead of lumpy. 0.05 by default with the LiDAR mesh as the "
+                     "prior (kn_odin, 3000 steps: held-out PSNR +0.6 dB, depth error 7.2 -> 2.6 %, normals 72 -> 40° "
+                     "off), else 0 = off.")
             self.g_splat_seed = gui.add_checkbox(
-                "Start from the SfM mesh too", initial_value=True,
-                hint="Extra starting Gaussians on the SfM mesh (holes patched) where the SfM points are thin, flat in "
-                     "its surface and coloured from it (from the photos if the Sparse Mesh tab coloured it). Low-texture "
+                "Start from the mesh too", initial_value=True,
+                hint="Extra starting Gaussians on the prior mesh (Prior mesh: the SfM mesh, holes patched, or the "
+                     "LiDAR mesh) where the starting points are thin, flat in its surface and coloured from it (from "
+                     "the photos if its tab coloured it). Low-texture "
                      "ground gets few SfM points, so few Gaussians start there and the weak gradients hardly add any: "
                      "single-pass ground stays empty or soft. Needs the SfM mesh; ignored without one.")
             self.g_splat_flatten = gui.add_number(
@@ -855,6 +927,12 @@ class App:
                      "so photos taken brighter or darker do not pull the colours apart; the splat holds the scene at "
                      "the median exposure. karlak (2.6 EV of auto exposure): held-out +0.24 dB. Ignored without the "
                      "metadata (transforms.json mf_exposure).")
+            self.g_splat_exposure_learn = gui.add_checkbox(
+                "Learn exposure per photo", initial_value=False,
+                hint="A brightness gain (RGB) learned for every training photo, so a camera's auto exposure / white "
+                     "balance does not end up in the Gaussians' colours: the GUI shows their base colour only, which "
+                     "otherwise turns blotchy. On by default for projects without exposure metadata (ROS bags, "
+                     "videos); with DJI metadata, Exposure from the metadata does this from the shutter / ISO.")
             with gui.add_folder("Camera exposure", expand_by_default=False):
                 self.g_cam_exp_camera = gui.add_dropdown(
                     "Camera", options=["camera 0"],
@@ -1268,6 +1346,8 @@ class App:
             self.difix_views.refresh()
             self.tiepoints.refresh()
             self._splat_variant = None
+            self._normal_auto = None  # the normal prior takes this project's default (_mesh_prior_weight)
+            self._exp_learn_auto = None  # and Learn exposure per photo (_exposure_learn_default)
             self._refresh_difix()
             self._refresh_register()
             self._show_project()
@@ -1931,9 +2011,15 @@ class App:
             pts, cols = pts[keep], cols[keep]
         if not len(pts):
             pts, cols = np.zeros((1, 3)), np.zeros((1, 3), np.uint8)
+        if len(pts) > 1:  # the base size: POINT_SIZE, or 0.2 % of the points' extent in a small scene
+            lo, hi = np.percentile(pts, [2, 98], axis=0)
+            self._point_base = float(np.clip(0.002 * (hi - lo).max(), 1e-3, POINT_SIZE))
         self.server.scene.add_point_cloud("/points", points=pts.astype(np.float32), colors=cols,
-                                          point_size=self.g_point_size.value, precision="float32",
+                                          point_size=self._point_size(), precision="float32",
                                           visible=bool(self.g_points.value and len(s.points)))
+
+    def _point_size(self):
+        return getattr(self, "_point_base", POINT_SIZE) * self.g_point_size.value
 
     def _batched(self):
         return self.project is not None and len(self.project.names) > MAX_FRUSTA
@@ -1955,7 +2041,7 @@ class App:
             return
         cams = cams or s.cams
         fov, aspect = self._shapes(s)
-        scale = 0.6 * self.g_scale.value
+        scale = self._cam_size() * self.g_scale.value
         colors = self._camera_colors().copy()
         if self.selected is not None:
             colors[self.selected] = SELECTED_COLOR
@@ -1980,6 +2066,26 @@ class App:
                                                 colors=np.repeat(seg_col, 2, 2).reshape(-1, 2, 3),
                                                 thickness=1.0, thickness_units="screen")
 
+    def _cam_size(self):
+        """Frustum depth (m, or scene units) at Camera size 1: 0.6, smaller where the cameras stand closer: the median
+        step between consecutive cameras, at most 2 % of their extent (a 6 m lab scan is not covered by them)."""
+        c = self.snap.cams if self.snap is not None else None
+        key = (id(self.snap), self.snap.name if self.snap is not None else None)
+        if getattr(self, "_cam_size_key", None) == key:
+            return self._cam_size_val
+        size = CAM_SIZE
+        if c is not None and int(c.valid.sum()) > 1:
+            p = c.centers[c.valid]
+            step = np.linalg.norm(np.diff(p, axis=0), axis=1)
+            step = step[step > 0]
+            if len(step):
+                size = min(size, float(np.median(step)))
+            extent = float(np.ptp(np.percentile(p, [2, 98], axis=0), axis=0).max())
+            if extent > 0:
+                size = min(size, 0.02 * extent)
+        self._cam_size_key, self._cam_size_val = key, max(size, 1e-3)
+        return self._cam_size_val
+
     def _draw_cameras(self):
         with self.lock:
             if self.snap is None:  # a toggle while the project is still loading
@@ -1994,7 +2100,7 @@ class App:
                 self.server.scene.remove_by_name(name)
             s, n = self.snap, len(self.project.names)
             colors = self._camera_colors()
-            scale = 0.6 * self.g_scale.value
+            scale = self._cam_size() * self.g_scale.value
             intr = s.intrinsics or {}
             shapes = {cid: _fov_aspect(c) for cid, c in intr.get("cameras", {}).items()}  # several cameras: each its own
             for i in range(n):
@@ -2399,7 +2505,8 @@ class App:
                     stage = sfm[3]
                 seq = list(sfm) + self._register_steps() if stage == "sfm" else (stage,)
             elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix", "register",
-                           "sfmmesh-fill", "sfmmesh-colour", "images", "difix-suggest", "ortho"):
+                           "sfmmesh-fill", "sfmmesh-colour", "images", "difix-suggest", "ortho", "lidarmesh",
+                           "lidarmesh-colour", "lidarcloud"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
                 seq = ["sfmmesh", "sfmmesh-fill"]
@@ -2518,6 +2625,30 @@ class App:
                     self._refresh_dense()
                     if "sfm" in self.g_mesh.options:
                         self.g_mesh.value = "sfm"  # show the new mesh in the View tab
+                elif st in ("lidarmesh", "lidarmesh-colour", "lidarcloud"):
+                    if st in ("lidarmesh", "lidarcloud"):
+                        def lidar_line(text):
+                            self._on_log(text)
+                            m = re.match(r"\[lidar\] scan (\d+) / (\d+)", text)
+                            if m:
+                                self._on_count_progress(stage, "scan", int(m.group(1)), int(m.group(2)))
+                        self._in_job("modelforge.lidar_mesh:run", report=None, token=worker.TOKEN,
+                                     poses=self.g_lidar_poses.value, voxel=float(self.g_lidar_voxel.value),
+                                     max_range=float(self.g_lidar_range.value) or None,
+                                     every=int(self.g_lidar_every.value), cloud_only=st == "lidarcloud",
+                                     callbacks={"on_line": lidar_line})
+                    else:
+                        lidar_mesh.colour(project, on_line=self._on_sfm_mesh_line, token=self._token)
+                    report = pipeline.Report(project)
+                    if st == "lidarcloud":
+                        self.g_lidar_show.value = True  # its update draws it
+                        self._refresh_lidar_tab()
+                        self._history(f"✅ **lidarcloud** · {time.time() - ts:.0f} s · "
+                                      f"{self._stage_summary(st, report.data)}")
+                        continue
+                    self._refresh_dense()
+                    if "lidar" in self.g_mesh.options:
+                        self.g_mesh.value = "lidar"  # show the new mesh in the View tab
                 elif st == "register":
                     self.register.refresh()  # the images in use and the analysis may have changed in this run
                     if stage != "register" and not self.register.pending():  # in a sequence: nothing to add
@@ -2567,7 +2698,7 @@ class App:
                 report = pipeline.Report(project)  # what the stage (in its job process) wrote
                 self._history(f"✅ **{st}** · {time.time() - ts:.0f} s · {self._stage_summary(st, report.data)}")
             if stage in ("dense", "splat", "splatmesh", "splatmesh-fill", "sfmmesh", "sfmmesh-fill", "sfmmesh-colour", "sfmmesh-all",
-                         "all") or \
+                         "lidarmesh", "lidarmesh-colour", "all") or \
                     stage in pipeline.DENSE_STAGES or given:
                 self._refresh_dense()
             if self.project is not None and stage in ("refine", "sfm", "all") or "refine" in (given or ()):
@@ -2625,6 +2756,10 @@ class App:
             self.g_state.content = final or "❌ **stopped**"
         unavailable = {"stereo": not dense.has_cuda(), "dense": not dense.has_cuda(),
                        "splat": splat.available() is not None, "sfmmesh-colour": splat.available() is not None,
+                       "lidarmesh": splat.available() is not None or lidar_mesh.available(project) is not None,
+                       "lidarcloud": lidar_mesh.available(project) is not None,
+                       "lidarmesh-colour": splat.available() is not None or not os.path.exists(
+                           os.path.join(project, lidar_mesh.OUT, "mesh.ply")),
                        "splat-resume": splat.available() is not None or splat.resume_info(project) is None,
                        "splatmesh": splat_mesh.available() is not None,
                        "difix": difix.available() is not None,
@@ -3124,8 +3259,10 @@ class App:
     def _regularize(self):
         """Splat tab → Flatten Gaussians, No needles, exposure, anti-aliased for splat.run (None when all off)."""
         reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
+               "normal": float(self.g_splat_normal.value),
                "sky": bool(self.g_splat_sky.value), "sun": SUNLIGHT[self.g_splat_sunlight.value],
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
+               "exposure_learn": bool(self.g_splat_exposure_learn.value),
                "antialiased": bool(self.g_splat_antialiased.value),
                "exposure_stops": exposure.stops(self.path) if self.path else {}}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None
@@ -3233,11 +3370,17 @@ class App:
                 pipeline.stage_export(project, pipeline.Report(project), lidar=bool(self.g_splat_lidar.value),
                                       drop_isolated=bool(self.g_drop_isolated.value))
             weight = float(self.g_splat_depth.value)
-            mesh = sfm_mesh.depth_cloud(project) if self.g_splat_mesh_prior.value else None
-            seed = sfm_mesh.depth_cloud(project) if self.g_splat_seed.value else None
+            mesh = lidar_mesh.prior_mesh(project, self.g_splat_prior_mesh.value) if self.g_splat_mesh_prior.value \
+                else None
+            if self.g_splat_mesh_prior.value and mesh is None:
+                raise RuntimeError(f"Depth prior: no {self.g_splat_prior_mesh.value} mesh in this project "
+                                   "(Sparse Mesh / LiDAR Mesh tab), or untick Depth prior: mesh")
+            if mesh:
+                self._on_log(f"splat: depth prior from {os.path.relpath(mesh, project)}")
+            seed = lidar_mesh.prior_mesh(project, self.g_splat_prior_mesh.value) if self.g_splat_seed.value else None
             if mesh and weight <= 0:
                 weight = splat.DEFAULT_LIDAR_DEPTH
-                self._on_log(f"splat: SfM mesh prior with depth weight 0: using {weight}")
+                self._on_log(f"splat: mesh prior with depth weight 0: using {weight}")
             lidar_depth = weight if weight > 0 and (mesh or splat.depth_source(project)) else None
             live = self.g_splat_live.value
             if not live:  # a paused run's preview may still be up
@@ -3294,7 +3437,7 @@ class App:
     def _on_splat_snapshot(self, step, npz, transforms):
         """A new training checkpoint: redraw the live splat in the View tab."""
         self._live_src = (npz, transforms)
-        step, n, arrays = gdata.load_live_splat(npz, transforms, self._splat_limit(gdata.LIVE_SPLAT_SHOWN))
+        step, n, arrays = gdata.load_live_splat(npz, transforms, gdata.LIVE_SPLAT_SHOWN)
         self._live_splat = arrays
         self._draw_live_splat()
         msg = f"live splat: step {step:,}, {n:,} gaussians" + (
@@ -3347,9 +3490,20 @@ class App:
             traceback.print_exc()
 
     def _mesh_prior_weight(self):
-        """The SfM mesh prior needs a depth weight: splat.DEFAULT_LIDAR_DEPTH when it is ticked at 0."""
+        """The mesh prior needs a depth weight: splat.DEFAULT_LIDAR_DEPTH when it is ticked at 0. The normal prior
+        follows the prior mesh: splat.LIDAR_MESH_NORMAL while it is the LiDAR mesh (ticked), else 0, unless the
+        user typed another value (kept until a project switch)."""
         if self.g_splat_mesh_prior.value and float(self.g_splat_depth.value) <= 0:
             self.g_splat_depth.value = splat.DEFAULT_LIDAR_DEPTH
+        if not self.path or not hasattr(self, "g_splat_normal"):
+            return
+        mesh = lidar_mesh.prior_mesh(self.path, self.g_splat_prior_mesh.value)
+        auto = splat.LIDAR_MESH_NORMAL if (self.g_splat_mesh_prior.value and mesh and
+                                           mesh == lidar_mesh.depth_cloud(self.path)) else 0.0
+        last = getattr(self, "_normal_auto", None)
+        if last is None or abs(float(self.g_splat_normal.value) - last) < 1e-9:  # not changed by hand
+            self.g_splat_normal.value = auto
+        self._normal_auto = auto
 
     def _on_sfm_mesh_line(self, text):
         """Sparse Mesh steps: the log, plus the step on the state line ('colouring: photo k / n' with the bar)."""
@@ -3496,6 +3650,23 @@ class App:
                 return (f"{r['seen']:,} of {r['gaussians']:,} Gaussians from {r['photos']} photos"
                         + (f" in {r['tiles']} tiles" if r.get("tiles") else "")
                         + f" ({r['version']}, {r['width']} px), {_fmt_s(r['seconds'])} · Search tab")
+            if st == "lidarmesh":
+                r = rep["lidar_mesh"]
+                sh = r.get("shift") or {}
+                return (f"{r['faces']:,} faces from {r['scans']:,} scans ({r['returns']:,} returns), voxel "
+                        f"{r['voxel'] * 100:.1f} cm, poses {r['poses']}"
+                        + (f" (the SfM moved them {sh['median_m'] * 100:.1f} cm median, {sh['max_m'] * 100:.1f} cm "
+                           "at most)" if sh else "") + f", {_fmt_s(r['seconds'])}")
+            if st == "lidarcloud":
+                r = rep["lidar_cloud"]
+                sh = r.get("shift") or {}
+                return (f"{r['points']:,} points from {r['scans']:,} scans ({r['returns']:,} returns), voxel "
+                        f"{r['voxel'] * 100:.1f} cm, poses {r['poses']}"
+                        + (f" (the SfM moved them {sh['median_m'] * 100:.1f} cm median)" if sh else ""))
+            if st == "lidarmesh-colour":
+                r = rep["lidar_mesh"]["colour"]
+                return (f"{r['coloured']:,} of {r['vertices']:,} vertices coloured from {r['photos']:,} photos "
+                        f"({r['width']} px), {_fmt_s(r['seconds'])}")
             if st == "sfmmesh-colour":
                 r = rep["sfm_mesh"]["colour"]
                 if r.get("partial"):
@@ -3642,9 +3813,49 @@ class App:
         self._draw_lines(cams)
 
     # ------------------------------------------------------------- dense / splat
+    def _draw_lidar_cloud(self):
+        """The LiDAR cloud layer (LiDAR Mesh tab → Show the LiDAR cloud)."""
+        if not hasattr(self, "g_lidar_show"):
+            return
+        path, what = lidar_mesh.shown_cloud(self.path) if self.path else (None, None)
+        key = (self._file_key(path), self.g_lidar_colour.value, self._point_size()) \
+            if self.g_lidar_show.value and path else None
+        if self._unchanged("lidar", key):
+            return
+        if key is None:
+            self.server.scene.remove_by_name("/lidar/cloud")
+            self.g_lidar_cloud_md.content = ("" if path else "no LiDAR cloud yet: **Aggregate point cloud**")
+            return
+        pts, cols, n = gdata.load_lidar_cloud(path, self.g_lidar_colour.value)
+        self.server.scene.add_point_cloud("/lidar/cloud", points=pts, colors=cols, point_size=self._point_size() * 0.5,
+                                          precision="float32")
+        self.g_lidar_cloud_md.content = (f"shown: {len(pts):,} of {n:,} points ({what})")
+
+    def _refresh_lidar_tab(self):
+        """The LiDAR Mesh tab's status: why not, or what exists."""
+        if not hasattr(self, "g_lidar_md") or not self.path:
+            return
+        self._draw_lidar_cloud()
+        why = lidar_mesh.available(self.path)
+        if why:
+            self.g_lidar_md.content = f"A mesh from the LiDAR scans of a ROS bag project: **unavailable** ({why})."
+            return
+        try:
+            st = json.load(open(os.path.join(self.path, lidar_mesh.OUT, "stats.json")))
+            have = (f"  \nLast: {st['faces']:,} faces from {st['scans']:,} scans, voxel {st['voxel'] * 100:.1f} cm, "
+                    f"poses **{st['poses']}**. View tab → Mesh **lidar**.")
+        except (OSError, ValueError, KeyError):
+            have = ""
+        sfm = os.path.exists(os.path.join(self.path, "sparse", "refined", "images.bin"))
+        self.g_lidar_md.content = ("The bag's LiDAR scans fused into a mesh, placed with the finished SfM poses "
+                                   "(the camera mount's rotation left out)."
+                                   + ("" if sfm else " **No SfM yet**: run Sparse first, or use Poses **bag**.")
+                                   + have)
+
     def _refresh_dense(self):
         self._refresh_camera_exposure()
         self.dense = gdata.dense_artifacts(self.path)
+        self._refresh_lidar_tab()
         if hasattr(self, "g_difix_compare"):  # a new splat: the Difix baseline may be stale (Compare, Undo)
             self._refresh_difix()
         meshes = tuple(self.dense["meshes"])
@@ -3666,13 +3877,29 @@ class App:
         self.semantic.refresh()
         self.rig.refresh()
         self._sync_tile_choice()
-        has_mesh = sfm_mesh.depth_cloud(self.path) is not None
+        self._refresh_prior_mesh()
+        self._draw_tiles()
+
+    def _refresh_prior_mesh(self):
+        """Depth prior: mesh enabled when the chosen mesh exists, ticked by itself when one appears."""
+        has_mesh = lidar_mesh.prior_mesh(self.path, self.g_splat_prior_mesh.value) is not None
         self.g_splat_mesh_prior.disabled = not has_mesh
         if has_mesh != getattr(self, "_sfm_mesh_seen", None):  # ticked when a mesh appears (or a project has one)
             self.g_splat_mesh_prior.value = has_mesh
             self._sfm_mesh_seen = has_mesh
         self._mesh_prior_weight()  # also after a project switch reset the weight to its kind's default
-        self._draw_tiles()
+        self._exposure_learn_default()
+
+    def _exposure_learn_default(self):
+        """Learn exposure per photo: on when transforms.json has no exposure metadata, unless the user changed it
+        (kept until a project switch)."""
+        if not self.path or not hasattr(self, "g_splat_exposure_learn"):
+            return
+        auto = not splat.exposure_known(self.path)
+        last = getattr(self, "_exp_learn_auto", None)
+        if last is None or bool(self.g_splat_exposure_learn.value) == last:
+            self.g_splat_exposure_learn.value = auto
+        self._exp_learn_auto = auto
 
     # ------------------------------------------------------------- export
     def _refresh_export(self, message=None):
@@ -3867,14 +4094,14 @@ class App:
         return (path, os.path.getmtime(path)) if path and os.path.exists(path) else None
 
     def _draw_dense_points(self):
-        key = (self._file_key(self.dense["fused"]), self.g_point_size.value) \
+        key = (self._file_key(self.dense["fused"]), self._point_size()) \
             if self.g_dense_pts.value and self.dense["fused"] else None
         if self._unchanged("points", key):
             return
         if key is not None:
             pts, cols, n = gdata.load_fused(self.dense["fused"])
             self.server.scene.add_point_cloud("/dense/points", points=pts, colors=cols,
-                                              point_size=self.g_point_size.value * 0.5, precision="float32")
+                                              point_size=self._point_size() * 0.5, precision="float32")
             self._dense_status("points", f"dense points: {len(pts):,} of {n:,} shown")
         else:
             self.server.scene.remove_by_name("/dense/points")
@@ -3895,6 +4122,8 @@ class App:
             if mesh is None:
                 mesh = gdata.load_mesh(self.dense["meshes"][method])
                 note = ("from the splat, vertex colours" if method == "splat" else
+                        "from the LiDAR scans" + (", coloured from the photos" if "coloured" in os.path.basename(
+                            self.dense["meshes"]["lidar"]) else ", grey = LiDAR intensity") if method == "lidar" else
                         ("Poisson over the SfM points"
                          + (", holes patched" if os.path.exists(os.path.join(self.path, sfm_mesh.OUT, "patched.npy"))
                             else "")
@@ -3914,10 +4143,7 @@ class App:
         return None if self.g_splat_all.value else default
 
     def _splat_all_changed(self):
-        src = getattr(self, "_live_src", None)
-        if getattr(self, "_splat_live_on", False) and src:  # reload the last live snapshot at the new size
-            step, n, self._live_splat = gdata.load_live_splat(*src, self._splat_limit(gdata.LIVE_SPLAT_SHOWN))
-        self._draw_splat()
+        self._draw_splat()  # the live preview is a subset either way
 
     def _draw_splat(self):
         if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer

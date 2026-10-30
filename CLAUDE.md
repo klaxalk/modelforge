@@ -194,7 +194,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
    too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; **done 2026-10-25:** one common training resolution (the largest camera at 1 / N, the others at that long side: `splat.training_data` → `transforms_x<N>.json`), semantic features and held-out evaluation per camera, frustums per camera; open: a real mixed-drone or zooming clip. Plan and decisions: `docs/todo_multicamera.md`.
-6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget" 2M):
+6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget", 500k since 2026-10-30 (2M before): the user's browser
+   runs on another computer and kn_odin's whole 1.4M-Gaussian splat (45.6 MB at 32 bytes each) took long to arrive; at
+   500k a room's camera views render as the full splat; the live preview always sends <= 300k):
    k-d cells of <= 100k Gaussians, levels of 1/4 merged per voxel by moment matching (`modelforge/splat_lod.py`,
    `splat/lod/`, built in the background when first shown: kladno_dira 5.77M in 48 s), a cut per camera (2 px per
    voxel, budget) swapped ~0.4 s after the camera stops (`gui/lod.py`); merged levels beat the random subset by
@@ -756,6 +758,21 @@ and the splat.
     time.
   - Checked on `synthetic_bag` forced to none: 20 images extracted in 0.9 s, reconstruct 18/20,
     0.26 px. Test: `test_images_only_bag`.
+- **LiDAR mesh, normal prior, learned exposure** (2026-10-30, the user's Odin room bag `kn_odin`):
+  - Right panel tab **LiDAR Mesh** (`modelforge/lidar_mesh.py`, `export/lidar_tsdf.py`): the scans fused into a TSDF
+    (six 90° depth faces per scan, so rays carve out people walking by), marching cubes → `lidarmesh/mesh.ply`
+    (View Mesh "lidar"). Splat tab "Prior mesh" auto / sfm / lidar (CLI `--prior-mesh`): its rendered depth is the
+    dense depth prior and its surface the seeds.
+  - **Normal prior** (Splat tab "Normal prior (weight)", CLI `--mesh-normal`; plugin `mesh_normal_lambda`): the
+    render's depth normals pulled to the prior mesh's on its planar pixels. Default 0.05 with the LiDAR mesh
+    (`splat.LIDAR_MESH_NORMAL`): lab2, 3000 steps: 19.83 → 20.42 dB held-out, depth error 7.2 → 2.6 %, normals off
+    the mesh 72 → 40°.
+  - **Learn exposure per photo** (Splat tab checkbox, CLI `--learn-exposure`, plugin `learn_exposure`): a log RGB
+    gain per training photo in linear light (Adam 5e-3, a small gauge loss keeps the mean at 0). On by default when
+    transforms.json has no metadata exposure (ROS bags, videos). The Odin camera's auto exposure otherwise goes into
+    the SH, and viser shows band 0 only: smudgy walls. kn_odin 10k steps, 30 held-out photos (brightness-matched):
+    full 25.91 → 26.44 dB, band 0 24.21 → 24.86 dB, depth error 2.4 → 1.5 %.
+  - The upload has a ■ Stop button (keeps what arrived; resumable as before).
 - Not done yet:
   - per-point LiDAR timestamps (motion distortion within a scan);
   - LiDAR as a BA constraint (point-to-plane residuals on SfM points);
@@ -1653,7 +1670,10 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
   above 0.5 = 100 m) matter more. With a fixed unit more steps help again (LPIPS 0.87 → 0.645 from 6k to 36k);
   PSNR flattens near 16.5–17 dB: not moving objects or light (none, per the user); renders are blurry with needle-like Gaussians, ~1.2M for ~14 ha. karlak at 10 m (ds2def18k_unit10): 22.99 / 0.700 / 0.333
   → **23.24 / 0.714 / 0.301** in the same time; its auto unit was ~31 m (kladno_dopravnik 26, fullrun_test 27). →
-  The plan's default is now one unit = 10 m. Median scene depth as the unit would give dira 72 m: not supported.
+  The plan's default is now one unit = 10 m. **Since 2026-10-30: the median camera-to-surface distance, at most 10 m**
+  (`splat_plan.scene_unit`, survey `depth_m`; the user's kn_odin lab2 room, depth 2.2 m: with 10 m the detail
+  scattered from step ~2000, depth error vs the LiDAR mesh 8 → 24 %; held-out PSNR / LPIPS at 3000 steps: 10 m
+  17.8 / 0.643, 3.75 m 20.1 / 0.548, 2 m 20.2 / 0.522, 1 m 19.6 / 0.516; flights at 17-72 m keep 10 m). Median scene depth as the unit would give dira 72 m: not supported.
 - Splat side, found on the way: nerfstudio scales poses by 1 / max |camera position| and splatfacto's thresholds
   (`densify_size_thresh`, `cull_scale_thresh`) and position learning rate are in those units (`scene_scale=1.0`);
   `schedule["scale_factor"]` fixes the scale (`--auto-scale-poses False --scale-factor`), now the default (10 m).
@@ -1662,7 +1682,9 @@ kladno_dira's 8000 frames, 2000 4K photos, one 30-min Mavic 4 flight over ~380 �
 well, dira2k's 2000 in one splat stayed blurry at ~17 dB with needle-like Gaussians, more Gaussians or steps
 helped little):
 - **When:** plan `tiles` (Splat tab "Tiles" auto / on / off, CLI `--tiles`): auto above 800 training images
-  (`TILE_ABOVE`). The plan note says so.
+  (`TILE_ABOVE`). The plan note says so. Since 2026-10-30 also only when the camera path spans more than 4 scene units
+  (`TILE_MIN_UNITS`, survey `extent_m`, `splat_plan.extent_units`): kn_odin's room (2.8 units) is one splat; karlak (5),
+  dira2k (30), berlin (45), berlin_all (80) still tile.
 - **Partition:** each camera's look-at point = median x/y of the sampled sparse points it sees (as
   `splat_plan.survey`); ⌈cameras / `PHOTOS_PER_TILE`⌉ cells (500, "Photos per tile"), cut recursively along the
   longer axis (k parts → ⌊k/2⌋ + ⌈k/2⌉). Outer cells open to infinity.

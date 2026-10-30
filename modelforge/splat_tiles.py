@@ -56,6 +56,8 @@ import numpy as np
 from modelforge import jobs, splat, splat_plan
 
 TILE_ABOVE = 800  # training images; more -> tiles (worlds up to ~800 photos train well in one piece)
+TILE_MIN_UNITS = 4.0  # ... and only when the camera path spans more scene units than this (splat_plan.scene_unit): a
+#                       room (kn_odin: 1172 photos over 6 m, unit 2.3 m: 2.8) is one splat; flights span 5 (karlak) to 80
 PHOTOS_PER_TILE = 500  # cameras looking into a cell (its photos also include oblique views from neighbours)
 MIN_VISIBLE = 0.25  # a photo joins a tile when this share of its seen sparse points lies in the cell, or ...
 MIN_IN_CELL = 0.10  # ... this share in the cell when looking at most half the margin beyond its edge
@@ -90,9 +92,11 @@ BAND0 = ("x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_
          "f_dc_0", "f_dc_1", "f_dc_2", "opacity")
 
 
-def wanted(train_images, tiles="auto"):
-    """Train in tiles? tiles: auto (above TILE_ABOVE training images) / on / off."""
-    return tiles == "on" or (tiles in (None, "", "auto") and train_images > TILE_ABOVE)
+def wanted(train_images, tiles="auto", extent_units=None):
+    """Train in tiles? tiles: auto (above TILE_ABOVE training images, over more than TILE_MIN_UNITS scene units when
+    extent_units, the camera path's horizontal extent in scene units, is known) / on / off."""
+    return tiles == "on" or (tiles in (None, "", "auto") and train_images > TILE_ABOVE
+                             and (extent_units is None or extent_units > TILE_MIN_UNITS))
 
 
 def _seen(C, R, fx, w, h, xyz):

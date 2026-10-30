@@ -98,6 +98,31 @@ def depth_loss(depth, z, clamp=1.0, gate=0.0):
     return term.mean(), rel, 0.0
 
 
+def depth_normals(z, K):
+    """Camera-frame normals (H-2, W-2, 3) of a z-depth map (H, W) through the intrinsics K (3, 3): the unprojected
+    points' central differences crossed."""
+    H, W = z.shape
+    v, u = torch.meshgrid(torch.arange(H, device=z.device, dtype=z.dtype),
+                          torch.arange(W, device=z.device, dtype=z.dtype), indexing="ij")
+    p = torch.stack([(u - K[0, 2]) / K[0, 0] * z, (v - K[1, 2]) / K[1, 1] * z, z], -1)
+    dx = p[1:-1, 2:] - p[1:-1, :-2]
+    dy = p[2:, 1:-1] - p[:-2, 1:-1]
+    return F.normalize(torch.cross(dx, dy, dim=-1), dim=-1, eps=1e-12)
+
+
+def planar_mask(z, tol):
+    """(H-2, W-2): pixels whose 3 x 3 neighbourhood of the target holds depths (> 0) on one plane: a plane's inverse
+    depth is affine in the pixel, so its second differences across and down stay within tol of the inverse depth.
+    Edges, corners and depth jumps fail it: the normal prior acts on walls, floors and ceilings."""
+    ok = z > 0
+    w = torch.where(ok, 1 / z.clamp(min=1e-6), torch.zeros_like(z))
+    c = w[1:-1, 1:-1]
+    sx = (w[1:-1, 2:] + w[1:-1, :-2] - 2 * c).abs()
+    sy = (w[2:, 1:-1] + w[:-2, 1:-1] - 2 * c).abs()
+    valid = ok[1:-1, 1:-1] & ok[1:-1, 2:] & ok[1:-1, :-2] & ok[2:, 1:-1] & ok[:-2, 1:-1]
+    return valid & (sx <= tol * c) & (sy <= tol * c)
+
+
 @dataclass
 class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     _target: Type = field(default_factory=lambda: SplatfactoLidarModel)
@@ -110,6 +135,12 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     fraction *behind* the mesh gets no target (the photos see past the mesh there: Poisson bubbles in halls, closures
     above the horizon, blobs at crowns); a render in front of the mesh (fog) is always pulled back. 0 = off"""
     lidar_depth_gate_after: int = 2000
+    mesh_normal_lambda: float = 0.0
+    """dense mesh maps only: weight of mean(1 - n_render · n_mesh) over the mesh's planar pixels (walls, floors,
+    ceilings: planar_mask), both normals from depth (the rendered expected depth and the mesh's map), so flat
+    low-texture surfaces render flat instead of lumpy (0 = off)"""
+    mesh_normal_planar_tol: float = 0.02
+    """planar_mask's tolerance (second difference of the inverse depth / the inverse depth)"""
     lidar_occlusion_window: int = 5
     """window (px, at the training resolution) for dropping returns behind a nearer one"""
     lidar_occlusion_tol: float = 0.05
@@ -131,6 +162,10 @@ class SplatfactoLidarModelConfig(SplatfactoModelConfig):
     use_exposure: bool = False
     """scale each training render by the photo's relative exposure (dataparser metadata "exposure_gains", from the
     DJI metadata), in linear light: the Gaussians hold the colours at the median exposure"""
+    learn_exposure: bool = False
+    """a learned gain per training photo (RGB, log, in linear light; their mean pulled to 0): a camera's auto
+    exposure / white balance goes into it instead of into the Gaussians' view-dependent colour, whose base colour (the
+    GUI shows band 0 only) would turn blotchy (kn_odin, a ROS bag without exposure metadata)"""
     sun_light: bool = False
     """light each training render as ambient_i + sun_i x S (docs/todo_lighting.md): S = the photo's direct sunlight
     per pixel from the SfM mesh (dataparser metadata "sun_files": visibility x cos, -1 unknown; export/sun_vis.py),
@@ -181,6 +216,9 @@ class SplatfactoLidarModel(SplatfactoModel):
             print(f"[lidar] exposure gains for {len(self.exposure_gains or [])} training images (x{g.min():.2f} .. "
                   f"x{g.max():.2f})" if self.exposure_gains else "[lidar] use_exposure: no exposure gains in "
                   "transforms.json (frames mf_exposure)", flush=True)
+        if self.config.learn_exposure:
+            self.mf_gain = torch.nn.Parameter(torch.zeros(self.num_train_data, 3))
+            print(f"[lidar] exposure learned per photo for {self.num_train_data} training images", flush=True)
         self.sun_files = meta.get("sun_files") if self.config.sun_light and not self.config.sun_learned else None
         self._sun_cache = {}  # (photo, H, W) -> its sunlight map at that size, blurred (CPU, float16)
         ref = meta.get("sun_ref")  # the photos whose ambient sets the splat's look (the most overcast flight)
@@ -225,6 +263,7 @@ class SplatfactoLidarModel(SplatfactoModel):
         if self.has_lidar:
             self.config.output_depth_during_training = True
         self._lidar_errors, self._lidar_gated = [], []
+        self._normal_errs, self._normal_share = [], []
         print(f"[lidar] dense depth maps for {sum(f is not None for f in self.depth_files)} of "
               f"{len(self.depth_files)} training images (nerfstudio holds out every 10th photo for evaluation), "
               f"depth loss weight {self.config.lidar_depth_lambda}"
@@ -286,6 +325,8 @@ class SplatfactoLidarModel(SplatfactoModel):
         gps = super().get_param_groups()
         if self.sun_files or self.sun_segment:
             gps["mf_light"] = [self.mf_ambient, self.mf_sun]
+        if self.config.learn_exposure:
+            gps["mf_gain"] = [self.mf_gain]
         return gps
 
     def _loss_mask(self, camera):
@@ -299,12 +340,14 @@ class SplatfactoLidarModel(SplatfactoModel):
 
     def get_outputs(self, camera):
         out = super().get_outputs(camera)
-        if self.training and (self.exposure_gains or self.sun_files or self.sun_segment):
+        if self.training and (self.exposure_gains or self.sun_files or self.sun_segment or self.config.learn_exposure):
             idx = (camera.metadata or {}).get("cam_idx")
             if idx is not None:
                 lin = out["rgb"].clamp(1e-6, 1) ** 2.2  # sRGB-like camera response, approximated by a gamma
                 if self.exposure_gains:
                     lin = lin * float(self.exposure_gains[int(idx)])
+                if self.config.learn_exposure:
+                    lin = lin * torch.exp(self.mf_gain[int(idx)]).to(lin.device)
                 if self.sun_segment:
                     lin = lin * self._sun_learned_light(int(idx), *lin.shape[:2])
                 elif self.sun_files:
@@ -324,6 +367,11 @@ class SplatfactoLidarModel(SplatfactoModel):
                     if d.shape != (H, W):
                         d = F.interpolate(d[None, None], size=(H, W), mode="nearest")[0, 0]
                     out["lidar_depth"] = d[:, :, None]
+                    if self.config.mesh_normal_lambda > 0:  # the intrinsics at the render's size, for normals
+                        s = self._get_downscale_factor()
+                        camera.rescale_output_resolution(1 / s)
+                        out["mf_K"] = camera.get_intrinsics_matrices()[0].to(d.device)
+                        camera.rescale_output_resolution(s)
         elif self.training and self.has_lidar and out.get("depth") is not None:
             with torch.no_grad():
                 c2w = self.camera_optimizer.apply_to_camera(camera)
@@ -364,6 +412,13 @@ class SplatfactoLidarModel(SplatfactoModel):
             # photos' (the most overcast flight's) mean ambient 1, so the splat looks like them; else all photos'
             amb = self.mf_ambient[self.sun_ref.to(self.mf_ambient.device)] if self.sun_ref is not None else self.mf_ambient
             loss["mf_light_gauge"] = 0.1 * amb.mean() ** 2
+        if self.training and self.config.learn_exposure:  # the Gaussians hold the colours at the mean exposure
+            loss["mf_gain_gauge"] = 0.1 * (self.mf_gain.mean(0) ** 2).sum()
+            every = self.config.lidar_report_every
+            if every and (self.step + 1) % every == 0:
+                g = torch.exp(self.mf_gain.detach().mean(1)).cpu().numpy()
+                print(f"[lidar] step {self.step + 1}: learned exposure x{np.percentile(g, 5):.2f} .. "
+                      f"x{np.percentile(g, 95):.2f} (5-95 %)", flush=True)
         if self.training and self.sun_segment:
             if self.config.sun_vis_prior > 0:
                 loss["sun_vis_prior"] = self.config.sun_vis_prior * (1 - torch.sigmoid(self.gauss_params["mf_vis"])).mean()
@@ -385,14 +440,27 @@ class SplatfactoLidarModel(SplatfactoModel):
         if target is None:
             return loss
         m = target > 0
+        gate = self.config.lidar_depth_gate if (
+            self.depth_files and self.step >= self.config.lidar_depth_gate_after) else 0.0
         if m.any():
             z = target[m]
-            gate = self.config.lidar_depth_gate if (
-                self.depth_files and self.step >= self.config.lidar_depth_gate_after) else 0.0
             term, rel, gated = depth_loss(outputs["depth"][m], z, self.config.lidar_depth_clamp, gate)
             if self.config.lidar_depth_lambda > 0:
                 loss["lidar_depth_loss"] = self.config.lidar_depth_lambda * term
             self._report(rel.detach(), gated)
+        K = outputs.get("mf_K")
+        if self.config.mesh_normal_lambda > 0 and K is not None:
+            zt = target[..., 0]
+            plane = planar_mask(zt, self.config.mesh_normal_planar_tol)
+            if gate > 0:  # where the photos see past the mesh, its normals do not hold either
+                plane &= (outputs["depth"][1:-1, 1:-1, 0] - zt[1:-1, 1:-1]).detach() <= gate * zt[1:-1, 1:-1]
+            if plane.any():
+                n_t = depth_normals(zt, K)[plane]
+                n_r = depth_normals(outputs["depth"][..., 0], K)[plane]
+                cos = (n_r * n_t).sum(-1)
+                loss["mesh_normal"] = self.config.mesh_normal_lambda * (1 - cos).mean()
+                self._normal_errs.append(float(torch.rad2deg(torch.acos(cos.detach().clamp(-1, 1))).median()))
+                self._normal_share.append(float(plane.float().mean()))
         return loss
 
     @torch.no_grad()
@@ -423,7 +491,11 @@ class SplatfactoLidarModel(SplatfactoModel):
             self._lidar_errors, self._lidar_gated = [], []
             print(f"[lidar] step {self.step + 1}: depth error median {100 * np.median(e):.2f}% "
                   f"p90 {100 * np.percentile(e, 90):.2f}% within 5% {100 * np.mean(e < 0.05):.1f}%"
-                  + (f" gated {100 * g:.1f}%" if g > 0 else ""), flush=True)
+                  + (f" gated {100 * g:.1f}%" if g > 0 else "")
+                  + (f"; normals off the mesh median {np.median(self._normal_errs):.1f}° on "
+                     f"{100 * np.mean(self._normal_share):.0f}% of the pixels (planar)" if self._normal_errs else ""),
+                  flush=True)
+            self._normal_errs, self._normal_share = [], []
 
 
 def _method(base, name, description):
@@ -436,6 +508,7 @@ def _method(base, name, description):
     cfg.pipeline.datamanager.dataparser = LidarDataParserConfig()
     from nerfstudio.engine.optimizers import AdamOptimizerConfig
     cfg.optimizers["mf_light"] = {"optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15), "scheduler": None}  # sun_light
+    cfg.optimizers["mf_gain"] = {"optimizer": AdamOptimizerConfig(lr=5e-3, eps=1e-15), "scheduler": None}  # exposure
     cfg.optimizers["mf_vis"] = {"optimizer": AdamOptimizerConfig(lr=0.02, eps=1e-15), "scheduler": None}  # sun_learned
     return MethodSpecification(config=cfg, description=description)
 

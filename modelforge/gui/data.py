@@ -569,6 +569,11 @@ def dense_artifacts(path):
         if os.path.exists(p):
             found["meshes"]["sfm"] = p
             break
+    for name in ("preview_coloured.ply", "mesh_coloured.ply", "preview.ply", "mesh.ply"):  # from the LiDAR scans
+        p = os.path.join(path, "lidarmesh", name)
+        if os.path.exists(p):
+            found["meshes"]["lidar"] = p
+            break
     p = os.path.join(path, "splat", "splat_enu.ply")
     if os.path.exists(p):
         found["splat"] = p
@@ -587,6 +592,28 @@ def load_fused(ply_path, max_points=1_500_000, seed=0):
         cols = np.stack([v["red"][idx], v["green"][idx], v["blue"][idx]], -1).astype(np.uint8)
     else:
         cols = np.full((len(idx), 3), 200, np.uint8)
+    return pts, cols, len(v)
+
+
+def load_lidar_cloud(ply_path, colour_by="height", max_points=2_000_000, seed=0):
+    """A LiDAR cloud (x y z intensity) for the View: (points, colours, total); colours by height (2-98 %, turbo) or
+    by intensity (grey, up to its 99th percentile)."""
+    import cv2
+    import plyfile
+    v = plyfile.PlyData.read(ply_path)["vertex"].data
+    idx = np.arange(len(v))
+    if len(v) > max_points:
+        idx = np.sort(np.random.default_rng(seed).choice(len(v), max_points, replace=False))
+    pts = np.stack([v["x"][idx], v["y"][idx], v["z"][idx]], -1).astype(np.float32)
+    if colour_by == "intensity" and "intensity" in v.dtype.names:
+        i = np.asarray(v["intensity"][idx], np.float32)
+        hi = float(np.percentile(i, 99)) or 1.0
+        g = (np.clip(i / hi, 0, 1) * 215 + 40).astype(np.uint8)
+        cols = np.repeat(g[:, None], 3, 1)
+    else:
+        lo, hi = np.percentile(pts[:, 2], [2, 98]) if len(pts) else (0.0, 1.0)
+        t = (np.clip((pts[:, 2] - lo) / max(hi - lo, 1e-6), 0, 1) * 255).astype(np.uint8)
+        cols = cv2.applyColorMap(t[:, None], cv2.COLORMAP_TURBO)[:, 0, ::-1].copy()
     return pts, cols, len(v)
 
 
@@ -610,7 +637,7 @@ def load_textured_mesh(ply_path):
 
 
 SPLAT_SHOWN = 1_000_000  # a finished splat larger than this is shown as a random subset (View: All gaussians)
-LIVE_SPLAT_SHOWN = 500_000  # the same for live training snapshots
+LIVE_SPLAT_SHOWN = 300_000  # live training snapshots: always at most this many (9.6 MB per update over the network)
 
 
 def splat_count(ply_path):

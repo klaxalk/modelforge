@@ -93,6 +93,27 @@ def test_interrupted_listed_and_discarded(tmp_path):
     assert not upload.unfinished(folder) and not [n for n in os.listdir(folder) if "mfupload" in n]
 
 
+def test_stop_keeps_what_arrived(tmp_path):
+    """The Stop button: part -1 ends the transfer after the parts sent before it; the data stays for a resume."""
+    data = np.random.default_rng(1).integers(0, 256, 3 * upload.CHUNK, dtype=np.uint8).tobytes()
+    app = Fake(tmp_path)
+    app.videos._refresh = lambda: None
+    ups = upload.StreamUploads(app)
+    app.start("A", "clip.MP4", len(data))
+    app.part("A", data, 0)
+    app.handlers["FileTransferPart"](7, SimpleNamespace(source_component_uuid="mf-upload", transfer_uuid="A",
+                                                        part_index=-1, content=b""))
+    t0 = time.time()
+    while "stopped" not in app.videos.g_msg.content and time.time() - t0 < 5:
+        time.sleep(0.02)
+    assert "stopped" in app.videos.g_msg.content and not ups.by_transfer and not ups.progress()
+    app.part("A", data, 1)  # a part still in flight is ignored
+    st = upload.unfinished(os.path.join(tmp_path, "videos"))
+    assert len(st) == 1 and st[0]["done"] == upload.CHUNK
+    app.start("B", "clip.MP4", len(data))  # picked again: resumes
+    assert app.last("B") == upload.CHUNK
+
+
 def test_bag_archive_unpacked(tmp_path):
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as t:

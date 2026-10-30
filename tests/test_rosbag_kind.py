@@ -319,6 +319,12 @@ def test_splat_lidar_command():
     nd = splat.train_command("p", "splatfacto", lidar_depth=0.0, regularize={"needle": 0.02})
     assert nd[nd.index("--pipeline.model.needle-lambda") + 1] == "0.02" and splat.regularizing({"needle": 0.02})
     assert splat.regularizing({"flatten": 0.1}) and not splat.regularizing({"flatten": 0})
+    nm = splat.train_command("p", "splatfacto", lidar_depth=0.1, regularize={"normal": 0.05}, depth_maps="/d")
+    assert nm[nm.index("--pipeline.model.mesh-normal-lambda") + 1] == "0.05" and splat.regularizing({"normal": 0.05})
+    assert "--pipeline.model.mesh-normal-lambda" not in splat.train_command(  # needs the dense maps
+        "p", "splatfacto", lidar_depth=0.1, regularize={"normal": 0.05})
+    ex = splat.train_command("p", "splatfacto", lidar_depth=0.0, regularize={"exposure_learn": True})
+    assert ex[ex.index("--pipeline.model.learn-exposure") + 1] == "True" and splat.regularizing({"exposure_learn": True})
     plain = splat.train_command("p", "splatfacto")
     assert plain[1] == "splatfacto" and "nerfstudio-data" in plain and "lidar-data" not in plain
     assert splat.parse_lidar("[lidar] step 1500: depth error median 0.64% p90 2.57% within 5% 95.3%") == {
@@ -352,6 +358,15 @@ l0, rel, g0 = depth_loss(D, z)
 lg, _, g = depth_loss(D, z, gate=0.5)
 assert abs(l0.item() - (0 + 0.6 + 0.4 + 1.0) / 4) < 1e-6 and g0 == 0
 assert abs(lg.item() - (0 + 0.6 + 0.4) / 4) < 1e-6 and g == 0.25  # only the one behind by > 50 % is dropped
+from mf_splatfacto_lidar import depth_normals, planar_mask
+v, u = torch.meshgrid(torch.arange(60.0), torch.arange(80.0), indexing="ij")
+n = torch.tensor([0.4, -0.3, -1.0]); n = n / n.norm()
+r = torch.stack([(u - 40) / 50, (v - 30) / 50, torch.ones_like(u)], -1)
+zp = -2.0 / (r @ n)  # a tilted plane
+Kp = torch.tensor([[50.0, 0, 40], [0, 50.0, 30], [0, 0, 1]])
+assert planar_mask(zp, 0.02).all() and torch.allclose(depth_normals(zp, Kp)[30, 40].abs(), n.abs(), atol=1e-4)
+zs = zp.clone(); zs[:, 40:] += 0.5  # a step: its columns are not planar
+assert not planar_mask(zs, 0.02)[:, 38:40].any() and planar_mask(zs, 0.02)[:, :37].all()
 print("ok")
 """
     r = subprocess.run([os.path.join(splat.NS_BIN, "python"), "-c", code], env=splat._env(),
@@ -361,6 +376,7 @@ print("ok")
                        capture_output=True, text=True, timeout=300)
     assert "lidar-depth-lambda" in r.stdout and "Error" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:]
     assert "flatten-lambda" in r.stdout and "sky-alpha-lambda" in r.stdout and "needle-lambda" in r.stdout
+    assert "mesh-normal-lambda" in r.stdout and "learn-exposure" in r.stdout
     r = subprocess.run([os.path.join(splat.NS_BIN, "ns-train"), "splatfacto-lidar", "lidar-data", "--help"],
                        env=splat._env(), capture_output=True, text=True, timeout=300)
     assert "seed-ply" in r.stdout, (r.stdout + r.stderr)[-2000:]

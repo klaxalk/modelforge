@@ -80,8 +80,9 @@ def seed_points(mesh, cloud, out, spacing=None, gap=SEED_GAP, on_line=print):
     P = np.c_[pc["x"], pc["y"], pc["z"]].astype(np.float64)
     if spacing is None:
         try:
-            spacing = float(json.load(open(os.path.join(folder, "stats.json")))["point_spacing"])
-        except (OSError, ValueError, KeyError):
+            st = json.load(open(os.path.join(folder, "stats.json")))
+            spacing = float(st.get("point_spacing") or 2 * st["voxel"])  # the LiDAR mesh: 2 voxels
+        except (OSError, ValueError, KeyError, TypeError):
             spacing = 0.1
     lo, hi = np.percentile(P[:, :2], 0.5, axis=0) - 5, np.percentile(P[:, :2], 99.5, axis=0) + 5
     cen = V[f].mean(1)
@@ -114,8 +115,8 @@ def seed_points(mesh, cloud, out, spacing=None, gap=SEED_GAP, on_line=print):
         vert[k] = np.clip(np.round(rgb[:, i]), 0, 255)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     plyfile.PlyData([plyfile.PlyElement.describe(vert, "vertex")], text=False).write(out)
-    on_line(f"splat: {len(vert):,} starting Gaussians from the SfM mesh where the SfM points are thin (spacing "
-            f"{spacing:.2f} m, none within {gap * spacing:.2f} m of the {len(P):,} SfM points; "
+    on_line(f"splat: {len(vert):,} starting Gaussians from the mesh ({os.path.basename(folder)}) where the starting "
+            f"points are thin (spacing {spacing:.2f} m, none within {gap * spacing:.2f} m of the {len(P):,} points; "
             + ("photo colours)" if os.path.exists(coloured) else "colours of the SfM points)"))
     return len(vert)
 
@@ -457,7 +458,7 @@ def write_coloured(mesh_path, rgb, out_path):
     os.replace(out_path + ".part.ply", out_path)
 
 
-def colour(project, width=1920, on_line=print, token=None, on_live=None, every=100):
+def colour(project, width=1920, on_line=print, token=None, on_live=None, every=100, folder=None, report_key="sfm_mesh"):
     """Colour PROJECT/sfmmesh/mesh.ply from the photos of transforms.json (see the module doc).
     on_live(path, k, n): the colours after k of n photos were saved to path (sfmmesh/colour_live.npy), every
     `every` photos. Stopped (jobs.Cancelled), the colours saved last become mesh_coloured.ply (partial) before the
@@ -465,10 +466,10 @@ def colour(project, width=1920, on_line=print, token=None, on_live=None, every=1
     from modelforge import splat
     from modelforge.pipeline import Report
     token = token or jobs.Token()
-    out = os.path.join(project, OUT)
+    out = os.path.join(project, folder or OUT)  # folder: another mesh's (lidarmesh/)
     mesh = os.path.join(out, "mesh.ply")
     if not os.path.exists(mesh):
-        raise RuntimeError("no SfM mesh yet: Run SfM mesh first")
+        raise RuntimeError("no SfM mesh yet: Run SfM mesh first" if folder is None else f"no mesh in {folder}/ yet")
     if not os.path.exists(os.path.join(project, "transforms.json")):
         raise RuntimeError("transforms.json missing: run export first")
     why = splat.available()
@@ -497,7 +498,7 @@ def colour(project, width=1920, on_line=print, token=None, on_live=None, every=1
         stats = json.load(open(os.path.join(out, "stats.json")))
         stats["colour"] = rep
         json.dump(stats, open(os.path.join(out, "stats.json"), "w"), indent=1)
-        Report(project).set("sfm_mesh", stats)
+        Report(project).set(report_key, stats)
     try:
         splat._stream([os.path.join(splat.NS_BIN, "python"), script, project, mesh, coloured, "--width", str(int(width)),
                        "--live", live, "--every", str(int(every))], line, token)

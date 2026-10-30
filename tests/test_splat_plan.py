@@ -45,6 +45,21 @@ def test_survey_assumes_no_ground_plane(tmp_path):
     assert abs(s["gsd_m"] - 0.15) < 1e-6 and s["overlap"] > 30  # 3x the footprint per side
 
 
+def test_scene_unit_follows_the_depth(tmp_path):
+    """One nerfstudio unit = the median camera-to-surface distance, at most 10 m: a flight 50 m up keeps 10 m, a
+    room seen from ~2 m trains in 2 m units (10 m scattered the detail there), no points -> 10 m."""
+    s = splat_plan.survey(make_survey_project(str(tmp_path)))
+    assert abs(s["depth_m"] - 50) < 1e-6
+    assert splat_plan.suggest(s, vram=24)["scale_factor"] == 0.1
+    room = dict(s, depth_m=2.2)
+    assert abs(splat_plan.suggest(room, vram=24)["scale_factor"] - 1 / 2.2) < 1e-9
+    assert splat_plan.scene_unit({}) == splat_plan.WORLD_UNIT_M
+    assert splat_plan.scene_unit({"depth_m": 0.001}) == splat_plan.MIN_UNIT_M
+    big = dict(s, images=1200, train_images=1080)  # many photos: tiles over a flight, one splat in a room
+    assert splat_plan.suggest(dict(big, extent_m=300.0), vram=24)["tiles"]
+    assert not splat_plan.suggest(dict(big, extent_m=6.0, depth_m=2.2), vram=24)["tiles"]
+
+
 def test_survey_without_points(tmp_path):
     p = make_survey_project(str(tmp_path))
     os.remove(os.path.join(p, "sparse_pc.ply"))

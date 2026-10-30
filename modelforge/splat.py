@@ -244,8 +244,12 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
             cmd += ["--pipeline.model.flatten-lambda", f"{float(reg['flatten']):g}"]
         if reg.get("needle"):
             cmd += ["--pipeline.model.needle-lambda", f"{float(reg['needle']):g}"]
+        if reg.get("normal") and depth_maps:  # the mesh's normals come from its dense depth maps
+            cmd += ["--pipeline.model.mesh-normal-lambda", f"{float(reg['normal']):g}"]
         if reg.get("exposure") or exposure_factors:
             cmd += ["--pipeline.model.use-exposure", "True"]
+        if reg.get("exposure_learn"):
+            cmd += ["--pipeline.model.learn-exposure", "True"]
         if sky_masks:
             from modelforge import sky
             cmd += ["--pipeline.model.sky-alpha-lambda", f"{sky.ALPHA:g}"]
@@ -280,6 +284,10 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
 
 
 FLATTEN = 0.02  # default flattening weight: 0.1 flattened every Gaussian completely (fullrun_test)
+LIDAR_MESH_NORMAL = 0.05  # the normal prior's default with the LiDAR mesh as the dense depth prior. kn_odin lab2
+# (2026-10-30; 3000 steps, unit 2.3 m, camera optimizer off; held-out PSNR / LPIPS / depth error / normal error):
+# 0 19.83 / 0.535 / 7.2 % / 72 deg, 0.05 20.42 / 0.516 / 2.6 % / 40 deg. An earlier 50k-step GUI run with 0.05 that
+# grew smeared blobs had the 10 m scene unit, which alone scatters a room (splat_plan.scene_unit)
 NEEDLE = 0.01  # default weight against needles (largest > 3x middle scale; the user set 0.01, 2026-10-25): karlak 0.02
 #               removed them, held-out PSNR -0.04 dB, LPIPS +0.015 on the flight path (their cost off the path unmeasured)
 EXPOSURE = True  # default: renders scaled by the photos' exposure from the metadata (karlak A/B 2026-10-24: held-out
@@ -303,7 +311,9 @@ def camera_stops(regularize):
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
     return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or float(regularize.get("needle") or 0) > 0
-                                 or bool(regularize.get("exposure")) or bool(regularize.get("sky"))
+                                 or float(regularize.get("normal") or 0) > 0
+                                 or bool(regularize.get("exposure")) or bool(regularize.get("exposure_learn"))
+                                 or bool(regularize.get("sky"))
                                  or bool(regularize.get("sun")) or camera_stops(regularize))
     # older records may name far_mask: gone
 
@@ -637,7 +647,9 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         reg = regularize
         on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
                 + (f", needles {float(reg['needle']):g}" if reg.get("needle") else "")
+                + (f", normals from the mesh {float(reg['normal']):g}" if reg.get("normal") and depth_dense else "")
                 + (", exposure from the metadata" if reg.get("exposure") else "")
+                + (", exposure learned per photo" if reg.get("exposure_learn") else "")
                 + "".join(f", {k} {v:+g} stops" for k, v in camera_stops(reg).items())
                 + (", sky masks" if reg.get("sky") else "") + (", sun visibility learned per Gaussian" if reg.get("sun") == "learned"
                                                         else ", sunlight learned per photo" if reg.get("sun") else ""))
@@ -846,6 +858,9 @@ def main():
     ap.add_argument("--flatten", type=float, default=FLATTEN, metavar="W",
                     help="weight of the flattening loss (smallest / middle scale: flat Gaussians, no needles; "
                          f"default {FLATTEN}; 0 = off)")
+    ap.add_argument("--mesh-normal", type=float, default=None, metavar="W",
+                    help="with --mesh-prior dense: weight of a normal loss on the mesh's planar pixels (walls, floors, "
+                         f"ceilings render flat; 0 = off; default {LIDAR_MESH_NORMAL:g} with the LiDAR mesh, else off)")
     ap.add_argument("--needle", type=float, default=NEEDLE, metavar="W",
                     help="weight of the loss on needles (largest scale beyond 3x the middle one; 0 = off, default)")
     ap.add_argument("--sky-masks", action=argparse.BooleanOptionalAction, default=None,
@@ -863,8 +878,11 @@ def main():
                     help="extra starting Gaussians on the SfM mesh (sfmmesh/mesh.ply) where the SfM points are thin, "
                          "flat in its surface")
     ap.add_argument("--mesh-prior", choices=("off", "vertices", "dense"), default="off",
-                    help="depth targets from the SfM mesh (sfmmesh/mesh.ply): its vertices, or rendered into every "
-                         "training camera (dense); needs --lidar-depth W")
+                    help="depth targets from a mesh (--prior-mesh): its vertices, or rendered into every training "
+                         "camera (dense); needs --lidar-depth W")
+    ap.add_argument("--prior-mesh", choices=("auto", "sfm", "lidar"), default="auto",
+                    help="the mesh of --mesh-prior: sfm (sfmmesh/mesh.ply), lidar (lidarmesh/mesh.ply, ROS bag "
+                         "projects: python -m modelforge.lidar_mesh) or auto (lidar when it exists, else sfm)")
     ap.add_argument("--no-tile-mask", dest="tile_mask", action="store_false", default=True,
                     help="tiled runs: train every photo's whole image (default: its pixels showing other tiles are left "
                          "out of the losses; needs --mesh-prior dense)")
@@ -875,15 +893,19 @@ def main():
                     help="brighten one camera's photos by STOPS (e.g. \"DJI NEO2 1920x1080=0.75\"; the camera keys of "
                          "poses.json); also stored for the project (PROJECT/exposure_stops.json, the Splat tab's), "
                          "which applies when not given")
+    ap.add_argument("--learn-exposure", action=argparse.BooleanOptionalAction, default=None,
+                    help="a brightness gain learned per photo (auto exposure out of the Gaussians' colours; default: "
+                         "on without exposure metadata, e.g. ROS bags)")
     ap.add_argument("--bilateral-grid", action="store_true", help="splatfacto's bilateral grid per photo (colour / tone)")
     ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
     project = os.path.abspath(args.project)
     from modelforge import sky as _sky
     use_sky = _sky.default_on(project) if args.sky_masks is None else args.sky_masks
-    reg = {"flatten": args.flatten, "needle": args.needle, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
+    reg = {"flatten": args.flatten, "needle": args.needle, "normal": args.mesh_normal or 0.0, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
            "bilateral": args.bilateral_grid, "antialiased": args.antialiased,
-           "sun": "learned" if args.sun_learned else args.sun_light}
+           "sun": "learned" if args.sun_learned else args.sun_light,
+           "exposure_learn": (not exposure_known(project)) if args.learn_exposure is None else args.learn_exposure}
     from modelforge import exposure as _exposure
     for c in args.camera_stops:
         key, _, v = c.rpartition("=")
@@ -893,12 +915,15 @@ def main():
     reg["exposure_stops"] = _exposure.stops(_sky.root(project))
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm
-    seed = _sm.depth_cloud(project) if args.seed_mesh else None
+    from modelforge import lidar_mesh as _lm
+    seed = _lm.prior_mesh(project, args.prior_mesh) if args.seed_mesh else None
     if args.seed_mesh and seed is None:
-        sys.exit("error: --seed-mesh needs the SfM mesh (python -m modelforge.sfm_mesh PROJECT)")
-    prior = _sm.depth_cloud(project) if args.mesh_prior != "off" else None
+        sys.exit(f"error: --seed-mesh needs the {args.prior_mesh} mesh (python -m modelforge.sfm_mesh / lidar_mesh PROJECT)")
+    prior = _lm.prior_mesh(project, args.prior_mesh) if args.mesh_prior != "off" else None
     if args.mesh_prior != "off" and (prior is None or args.lidar_depth is None):
-        sys.exit("error: --mesh-prior needs the SfM mesh and --lidar-depth W")
+        sys.exit(f"error: --mesh-prior needs the {args.prior_mesh} mesh and --lidar-depth W")
+    if args.mesh_normal is None and prior and args.mesh_prior == "dense" and prior == _lm.depth_cloud(project):
+        reg = dict(reg or {}, flatten=args.flatten, needle=args.needle, normal=LIDAR_MESH_NORMAL)  # the LiDAR default
     try:
         if args.resume:
             resume(project, on_line=lambda m: print(m, flush=True))
@@ -912,8 +937,9 @@ def main():
             splat_tiles.setup(project, args.tile_photos or splat_tiles.PHOTOS_PER_TILE,
                               on_line=lambda m: print(m, flush=True), layout=args.tile_layout)
             return
-        if args.tile is not None or (not args.no_plan and splat_tiles.wanted(splat_plan.survey(project)["train_images"],
-                                                                             args.tiles)):
+        sv = splat_plan.survey(project) if args.tile is None and not args.no_plan else None
+        if args.tile is not None or (sv and splat_tiles.wanted(sv["train_images"], args.tiles,
+                                                               splat_plan.extent_units(sv))):
             splat_tiles.run(project, args.method, dict(iterations=args.iterations, downscale=args.downscale,
                                                        strategy=args.strategy, max_gaussians=args.max_gaussians,
                                                        camera_opt=args.camera_opt), extra,

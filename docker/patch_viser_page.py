@@ -47,7 +47,7 @@ const id=()=>crypto.randomUUID?crypto.randomUUID():Date.now()+"-"+Math.random().
 const send=m=>{const v=window.__mfV;if(!v||!v.sendMessage)return false;try{v.sendMessage(m);return true}catch(e){return false}};
 const mb=b=>(b/1e6).toFixed(b<1e8?1:0);
 window.__mfAck=n=>{const u=ups[n.transfer_uuid];if(!u)return false;u.onAck(n.transferred_bytes);return true};
-async function one(file,target,show){
+async function one(file,target,show,box){
  const parts=Math.ceil(file.size/CH),src="mf-upload|"+target+"|"+file.lastModified;
  let u={acked:-1,sent:0,last:Date.now(),wake:null,err:false},t0=Date.now(),t1=0;
  const start=()=>{if(u.tid)delete ups[u.tid];u.tid=id();ups[u.tid]=u;u.acked=-1;u.started=Date.now();
@@ -61,6 +61,9 @@ async function one(file,target,show){
    +(rate>0?", "+mb(rate)+" MB/s":"")+(t1?" · resumed at "+mb(t1)+" MB":""))};
  start();
  while(!u.err&&u.acked<file.size){
+  if(box&&box.__mfStop){if(u.acked>=0)send({type:"FileTransferPart",source_component_uuid:"mf-upload",transfer_uuid:u.tid,
+   part_index:-1,content:new Uint8Array(0)});delete ups[u.tid];show(file.name+": stopped at "+mb(Math.max(u.acked,0))+" / "
+   +mb(file.size)+" MB (kept: pick it again to resume)");return false}
   if(u.acked<0){await waitAck(1000);if(u.acked<0&&Date.now()-u.started>5000){show(file.name+": waiting for the server …");start()}continue}
   if(u.sent<file.size&&u.sent-u.acked<WIN){const i=Math.floor(u.sent/CH);
    const buf=await file.slice(i*CH,Math.min(file.size,(i+1)*CH)).arrayBuffer();
@@ -74,8 +77,12 @@ async function one(file,target,show){
 let busy=Promise.resolve();
 document.addEventListener("change",e=>{const t=e.target;if(!t||!t.matches||!t.matches("input[data-mf-upload]"))return;
  const box=t.closest("[data-mf-upload-box]"),out=box&&box.querySelector(".mf-upload-status"),target=t.dataset.mfUpload;
- const show=s=>{if(out)out.textContent=s};
- for(const f of Array.from(t.files))busy=busy.then(()=>one(f,target,show)).catch(x=>show(String(x)));t.value=""},true);
+ const show=s=>{if(out)out.textContent=s},stop=box&&box.querySelector(".mf-upload-stop");
+ if(box)box.__mfStop=false;if(stop)stop.style.display="";
+ for(const f of Array.from(t.files))busy=busy.then(()=>box&&box.__mfStop?false:one(f,target,show,box)).catch(x=>show(String(x)));
+ busy=busy.then(()=>{if(stop&&!Object.keys(ups).length)stop.style.display="none"});t.value=""},true);
+document.addEventListener("click",e=>{const t=e.target;if(!t||!t.closest)return;const b=t.closest(".mf-upload-stop");if(!b)return;
+ const box=b.closest("[data-mf-upload-box]");if(box)box.__mfStop=true;b.style.display="none"},true);
 document.addEventListener("click",e=>{const t=e.target;if(!t||!t.matches||!t.matches("img[data-mf-click]"))return;
  const r=t.getBoundingClientRect(),v=window.__mfV;if(!v||!v.sendMessage||!r.width)return;
  v.sendMessage({type:"GuiUpdateMessage",uuid:t.dataset.mfClick,updates:{value:((e.clientX-r.left)/r.width).toFixed(6)+","+

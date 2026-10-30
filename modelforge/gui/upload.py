@@ -16,6 +16,9 @@ side (docker/patch_viser_page.py, UPLOADER) and server side (here):
   there: after a dropped connection on its own, after a reload or a GUI restart when the same file is picked again.
 - Complete: renamed into place by videos.finish_upload (archives of bag folders unpacked), as viser's uploads.
 - Refused (a name that may not be uploaded, an existing file): acknowledged with -1, the reason in the tab.
+- Stopped (the upload box's Stop button): the browser sends no more parts and one FileTransferPart with part_index
+  -1; what arrived is saved as for a dropped connection (Videos tab: interrupted uploads, resumed by picking the same
+  file again, or 🗑).
 """
 import json
 import os
@@ -73,6 +76,10 @@ class Upload:
         while True:
             item = self.q.get()
             if item is None:
+                return
+            if item == "stop":  # after the parts queued before it
+                self.stop()
+                self.owner.stopped(self)
                 return
             index, content = item
             off = index * CHUNK
@@ -157,6 +164,10 @@ class StreamUploads:
         up = self.by_transfer.get(m.transfer_uuid)
         if up is None or m.source_component_uuid != TAG:
             return
+        if int(m.part_index) < 0:  # the user stopped it: keep what arrived (the writer saves when it gets there)
+            self._forget(up)
+            up.q.put("stop")
+            return
         up.q.put((int(m.part_index), bytes(m.content)))
 
     # --- to the browser and the tabs ----------------------------------------------------------------------------
@@ -169,6 +180,16 @@ class StreamUploads:
 
     def ack(self, up, done):
         self._send(up.client_id, up.transfer, done, up.size)
+
+    def stopped(self, up):
+        self.app._on_log(f"upload: {up.name} stopped at {up.done / 1e6:.0f} of {up.size / 1e6:.0f} MB (kept: pick the "
+                         "same file again to resume, or 🗑 in the Videos tab)")
+        self.app.videos.g_msg.content = (f"⏹ upload of `{up.name}` stopped at {up.done / 1e6:.0f} / "
+                                         f"{up.size / 1e6:.0f} MB: kept as an interrupted upload")
+        try:
+            self.app.videos._refresh()  # the interrupted uploads list
+        except Exception:  # noqa: BLE001 - only the list
+            pass
 
     def refuse(self, up, why):
         self._send(up.client_id, up.transfer, -1, -1)
@@ -236,4 +257,9 @@ def widget(target, label="＋ Upload video / SRT / ROS bag", hint=""):
             f'<label style="display:block;text-align:center;padding:6px 10px;border-radius:6px;cursor:pointer;'
             f'border:1px solid rgba(128,128,128,.5);font-size:0.85em">{label}'
             f'<input type="file" multiple data-mf-upload="{target}" style="display:none"></label>'
-            f'<div class="mf-upload-status" style="font-size:0.8em;opacity:.85;margin-top:4px"></div></div>')
+            f'<div style="display:flex;align-items:center;gap:6px;margin-top:4px">'
+            f'<div class="mf-upload-status" style="font-size:0.8em;opacity:.85;flex:1"></div>'
+            f'<button type="button" class="mf-upload-stop" title="Stop uploading (this file and the ones queued after '
+            f'it). What arrived is kept: pick the same file again to resume, or delete it in the Videos tab." '
+            f'style="display:none;font-size:0.8em;padding:2px 8px;border-radius:5px;cursor:pointer;'
+            f'border:1px solid #ff4d4f;color:#ff4d4f;background:transparent">■ Stop</button></div></div>')

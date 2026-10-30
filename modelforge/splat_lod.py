@@ -37,7 +37,9 @@ MAX_LEVELS = 5
 COV_SCALE = 1.0  # merged covariances x this (calibrated: build/lod/calibrate.py)
 PIXELS = 2.0  # a level is fine enough once its voxel is under this many pixels (karlak: merged levels beat level 0 up to ~3 px)
 OUTSIDE_WEIGHT = 0.25  # cells outside the view refine later
-BUDGET = 2_000_000  # Gaussians in the browser (View -> LoD budget)
+BUDGET = 500_000  # Gaussians in the browser (View -> LoD budget; 2M until 2026-10-30): 32 bytes each, so 16 MB per
+# full send, for browsers on another computer. kn_odin (a room, 0.93M Gaussians, 16 cells): renders at 24 camera views
+# vs the full splat median 72 dB / worst 32 dB at 500k; 300k 39 / 25 dB with coarse objects at the views' edges
 TRIU = np.array([0, 1, 2, 4, 5, 8])
 VERSION = 1
 

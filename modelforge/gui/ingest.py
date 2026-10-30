@@ -44,6 +44,21 @@ def source_color(k):
     return PALETTE[k % len(PALETTE)]
 
 
+def plan_dot_size(pts, largest=1.2):
+    """The planned images' dot size (m): half the median step between a source's consecutive images, at most 1 %
+    of the plan's extent and `largest` (large flights look as before; a small local scene is not filled by them)."""
+    steps = [np.linalg.norm(np.diff(q, axis=0), axis=1) for q in pts if len(q) > 1]
+    steps = np.concatenate(steps) if steps else np.zeros(0)
+    steps = steps[steps > 0]
+    size = 0.5 * float(np.median(steps)) if len(steps) else largest
+    allp = np.concatenate(pts) if pts else np.zeros((0, 3))
+    if len(allp) > 1:
+        extent = float(np.ptp(allp, axis=0).max())
+        if extent > 0:
+            size = min(size, 0.01 * extent)
+    return float(max(min(size, largest), 1e-3))
+
+
 class IngestPanel:
     def __init__(self, app, gui):
         self.app, self.gui, self.server = app, gui, app.server
@@ -765,7 +780,8 @@ class IngestPanel:
                                 thickness_units="screen")
         p = np.concatenate(pts).astype(np.float32) if pts else np.zeros((1, 3), np.float32)
         c = np.concatenate(pcols) if pcols else np.zeros((1, 3), np.uint8)
-        scene.add_point_cloud("/ingest/samples", points=p, colors=c, point_size=1.2, precision="float32",
+        self._dot = plan_dot_size(pts)
+        scene.add_point_cloud("/ingest/samples", points=p, colors=c, point_size=self._dot, precision="float32",
                               point_shape="circle")
 
     # ------------------------------------------------------------------ frame preview
@@ -831,7 +847,7 @@ class IngestPanel:
                                     f"camera at ({p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}) m in `{c.ros['world_frame']}`")
             if self.g_show.value:
                 self.server.scene.add_camera_frustum(
-                    "/ingest/cursor", fov=np.radians(60), aspect=c.width / c.height, scale=1.0, color=(255, 255, 255),
+                    "/ingest/cursor", fov=np.radians(60), aspect=c.width / c.height, scale=self._cursor_size(1.0), color=(255, 255, 255),
                     wxyz=ex.rot_to_quat(c.T[i][:3, :3]), position=p, image=self.g_pv_image.image[::4, ::4].copy())
             return
         if self.kind == "video":  # no telemetry: frame and time only
@@ -851,8 +867,13 @@ class IngestPanel:
             alt = a[2] + (sp.alt_offset if sp else 0.0)
             p = ingest.enu(a[0], a[1], alt, self.prev["origin"])[0]
             self.server.scene.add_camera_frustum("/ingest/cursor", fov=np.radians(60), aspect=c.width / c.height,
-                                                 scale=3.0, color=(255, 255, 255), wxyz=ex.rot_to_quat(R),
+                                                 scale=self._cursor_size(3.0), color=(255, 255, 255), wxyz=ex.rot_to_quat(R),
                                                  position=p, image=self.g_pv_image.image[::4, ::4].copy())
+
+    def _cursor_size(self, largest):
+        """The preview frustum's size: `largest` over flights, 4 plan dots where the planned images stand close."""
+        dot = getattr(self, "_dot", None)
+        return largest if dot is None else min(largest, 4 * dot)
 
     def _set_range_here(self, start):
         k = self._preview_index()

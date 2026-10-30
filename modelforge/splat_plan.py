@@ -23,7 +23,11 @@ splatfacto's defaults are tuned for a few hundred images of an object-sized scen
     50 m one (unit ~28 m): held-out quality fell with more steps and the Gaussian count shrank at every
     opacity reset. 10 m: dira2k (2000 photos) 12000 steps 14.9 -> 17.2 dB (LPIPS 0.94 -> 0.74; 4 m and
     28 m worse), karlak 22.99 -> 23.24 dB (LPIPS 0.333 -> 0.301). Projects without metric scale (videos)
-    have their median scene depth at 10 units.
+    have their median scene depth at 10 units. But a fixed 10 m was far too coarse indoors (kn_odin lab2, a room
+    ~7 m across, median depth 2.2 m; 3000 steps, held-out PSNR / LPIPS): 10 m 17.8 / 0.643, the detail
+    scattering from step ~2000 (depth error vs the LiDAR mesh 8 -> 24 %), 3.75 m 20.1 / 0.548, 2 m 20.2 / 0.522,
+    1 m 19.6 / 0.516. So the unit is the median camera-to-surface distance, at most 10 m (scene_unit): the
+    flights (depth 17-72 m) keep 10 m.
 
 No ground plane is assumed (the flight may start in the air, the terrain may drop anywhere): the scene is
 the sparse cloud (sparse_pc.ply, a random subset). Each point counts the cameras it projects into
@@ -52,7 +56,8 @@ FAR_X_MEDIAN = 4.0  # points beyond this many times a camera's median depth don'
 TRAIN_FRACTION = 0.9  # nerfstudio-data's train_split_fraction
 MAX_TRAIN_WIDTH = 2700  # auto downsample: the smallest factor that brings the photos to this width (4K -> x2)
 DOWNSCALES = (1, 2, 4, 8)
-WORLD_UNIT_M = 10.0  # one nerfstudio unit (fixed, instead of 1 / max |camera position|)
+WORLD_UNIT_M = 10.0  # one nerfstudio unit at most (instead of 1 / max |camera position|)
+MIN_UNIT_M = 0.05  # and at least (a scene seen from centimetres)
 
 
 def vram_gb():
@@ -135,7 +140,9 @@ def survey(project, max_points=MAX_POINTS):
     if np.ndim(w):  # several cameras: the widest decides the resolution rules
         k = int(np.argmax(ws))
         w, h = int(ws[k]), int(hs[k])
+    lo, hi = (np.percentile(C[:, :2], q, axis=0) for q in (2, 98)) if len(C) else (np.zeros(2), np.zeros(2))
     out = {"images": len(C), "train_images": math.ceil(TRAIN_FRACTION * len(C)), "source": source,
+           "extent_m": float(np.max(hi - lo)),  # the camera path's horizontal extent (2-98 %)
            "width": w, "height": h, "initial_points": ply_count(os.path.join(project, "sparse_pc.ply")),
            "area_m2": 0.0, "overlap": 0.0, "gsd_m": None}
     xyz = _points(project, max_points)
@@ -162,7 +169,7 @@ def survey(project, max_points=MAX_POINTS):
     depths, used = np.asarray(depths), np.asarray(used)
     footprints = float(np.sum(ws[used] * hs[used] * (depths / fxs[used]) ** 2))
     out.update(area_m2=footprints / overlap, overlap=overlap, gsd_m=float(np.median(depths / fxs[used])),
-               cameras_seeing=len(depths))
+               depth_m=float(np.median(depths)), cameras_seeing=len(depths))
     return out
 
 
@@ -179,6 +186,18 @@ DEFAULT_ITERATIONS = 50000  # the Splat tab's and the CLI's Iterations (the user
 def auto_downscale(width):
     """The smallest downsample factor that trains the photos at <= MAX_TRAIN_WIDTH."""
     return next((f for f in DOWNSCALES if width / f <= MAX_TRAIN_WIDTH), DOWNSCALES[-1])
+
+
+def scene_unit(s):
+    """One nerfstudio unit in metres: the median camera-to-surface distance (survey depth_m), within
+    [MIN_UNIT_M, WORLD_UNIT_M]; WORLD_UNIT_M without sparse points."""
+    d = s.get("depth_m")
+    return WORLD_UNIT_M if not d else float(min(WORLD_UNIT_M, max(MIN_UNIT_M, d)))
+
+
+def extent_units(s):
+    """The camera path's horizontal extent in scene units (None when unknown)."""
+    return s["extent_m"] / scene_unit(s) if s.get("extent_m") else None
 
 
 def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_gaussians=None, camera_opt=None,
@@ -209,7 +228,7 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
             "stop_split_at": iters // 2 if strategy == "default" else iters * 5 // 6,
             "reset_alpha_every": math.ceil(reset_steps / 100),
             "camera_opt": "SO3xR3" if auto(camera_opt) else camera_opt,
-            "scale_factor": 1.0 / WORLD_UNIT_M,
+            "scale_factor": 1.0 / scene_unit(s),
             "vram_gb": round(vram, 1), "cap": cap, "needed": need}
     notes = [f"{s['images']:,} images ({n:,} for training) from the {s['source']}"]
     if s.get("gsd_m"):
@@ -222,8 +241,9 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
         notes.append(f"×{down}: {s['width']} px photos trained at {s['width'] // down} px (pick 1 for full "
                      "resolution: on 4K photos no better, 2.4× slower)")
     notes.append(f"{iters:,} steps (~{iters / n:.0f} views per image), splitting until {plan['stop_split_at']:,}")
-    notes.append(f"scene unit {WORLD_UNIT_M:g} m (learning rates and size thresholds in metres, not in "
-                 "fractions of the flight)")
+    unit = scene_unit(s)
+    notes.append(f"scene unit {unit:.3g} m (" + ("the median camera-to-surface distance" if unit < WORLD_UNIT_M
+                 else f"at most {WORLD_UNIT_M:g} m") + "; learning rates and size thresholds scale with it)")
     if strategy == "mcmc":
         notes.append(f"MCMC: a fixed budget of {plan['max_gaussians'] / 1e6:.1f}M Gaussians")
         if s.get("initial_points", 0) > min(cap, need or cap) and auto_budget:
@@ -233,7 +253,7 @@ def suggest(s, vram=None, iterations=None, downscale=None, strategy=None, max_ga
         notes.append(f"opacity reset every {reset_steps:,} steps (splatfacto's 3,000 would block densification "
                      f"with {n:,} training images)")
     from modelforge import splat_tiles
-    plan["tiles"] = splat_tiles.wanted(n, tiles)
+    plan["tiles"] = splat_tiles.wanted(n, tiles, extent_units(s))
     if plan["tiles"]:
         notes.append(f"**tiles** of ≤ ~{splat_tiles.PHOTOS_PER_TILE} photos (+ oblique views from the neighbours), "
                      f"~{max(1, math.ceil(s['images'] / splat_tiles.PHOTOS_PER_TILE))} of them, each trained with its own "
