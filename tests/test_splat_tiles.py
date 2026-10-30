@@ -352,6 +352,22 @@ def test_covisibility_layout(tmp_path):
     assert not planned and all(c["outlines"] for c in cells)
 
 
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse")), reason="needs a refined project")
+def test_covisibility_with_registered_photos():
+    """Photos the model lacks (Register more photos) stay out of the photo graph (berlin_all: 16.5k of 24k, the dense
+    graph ran the GUI out of memory) and take the part of their nearest model photo in capture order; the model's
+    photos split as without them."""
+    from modelforge import tile_regions
+    t = json.load(open(os.path.join(REAL, "transforms.json")))
+    names = [os.path.basename(f["file_path"]) for f in t["frames"]]
+    C = np.array([np.array(f["transform_matrix"])[:3, 3] for f in t["frames"]])
+    part0, k0, _ = tile_regions.partition(REAL, names, C, 3)
+    extra = [n.replace(".jpg", "_x.jpg") for n in names]  # right after each model photo in capture order
+    part, k, _ = tile_regions.partition(REAL, names + extra, np.r_[C, C], 3)
+    assert k == k0 and list(part[:len(names)]) == list(part0)
+    assert list(part[len(names):]) == list(part0)
+
+
 def test_skip_tiles(fake_ns, tmp_path):  # noqa: F811
     """Tiles left out (tiles/skip.json): one before the run, one clicked away while it runs; neither trains and
     neither is merged. Taking one back and merging again brings its splat back."""

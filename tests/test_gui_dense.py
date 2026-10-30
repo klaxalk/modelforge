@@ -4,6 +4,7 @@ priors/images/sparse model and carries synthetic dense outputs and a synthetic s
 import os
 import shutil
 import socket
+import threading
 import time
 
 import numpy as np
@@ -100,6 +101,48 @@ def test_run_a_stage_list(app, project):
     assert "sfmmesh + sfmmesh-fill finished" in app.g_state.content, app.g_state.content
     assert os.path.exists(os.path.join(project, "sfmmesh", "mesh.ply"))
     assert os.path.exists(os.path.join(project, "sfmmesh", "patched.npy"))
+
+
+def test_a_double_click_starts_one_job(app, monkeypatch):
+    """Two clicks at once (a double click, two browsers) start one job: the busy check and the claim are atomic, also
+    while the memory estimate takes its time (berlin_all: tile 11 trained twice at once, one OOM-killed)."""
+    from modelforge import memory
+    started = []
+
+    def slow_estimate(*a, **k):
+        time.sleep(0.3)
+        return 0.0, "test"
+    monkeypatch.setattr(memory, "estimate", slow_estimate)
+    monkeypatch.setattr(app, "_run", lambda stage, run_id: (started.append(stage), time.sleep(0.5),
+                                                            setattr(app, "running", False)))
+    clicks = [threading.Thread(target=app.run_stage, args=("export",)) for _ in range(2)]
+    for c in clicks:
+        c.start()
+    for c in clicks:
+        c.join()
+    t0 = time.time()
+    while app.running and time.time() - t0 < 5:
+        time.sleep(0.05)
+    assert started == ["export"] and "busy" in app.g_state.content
+    for b in app.g_buttons.values():
+        b.disabled = False
+
+
+def test_camera_exposure_in_the_splat_tab(app, project):
+    """Splat tab → Camera exposure: the project's cameras, a correction stored per project and passed to the splat's
+    regularize; 0 removes it."""
+    from modelforge import exposure
+    cams = exposure.cameras(project)
+    app._refresh_camera_exposure()
+    assert list(app.g_cam_exp_camera.options) == cams and app.g_cam_exp_stops.value == 0
+    app.g_cam_exp_camera.value = cams[-1]
+    app.g_cam_exp_stops.value = 0.75
+    app._set_camera_exposure()  # what the number's on_update does
+    assert exposure.stops(project) == {cams[-1]: 0.75} and "+0.75" in app.g_cam_exp_note.content
+    assert app._regularize()["exposure_stops"] == {cams[-1]: 0.75}
+    app.g_cam_exp_stops.value = 0.0
+    app._set_camera_exposure()
+    assert exposure.stops(project) == {} and app._regularize().get("exposure_stops", {}) == {}
 
 
 def test_features_progress_in_the_state_line(app):

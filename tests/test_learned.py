@@ -38,6 +38,27 @@ def _db(path, names):
     return con
 
 
+def test_method_survives_a_touched_features_db(tmp_path):
+    """COLMAP touches features.db's mtime when it opens it: the learned method is still known by the content
+    (keypoints without descriptors); SIFT's database (with descriptors) is not taken for it."""
+    db = str(tmp_path / "features.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE keypoints (image_id INTEGER PRIMARY KEY, rows INTEGER, cols INTEGER, data BLOB)")
+    con.execute("CREATE TABLE descriptors (image_id INTEGER PRIMARY KEY, rows INTEGER, cols INTEGER, data BLOB)")
+    con.execute("INSERT INTO keypoints VALUES (1, 10, 2, NULL)")
+    con.commit()
+    os.makedirs(tmp_path / learned.DIR)
+    json.dump({"method": "aliked-lightglue", "features_db": learned._stamp(db)},
+              open(tmp_path / learned.DIR / "current.json", "w"))
+    assert learned.method_of(str(tmp_path)) == "aliked-lightglue"
+    os.utime(db, (1, 1))  # opened by COLMAP
+    assert learned.method_of(str(tmp_path)) == "aliked-lightglue"
+    con.execute("INSERT INTO descriptors VALUES (1, 10, 128, NULL)")  # SIFT wrote this one
+    con.commit()
+    con.close()
+    assert learned.method_of(str(tmp_path)) is None
+
+
 def test_dense_pairs_between_passes_with_a_budget(tmp_path):
     """Unlinked pairs between passes / flights only, best covisibility first, at most per_photo per photo."""
     names = [f"p{k}.jpg" for k in range(6)]

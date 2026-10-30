@@ -19,7 +19,7 @@ import traceback
 import numpy as np
 import viser
 
-from modelforge import dense, difix, jobs, memory, ortho, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
+from modelforge import dense, difix, exposure, jobs, memory, ortho, pipeline, projects, semantic, sky, sfm_mesh, splat, splat_lod, splat_mesh, splat_plan, splat_tiles, worker
 from modelforge.dji import ingest
 from modelforge.export import products
 from modelforge.sfm import chunked, features, learned, reconstruct
@@ -238,6 +238,8 @@ class App:
         self.selected = None
         self.snap = None
         self.running = False
+        self._starting = False  # run_stage between its busy check and the job's start (a double click: one job)
+        self._start_lock = threading.Lock()
         self._refine_resume = False
         self.fov, self.aspect = np.radians(53.0), 16 / 9
         self._last_live = 0.0
@@ -849,6 +851,21 @@ class App:
                      "so photos taken brighter or darker do not pull the colours apart; the splat holds the scene at "
                      "the median exposure. karlak (2.6 EV of auto exposure): held-out +0.24 dB. Ignored without the "
                      "metadata (transforms.json mf_exposure).")
+            with gui.add_folder("Camera exposure", expand_by_default=False):
+                self.g_cam_exp_camera = gui.add_dropdown(
+                    "Camera", options=["camera 0"],
+                    hint="The drone camera whose photos to brighten or darken before the splat learns from them "
+                         "(poses.json cameras: one per drone model + resolution + zoom).")
+                self.g_cam_exp_stops = gui.add_number(
+                    "Brighten (stops)", initial_value=0.0, min=-4.0, max=4.0, step=0.25,
+                    hint="Positive = this camera's photos came out too dark: the splat learns its colours that many "
+                         "stops brighter (each render x 2^-stops against its photos, next to the exposure from the "
+                         "metadata). E.g. +0.75 when one drone's photos are 0.75 stop under another's of the same "
+                         "scene. Stored for the project (exposure_stops.json); applies to the next training (in tiles "
+                         "the next tiles trained; retrain the others).")
+                self.g_cam_exp_note = gui.add_markdown("")
+            self.g_cam_exp_camera.on_update(lambda _: self._refresh_camera_exposure())
+            self.g_cam_exp_stops.on_update(lambda _: self._set_camera_exposure())
             self.g_splat_antialiased = gui.add_checkbox(
                 "Anti-aliased rasterization", initial_value=False,
                 hint="Mip-Splatting's 2D filter while training: karlak held-out +0.2 dB / LPIPS -0.007 when rendered "
@@ -2219,10 +2236,21 @@ class App:
 
     def run_stage(self, stage, check_memory=True):
         """Start a job. check_memory: estimate what it needs (modelforge.memory) and, when that is more than the
-        RAM available, ask the browsers first (Start anyway / Cancel); without a browser it starts with a note."""
-        if self.running or self.ingest.running:
-            self.g_state.content += "  \n_busy: wait for the running job to finish_"
-            return
+        RAM available, ask the browsers first (Start anyway / Cancel); without a browser it starts with a note.
+        One job at a time: a second click (a double click, another browser) while one starts or runs is refused; the
+        check and the claim are atomic (berlin_all 2026-10-29: a double click trained tile 11 twice at once, both
+        caching its photos, and the OOM kill of one showed as a failure while the other ran on unstoppable)."""
+        with self._start_lock:
+            if self.running or self._starting or self.ingest.running:
+                self.g_state.content += "  \n_busy: wait for the running job to finish_"
+                return
+            self._starting = True
+        try:
+            self._start_stage(stage, check_memory)
+        finally:
+            self._starting = False
+
+    def _start_stage(self, stage, check_memory):
         q = self.queue.busy(self.path) if hasattr(self, "queue") else None
         if q is not None:  # gui/headless.py runs a queue entry in this project
             self.g_state.content = (f"⏳ **queue entry {q['id']}** runs **{q['label']}** in this project, in its own "
@@ -3093,8 +3121,32 @@ class App:
         reg = {"flatten": float(self.g_splat_flatten.value), "needle": float(self.g_splat_needle.value),
                "sky": bool(self.g_splat_sky.value), "sun": SUNLIGHT[self.g_splat_sunlight.value],
                "exposure": bool(self.g_splat_exposure.value) and splat.exposure_known(self.path),
-               "antialiased": bool(self.g_splat_antialiased.value)}
+               "antialiased": bool(self.g_splat_antialiased.value),
+               "exposure_stops": exposure.stops(self.path) if self.path else {}}
         return reg if splat.regularizing(reg) or reg["antialiased"] else None
+
+    def _refresh_camera_exposure(self):
+        """Splat tab → Camera exposure: the project's cameras and the chosen one's stops."""
+        if not self.path:
+            return
+        cams = exposure.cameras(self.path) or ["camera 0"]
+        if tuple(self.g_cam_exp_camera.options) != tuple(cams):
+            self.g_cam_exp_camera.options = cams
+        cam = self.g_cam_exp_camera.value if self.g_cam_exp_camera.value in cams else cams[0]
+        set_ = exposure.stops(self.path)
+        self._cam_exp_loading = True
+        try:
+            self.g_cam_exp_stops.value = float(set_.get(cam, 0.0))
+        finally:
+            self._cam_exp_loading = False
+        self.g_cam_exp_note.content = ("set: " + ", ".join(f"{k} {v:+g}" for k, v in set_.items()) if set_
+                                       else "all cameras as photographed")
+
+    def _set_camera_exposure(self):
+        if getattr(self, "_cam_exp_loading", False) or not self.path:
+            return
+        exposure.set_stops(self.path, self.g_cam_exp_camera.value, float(self.g_cam_exp_stops.value or 0.0))
+        self._refresh_camera_exposure()
 
     def _splat_survey(self, project):
         """splat_plan.survey of the project, cached by its camera files' times."""
@@ -3586,6 +3638,7 @@ class App:
 
     # ------------------------------------------------------------- dense / splat
     def _refresh_dense(self):
+        self._refresh_camera_exposure()
         self.dense = gdata.dense_artifacts(self.path)
         if hasattr(self, "g_difix_compare"):  # a new splat: the Difix baseline may be stale (Compare, Undo)
             self._refresh_difix()

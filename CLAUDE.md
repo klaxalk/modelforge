@@ -120,7 +120,11 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
 **Medium**
 1. **TODO: cheap splat quality fixes** (exposure from djmd shutter / ISO / f-number, bilateral grid,
    anti-aliased rasterization, the depth prior outliers): **karlak A/B 2026-10-24**: exposure +0.24 dB held-out, now
-   on by default (Splat tab "Exposure from the metadata"); bilateral grid worse on new views; anti-aliased +0.2 dB but
+   on by default (Splat tab "Exposure from the metadata"; **gains relative to each camera's median** since 2026-10-29:
+   berlin_all's Mavic 3 (fixed ISO 800, 1/1000, f/7.1, likely an ND filter) and NEO2 read 4.7 stops apart for equally
+   bright photos, so the NEO2's gains were x14-60 and the tiles it dominates trained ~30x too dark; export again to apply; **Splat tab → Camera exposure** (the user asked, 2026-10-29: the NEO2's photos ~0.75 stop under the Mavic's):
+   "Brighten (stops)" per camera, `PROJECT/exposure_stops.json`, each photo's gain x 2^-stops through the dataparser's
+   `--exposure-factors` (splat/exposure_factors.json; works with the metadata gains off too), CLI `--camera-stops KEY=N`); bilateral grid worse on new views; anti-aliased +0.2 dB but
    -1.5 dB in classic viewers (opt-in); tile masks (berlin tile 0) same mean PSNR, worst views +0.8 dB, depth-fog p90 1287 % → 20 %, 33 % faster:
    now on by default for tiled runs; **depth outlier gate** (a mesh target drops where the render lies > 50 % behind it, after step 2000) on by default, berlin tile 0 worst views +0.7 dB; seams of a merged masked run checked (tiles 0 + 2: seam band equal with the gate, interior +0.2 dB); **2026-10-25:** SH degree 1 dropped (worse on and off the path), split gradient 0.0005 at x2 LPIPS -0.017 for 1.7x the Gaussians, Difix3D: +0.65 dB off the path only where its pseudo views aim, so **in the GUI as right panel → Difix** (its own target views, Refine splat with Difix, Undo, Compare before / after; `modelforge/difix.py`); open: 4K with the lower split threshold: `docs/todo_splat_quality.md`.
 2. ~~Calibration biased low (~0.7×)~~ **closed 2026-10-23, by measurement**: the 0.7× was one synthetic draw
@@ -260,7 +264,8 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    (`modelforge/sfm/learned.py`, worker `export/matchers.py` in build/matchers from `scripts/install_matchers`):
    Extractor aliked-lightglue / gim-lightglue (LightGlue matching), Dense matcher roma for the unlinked pairs between
    passes (3 per photo), covisible pairs between passes from the earlier model (10 per photo, `pairs.covisible`),
-   Register more photos / evaluation with the same features, extracted once per photo (a cache keyed by the photo's
+   Register more photos / evaluation with the same features (which method features.db holds: current.json's stamp, else
+   its content, keypoints without descriptors: COLMAP touches its mtime on open, 2026-10-29), extracted once per photo (a cache keyed by the photo's
    size + mtime, kept across choices of Images used). **Default "auto"** for Extractor and Dense matcher (the user's
    choice; GUI and CLI; `pipeline.auto_matching`): ALIKED + RoMa when >= max(20, 1 % of the photos) look-at pairs
    from the priors lie > 60 s apart on the timeline (several flights / passes over the same ground; without priors:
@@ -1749,7 +1754,9 @@ helped little):
   margin = 0.25 x sqrt(region area)). berlin (1734 photos, 4 tiles; prototype `build/covis_tiles.py`): points > 3 m
   above ground within 3 / 10 m of a seam 1.2 / 3.9 % vs rectangles 2.4 / 9.5 %, seams 1.9 vs 1.7 km; the right-hand
   orbits stay in one tile (the rectangles cut them). Plain vote maps were ragged (seams 3x longer) and an MRF with
-  iterated local updates could not move seams. Not yet for 10k photos (dense n x n graph, dense eigh).
+  iterated local updates could not move seams. Only photos with tracked observations go into the graph; photos added
+  by Register more photos take the part of their nearest tracked photo in capture order (2026-10-29: berlin_all's 24k
+  photos took 26 GB in the GUI process; now 49 parts in 159 s, 3.9 GB peak). The graph is still dense (n x n, dense eigh).
   - A training comparison against rectangles (`build/tiles_cmp.py`) was cancelled by the user on 2026-10-23
     (covisibility was already the default); only rectangles tiles 2 + 3 had trained. Do not resume it.
   - The mesh depth cache key uses the mesh's real path (a workspace linking sfmmesh/ cleared the project's maps).

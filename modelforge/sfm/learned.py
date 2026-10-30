@@ -111,11 +111,23 @@ def _stamp(path):
 
 
 def method_of(project):
-    """The learned method features.db was made with, None for SIFT (or a features.db made since)."""
+    """The learned method features.db was made with, None for SIFT (or a features.db made since).
+    The stamp (size + mtime) decides when it matches; else the content: learned keypoints come without descriptors,
+    SIFT always writes them. COLMAP touches the file's mtime when it opens it (pycolmap.Database.open: berlin_all's
+    Register more photos, 2026-10-29, then took the project for SIFT and failed on "Unsupported feature type")."""
     try:
         cur = json.load(open(os.path.join(project, DIR, "current.json")))
-        return cur["method"] if cur.get("features_db") == _stamp(os.path.join(project, "features.db")) else None
-    except (OSError, ValueError, KeyError):
+        db = os.path.join(project, "features.db")
+        if cur.get("features_db") == _stamp(db):
+            return cur["method"]
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            n_img = con.execute("SELECT COUNT(*) FROM keypoints WHERE rows > 0").fetchone()[0]
+            n_desc = con.execute("SELECT COUNT(*) FROM descriptors WHERE rows > 0").fetchone()[0]
+        finally:
+            con.close()
+        return cur["method"] if n_img and not n_desc else None
+    except (OSError, ValueError, KeyError, sqlite3.Error):
         return None
 
 

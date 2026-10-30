@@ -69,6 +69,8 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
     report = json.load(open(os.path.join(project, "report.json")))
     upright = bool(report.get("features", {}).get("upright", True))
     os.makedirs(ws, exist_ok=True)
+    from modelforge.sfm import learned
+    method = learned.method_of(project)  # before COLMAP opens features.db (which touches its mtime)
     mdb = pycolmap.Database.open(os.path.join(project, "features.db"))
     poses = json.load(open(os.path.join(project, "poses.json")))["images"]
     model_by_name = {im.name: im for im in rec.images.values() if im.has_pose}
@@ -79,8 +81,6 @@ def locate(project, images_dir, images, ws, neighbors=6, ratio=0.8, min_inliers=
                       key=lambda c: abs(c[1] - h.get("time_s", 0.0)))[:neighbors]
     cam_of = {h["image"]: model_by_name[near[0][2]].camera_id for h in holdout["images"] for near in [nearest(h)]
               if near}
-    from modelforge.sfm import learned
-    method = learned.method_of(project)
     lq = {}  # learned features: per photo (its keypoints, [(model name, matches)]) from one worker run
     if method:
         todo = [h for h in holdout["images"] if h["image"] in cam_of]

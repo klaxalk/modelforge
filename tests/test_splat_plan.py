@@ -108,3 +108,15 @@ def test_schedule_flags():
     assert "--pipeline.model.strategy" not in splat.train_command("/p")  # no plan: splatfacto's own
     with pytest.raises(ValueError):
         splat.schedule_args(strategy="greedy")
+
+
+def test_one_camera_with_intrinsics_per_frame(tmp_path):
+    """A tile of a multi-camera project holding one camera's photos only: the intrinsics are in its frames, not at
+    the top (berlin_all, 49 tiles: KeyError 'fl_x')."""
+    from modelforge import splat_plan
+    cam = {"camera_model": "OPENCV", "fl_x": 1100.0, "fl_y": 1100.0, "cx": 960.0, "cy": 540.0, "w": 1920, "h": 1080}
+    frames = [dict({k: v for k, v in cam.items() if k != "camera_model"}, file_path=f"images/{k}.jpg",
+                   transform_matrix=np.eye(4).tolist()) for k in range(3)]
+    json.dump({"camera_model": "OPENCV", "frames": frames}, open(tmp_path / "transforms.json", "w"))
+    C, R, fx, w, h, source = splat_plan._cameras(str(tmp_path))
+    assert fx == 1100.0 and (w, h) == (1920, 1080) and len(C) == 3

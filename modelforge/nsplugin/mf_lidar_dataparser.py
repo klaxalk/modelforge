@@ -25,6 +25,11 @@ class LidarDataParserConfig(NerfstudioDataParserConfig):
     depth_maps: Optional[Path] = None
     """Dense depth targets instead of points: a folder of <image name>.npy z-depth maps (world units, 0 = none) at
     the undistorted training camera (modelforge/export/mesh_depth.py: the SfM mesh rendered)."""
+    exposure_factors: Optional[Path] = None
+    """A json {image name: factor} multiplied into each photo's exposure gain (modelforge exposure.factors: a camera's
+    photos brightened by N stops = 2^-N)."""
+    exposure_meta: bool = True
+    """Use the photos' metadata gains (transforms.json mf_exposure); False: only the exposure_factors."""
     loss_masks: Optional[Path] = None
     """Per-image loss masks: a folder of <image name>.png (255 = in the losses, 0 = left out) at the undistorted
     training camera, as the depth maps (modelforge splat_tiles.loss_masks: a tile's pixels showing other tiles)."""
@@ -64,9 +69,15 @@ class LidarDataParser(Nerfstudio):
                 out.metadata["points3D_rgb"] = torch.cat([out.metadata["points3D_rgb"], rgb])
                 out.metadata["mf_seed_normals"] = nrm @ T[:, :3].T  # rotation only: directions
         # relative exposure per photo (modelforge/exposure.py, transforms.json frames "mf_exposure"; 1 = the median)
-        gain = {Path(f["file_path"]).name: float(f["mf_exposure"]) for f in meta.get("frames", []) if "mf_exposure" in f}
-        if gain:
-            out.metadata["exposure_gains"] = [gain.get(Path(f).name, 1.0) for f in out.image_filenames]
+        gain = {Path(f["file_path"]).name: float(f["mf_exposure"]) for f in meta.get("frames", [])
+                if "mf_exposure" in f} if self.config.exposure_meta else {}
+        factor = {}
+        if self.config.exposure_factors:  # a camera's photos brightened (modelforge/exposure.py factors)
+            import json
+            factor = json.load(open(self.config.exposure_factors))
+        if gain or factor:
+            out.metadata["exposure_gains"] = [gain.get(Path(f).name, 1.0) * float(factor.get(Path(f).name, 1.0))
+                                              for f in out.image_filenames]
         if self.config.sky_masks:
             folder = Path(self.config.sky_masks)
             files = [folder / (Path(f).name + ".png") for f in out.image_filenames]

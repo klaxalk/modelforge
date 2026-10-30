@@ -334,6 +334,31 @@ def partition(project, names, centers, parts, slack=SLACK):
     obs_img, obs_pt, xyz, cc = load_tracks(project, names)
     centers = np.where(np.isfinite(cc), cc, centers)
     order = np.argsort(np.array(names, dtype=object))  # file names sort by video, then frame: capture order
-    A = affinity(len(names), obs_img, obs_pt, xyz, order)
-    part, k = split_photos(A, parts, slack)
+    # The graph holds the photos with observations only: photos added by Register more photos (located by PnP, the
+    # model unchanged) have none, and as rows of zeros they only grew the dense n x n graph (berlin_all, 2026-10-29:
+    # 24,227 photos, 16.5k of them registered, the set-up at 26 GB of 31). Each of those takes the part of its
+    # nearest photo with observations in capture order.
+    tracked = np.zeros(len(names), bool)
+    tracked[obs_img] = True
+    if tracked.all() or not tracked.any():
+        A = affinity(len(names), obs_img, obs_pt, xyz, order)
+        part, k = split_photos(A, parts, slack)
+    else:
+        sub = np.flatnonzero(tracked)
+        remap = np.full(len(names), -1)
+        remap[sub] = np.arange(len(sub))
+        sub_order = remap[order[tracked[order]]]
+        A = affinity(len(sub), remap[obs_img], obs_pt, xyz, sub_order)
+        sub_part, k = split_photos(A, parts, slack)
+        del A
+        pos = np.empty(len(names), int)  # capture-order position of each photo
+        pos[order] = np.arange(len(names))
+        tpos = np.sort(pos[sub])
+        by_pos = np.empty(len(names), int)
+        by_pos[pos[sub]] = sub_part
+        j = np.clip(np.searchsorted(tpos, pos), 1, max(1, len(tpos) - 1))
+        lo, hi = tpos[np.minimum(j - 1, len(tpos) - 1)], tpos[np.minimum(j, len(tpos) - 1)]
+        near = np.where(np.abs(lo - pos) <= np.abs(hi - pos), lo, hi)
+        part = by_pos[near]
+        part[sub] = sub_part
     return part, k, regions_from_parts(xyz, obs_img, obs_pt, centers, part, k)

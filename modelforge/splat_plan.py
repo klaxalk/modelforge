@@ -77,7 +77,8 @@ def _cameras(project):
         if len(cams) > 1:
             fx, w, h = (np.array([float(cams[i][k]) for i in index]) for k in ("fl_x", "w", "h"))
             return c2w[:, :3, 3], R, fx, w.astype(int), h.astype(int), "refined cameras"
-        return c2w[:, :3, 3], R, float(t["fl_x"]), int(t["w"]), int(t["h"]), "refined cameras"
+        c = cams[0]  # one camera: at the top, or in every frame (a tile of a multi-camera project with one of them)
+        return c2w[:, :3, 3], R, float(c["fl_x"]), int(c["w"]), int(c["h"]), "refined cameras"
     poses = json.load(open(os.path.join(project, "poses.json")))
     imgs = [i for i in poses["images"] if "q_world_from_cam" in i]
     if not imgs:

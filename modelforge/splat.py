@@ -196,6 +196,7 @@ def schedule_args(iterations=None, strategy=None, max_gaussians=None, stop_split
 def train_command(project, method="splatfacto", iterations=None, extra=(), cache="disk", downscale=1,
                   steps_per_save=None, lidar_depth=None, schedule=None, load_dir=None, depth_cloud=None,
                   depth_maps=None, regularize=None, seed_ply=None, loss_masks=None, sky_masks=None, data=None,
+                  exposure_factors=None,
                   sun_maps=None):
     """lidar_depth: None = plain splatfacto; a weight (0 = only report the depth error) = the -lidar
     method of modelforge/nsplugin with the lidar-data dataparser. schedule: splat_plan settings
@@ -243,7 +244,7 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
             cmd += ["--pipeline.model.flatten-lambda", f"{float(reg['flatten']):g}"]
         if reg.get("needle"):
             cmd += ["--pipeline.model.needle-lambda", f"{float(reg['needle']):g}"]
-        if reg.get("exposure"):
+        if reg.get("exposure") or exposure_factors:
             cmd += ["--pipeline.model.use-exposure", "True"]
         if sky_masks:
             from modelforge import sky
@@ -271,6 +272,10 @@ def train_command(project, method="splatfacto", iterations=None, extra=(), cache
         depth_args += ["--sky-masks", str(sky_masks)]
     if sun_maps and lidar_depth is not None:
         depth_args += ["--sun-maps", str(sun_maps)]
+    if exposure_factors and lidar_depth is not None:  # cameras brightened (exposure.factors)
+        depth_args += ["--exposure-factors", str(exposure_factors)]
+        if not (regularize or {}).get("exposure"):
+            depth_args += ["--exposure-meta", "False"]
     return cmd + list(extra) + [parser, "--downscale-factor", str(int(downscale))] + scale_args + depth_args
 
 
@@ -290,11 +295,16 @@ def exposure_known(project):
     return any("mf_exposure" in f for f in t.get("frames", []))
 
 
+def camera_stops(regularize):
+    """{camera key: stops} of regularize["exposure_stops"] that are not 0 (Splat tab → Camera exposure)."""
+    return {k: float(v) for k, v in ((regularize or {}).get("exposure_stops") or {}).items() if float(v)}
+
+
 def regularizing(regularize):
     """True when flattening is on (modelforge/nsplugin/mf_splatfacto_lidar.py)."""
     return bool(regularize) and (float(regularize.get("flatten") or 0) > 0 or float(regularize.get("needle") or 0) > 0
                                  or bool(regularize.get("exposure")) or bool(regularize.get("sky"))
-                                 or bool(regularize.get("sun")))
+                                 or bool(regularize.get("sun")) or camera_stops(regularize))
     # older records may name far_mask: gone
 
 
@@ -628,6 +638,7 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         on_line(f"splat: flattening weight {float(reg.get('flatten') or 0):g}"
                 + (f", needles {float(reg['needle']):g}" if reg.get("needle") else "")
                 + (", exposure from the metadata" if reg.get("exposure") else "")
+                + "".join(f", {k} {v:+g} stops" for k, v in camera_stops(reg).items())
                 + (", sky masks" if reg.get("sky") else "") + (", sun visibility learned per Gaussian" if reg.get("sun") == "learned"
                                                         else ", sunlight learned per photo" if reg.get("sun") else ""))
     stop = threading.Event()
@@ -665,9 +676,14 @@ def run(project, method="splatfacto", iterations=None, extra=(), on_line=print, 
         sfm_mesh.seed_points(seed_mesh, os.path.join(project, t.get("ply_file_path", "sparse_pc.ply")), seeds,
                              on_line=on_line)
         seeds = os.path.abspath(seeds)
+    gains = None
+    if camera_stops(regularize):  # cameras brightened (Splat tab → Camera exposure): factors per photo
+        from modelforge import exposure, sky
+        gains = os.path.abspath(os.path.join(project, "splat", "exposure_factors.json"))
+        json.dump(exposure.factors(sky.root(project), camera_stops(regularize)), open(gains, "w"))
     cmd = train_command(project, method, iterations, extra, cache, factor, preview_every if on_snapshot else None,
                         lidar_depth, schedule, load_dir, depth_cloud, maps, regularize, seeds, loss_masks, skies,
-                        data=None if data == project else data, sun_maps=suns)
+                        data=None if data == project else data, sun_maps=suns, exposure_factors=gains)
     cmd = [os.path.join(NS_BIN, "python"), "-m", "mf_train"] + cmd[1:]  # ns-train + checkpoint on request
     stopped_at, reached = None, False
 
@@ -855,6 +871,10 @@ def main():
     ap.add_argument("--no-exposure", dest="exposure", action="store_false", default=EXPOSURE,
                     help="do not scale each training render by its photo's relative exposure from the DJI metadata "
                          "(transforms.json mf_exposure, written by the export; on by default when present)")
+    ap.add_argument("--camera-stops", action="append", default=[], metavar="CAMERA=STOPS",
+                    help="brighten one camera's photos by STOPS (e.g. \"DJI NEO2 1920x1080=0.75\"; the camera keys of "
+                         "poses.json); also stored for the project (PROJECT/exposure_stops.json, the Splat tab's), "
+                         "which applies when not given")
     ap.add_argument("--bilateral-grid", action="store_true", help="splatfacto's bilateral grid per photo (colour / tone)")
     ap.add_argument("--antialiased", action="store_true", help="anti-aliased rasterization (Mip-Splatting's 2D filter)")
     args, extra = ap.parse_known_args()
@@ -864,6 +884,13 @@ def main():
     reg = {"flatten": args.flatten, "needle": args.needle, "sky": use_sky, "exposure": bool(args.exposure and exposure_known(project)),
            "bilateral": args.bilateral_grid, "antialiased": args.antialiased,
            "sun": "learned" if args.sun_learned else args.sun_light}
+    from modelforge import exposure as _exposure
+    for c in args.camera_stops:
+        key, _, v = c.rpartition("=")
+        if key not in _exposure.cameras(_sky.root(project)):
+            ap.error(f"no camera {key!r}: {', '.join(_exposure.cameras(_sky.root(project)))}")
+        _exposure.set_stops(_sky.root(project), key, float(v))
+    reg["exposure_stops"] = _exposure.stops(_sky.root(project))
     reg = reg if regularizing(reg) or args.bilateral_grid or args.antialiased else None
     from modelforge import sfm_mesh as _sm
     seed = _sm.depth_cloud(project) if args.seed_mesh else None
