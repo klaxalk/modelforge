@@ -47,12 +47,25 @@ SPIKE_M, SPIKE_WIN, OPEN_M = 2.0, 2.5, 10.0  # m: a cell this far off its neighb
 # opening's width (wider than the crowns it removes)
 BANDS, COLOUR = 3, 0.8
 TARGET_SHARP, TARGET_VEG = 0.2, 0.6  # automatic targets: render this much blurrier than the photos, mostly vegetation
-DONOR_SHARP, CLEAN = 0.6, 0.8  # donors: as sharp as their photos, clean (nothing else standing over them)
+DONOR_SHARP, CLEAN = 0.45, 0.7  # donors: nearly as sharp as their photos, mostly vegetation over their footprint
+DONOR_SCALE, DONOR_SHAPE, DONOR_MAX_M = (0.5, 2.0), 0.6, 2.0
+DONOR_PHOTOS = 10  # a donor is seen by at least this many photos (berlin: donors rated from 2-5 photos of one side
+# were fog from anywhere else); seen from all round ranks higher (`sides`)
+SIDE_CENTRE, SIDE_MAX_M = 0.5, 80.0  # an object's photos: within this share of the half-frame of the centre, this near  # a donor is scaled to the target's height within these; proportions
 MAP_CELL, MAP_PHOTOS = 2.0, 300  # m; photos the detail map renders (spread over the flight)
+TEMPLATE_R, TEMPLATE_VALID = (3.0, 8.0), 0.9  # automatic templates: m radius, the share of open detailed cells
+TEMPLATE_W = {"colour": 0.5, "texture": 0.5, "semantic": 2.0}  # their say (per group): kladno_dira's road (g35)
+# got a dirt yard 185 m away when photo colour + texture counted as much as the semantics; with the semantics leading
+# the same road 12 m on (the semantics carry what the ground is; colour and texture refine)
+AREA_SMOOTH_M, HAZE_TOP_M = 1.0, 6.0  # weak areas' outlines rounded at this scale; fog cleared up to this height
+FEATHER_M, BLEND = 1.0, 0.7  # the fill's transition: crossfade band beyond the hole (m), colour blending strength
+BLEND_WIN, BLEND_MAX = 2, 1.0  # cells around a border cell its colours are taken over; the largest correction (SH 0)
 GOOD_SOURCE, MAX_COPY_M = 0.6, 1.0  # fill sources keep at least this share of the photos' detail (when the detail
 # map exists: else similar but equally blurry ground was copied, no better); copied Gaussians are smaller than this
 # (larger ones near the ground are glare and needles: bright blobs in the fill)
-WEAK_GROUND, MIN_GROUND_M2, MIN_WEIGHT = 0.3, 8.0, 0.5  # a weak ground area: detail kept below this, at least this
+WEAK_GROUND, MIN_GROUND_M2, MIN_WEIGHT = 0.3, 8.0, 0.5
+WEAK_PCT, GOOD_PCT, AREA_TILE_M, AREAS_VERSION = 20, 60, 20.0, 3  # (detail_thresholds); weak areas are cut into pieces of at most
+# this square (a road and the grass beside it get their own templates; the fill's work stays bounded)  # a weak ground area: detail kept below this, at least this
 # large, seen with at least this much photo detail per cell (flat road or water count little)
 
 
@@ -303,11 +316,47 @@ def find(project, queries=None, on_line=print, kind=None):
     veg = np.bincount(ol[keep], weights=(kind & small)[over[keep]], minlength=len(objs))
     for o in objs:
         o["veg_share"] = round(float(veg[o["id"]] / max(tot[o["id"]], 1)), 3)
+    sides(project, objs)
     np.savez(os.path.join(_dir(project), "objects.npz"), crown=crown.reshape(H, W), lo=lo, cell=CELL,
              ground_grid=ground.g, ground_origin=np.array([ground.x0, ground.y0, ground.cell]))
     json.dump({"splat": _key(src), "queries": queries, "objects": objs}, open(os.path.join(_dir(project),
                                                                                            "objects.json"), "w"))
     on_line(f"replace: {len(objs)} objects ({', '.join(queries)}) in {time.time() - t0:.0f} s")
+    return objs
+
+
+def sides(project, objs):
+    """Per object its photographed side (in place): "side_az" = the azimuth (rad, ENU) of the mean horizontal
+    direction from it to the photos that have it within SIDE_CENTRE of their frame's centre (weighted by 1 /
+    distance, at most SIDE_MAX_M away), "side_len" = how one-sided (0: seen from all round, 1: from one side only),
+    "side_photos". A tree in a splat is good only from where it was photographed: a donor turned so its side faces the
+    target's keeps its good look there (berlin, 2026-10-31: donors seen from the targets' cameras' angles were fog)."""
+    t = json.load(open(os.path.join(project, "transforms.json")))
+    M = np.array([np.array(f["transform_matrix"], float) for f in t["frames"]])
+    C = M[:, :3, 3]
+    R = M[:, :3, :3] @ np.diag([1, -1, -1])  # camera-to-world, OpenCV axes
+    f0 = t["frames"][0]
+    tx = 0.5 * float(f0.get("w", t.get("w"))) / float(f0.get("fl_x", t.get("fl_x")))
+    ty = 0.5 * float(f0.get("h", t.get("h"))) / float(f0.get("fl_y", t.get("fl_y")))
+    for o in objs:
+        at = np.array([o["x"], o["y"], o["ground_z"] + 0.5 * o["height"]])
+        v = at - C
+        rel = np.einsum("nji,nj->ni", R, v)
+        z = rel[:, 2]
+        d = np.linalg.norm(v, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ok = (z > o["height"]) & (np.abs(rel[:, 0] / z) < SIDE_CENTRE * tx) & (np.abs(rel[:, 1] / z) < SIDE_CENTRE * ty)
+        ok &= d < SIDE_MAX_M
+        h = -v[ok, :2]  # from the object towards the camera
+        n = np.linalg.norm(h, axis=1)
+        keep = n > 1e-6
+        if not keep.any():
+            o.update(side_az=0.0, side_len=0.0, side_photos=0)
+            continue
+        w = 1.0 / d[ok][keep]
+        u = (h[keep] / n[keep, None] * w[:, None]).sum(0) / w.sum()
+        o.update(side_az=round(float(np.arctan2(u[1], u[0])), 4), side_len=round(float(np.linalg.norm(u)), 3),
+                 side_photos=int(keep.sum()))
     return objs
 
 
@@ -407,24 +456,80 @@ def detail_map(project, on_line=print, on_progress=None, job=None, photos=MAP_PH
         if os.path.exists(npz):
             os.remove(npz)
     m = np.load(spec["out"])
-    np.savez(out, ratio=m["ratio"], weight=m["weight"], lo=lo, cell=MAP_CELL, splat=np.array(_key(base(project))))
+    extra = {k: m[k] for k in ("photo_rgb", "photo_tex") if k in m.files}
+    np.savez(out, ratio=m["ratio"], weight=m["weight"], lo=lo, cell=MAP_CELL, splat=np.array(_key(base(project))),
+             **extra)
     os.remove(spec["out"])
     areas = ground_areas(project)
     on_line(f"replace: detail map of {np.isfinite(m['ratio']).sum():,} cells; {len(areas)} weak ground areas")
     return areas
 
 
+def cover_mesh(project):
+    """The mesh that says where measured ground is: the LiDAR mesh, else the SfM mesh's measured part (mesh_trimmed:
+    without its patched holes, which are interpolated), else its mesh; None without one."""
+    for sub, name in (("lidarmesh", "mesh.ply"), ("sfmmesh", "mesh_trimmed.ply"), ("sfmmesh", "mesh.ply")):
+        p = os.path.join(project, sub, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def mesh_cover(project, lo, cell, shape):
+    """(H, W) bool on the grid (lo, cell, shape): cells with mesh triangles over them (their centres), small gaps
+    closed; all True without a mesh. Weak ground is proposed, and templates taken, only there (the user asked,
+    2026-10-31: over the LiDAR mesh, else the SfM mesh). Cached in replace/mesh_cover.npz per mesh file and grid."""
+    path = cover_mesh(project)
+    H, W = shape
+    if path is None:
+        return np.ones((H, W), bool)
+    key = json.dumps([os.path.relpath(path, project), _key(path), [float(lo[0]), float(lo[1])], float(cell), [H, W]])
+    cache = os.path.join(_dir(project), "mesh_cover.npz")
+    if os.path.exists(cache):
+        c = np.load(cache)
+        if str(c["key"]) == key:
+            return c["cover"]
+    from modelforge import sfm_mesh
+    v, faces = sfm_mesh.read_mesh(path)
+    V = np.stack([v["x"], v["y"]], 1).astype(np.float64)
+    cxy = V[faces].mean(1)
+    j = ((cxy[:, 0] - lo[0]) // cell).astype(np.int64)
+    i = ((cxy[:, 1] - lo[1]) // cell).astype(np.int64)
+    ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
+    cover = np.zeros((H, W), bool)
+    cover[i[ok], j[ok]] = True
+    cover = cv2.morphologyEx(cover.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+    np.savez(cache, cover=cover, key=np.array(key))
+    return cover
+
+
+def detail_thresholds(ratio, weight):
+    """(weak, good) detail thresholds of a project's map: the lower of WEAK_GROUND and its WEAK_PCT percentile, the
+    lower of GOOD_SOURCE and its GOOD_PCT percentile (cells seen with MIN_WEIGHT). Relative: kladno_dira's map has a
+    median of 0.33 (berlin 0.62): with the fixed values half of it was "weak" (one 10 ha area) and 19 % "good"."""
+    ok = np.isfinite(ratio) & (weight >= MIN_WEIGHT)
+    if not ok.any():
+        return WEAK_GROUND, GOOD_SOURCE
+    r = ratio[ok]
+    return min(WEAK_GROUND, float(np.percentile(r, WEAK_PCT))), min(GOOD_SOURCE, float(np.percentile(r, GOOD_PCT)))
+
+
 def ground_areas(project):
-    """Weak ground areas from the detail map: connected cells keeping less than WEAK_GROUND of the photos' detail,
+    """Weak ground areas from the detail map, over the measured mesh only (`mesh_cover`): connected cells keeping
+    less than the weak threshold (`detail_thresholds`) of the photos' detail, cut into pieces of AREA_TILE_M,
     seen well enough (MIN_WEIGHT), with no object on them (the objects' footprints grown by a cell), at least
     MIN_GROUND_M2 large -> replace/ground.json [{id, x, y, radius, area_m2, detail, box}] + ground_labels.npy."""
     path = os.path.join(_dir(project), "detail.npz")
     if not os.path.exists(path):
         return []
     cached = os.path.join(_dir(project), "ground.json")
-    if os.path.exists(cached) and os.path.getmtime(cached) >= max(os.path.getmtime(path), os.path.getmtime(
-            os.path.join(_dir(project), "objects.npz"))):
-        return _json(cached, [])
+    mesh = cover_mesh(project)
+    if os.path.exists(cached) and os.path.getmtime(cached) >= max(
+            os.path.getmtime(path), os.path.getmtime(os.path.join(_dir(project), "objects.npz")),
+            os.path.getmtime(mesh) if mesh else 0):
+        got = _json(cached, {})
+        if isinstance(got, dict) and got.get("version") == AREAS_VERSION:
+            return got["areas"]
     m = np.load(path)
     if list(m["splat"]) != _key(base(project)):
         return []
@@ -437,10 +542,24 @@ def ground_areas(project):
     occ[:crown.shape[0], :crown.shape[1]] = crown >= 0
     occ = occ.reshape(H, k, W, k).any((1, 3))
     occ = cv2.dilate(occ.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-    weak = np.nan_to_num(ratio, nan=1.0) < WEAK_GROUND
+    weak_thr, _ = detail_thresholds(ratio, weight)
+    weak = (np.nan_to_num(ratio, nan=1.0) < weak_thr) & mesh_cover(project, lo, cell, ratio.shape)
     weak &= (weight >= MIN_WEIGHT) & ~occ
     weak = cv2.morphologyEx(weak.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(weak.astype(np.uint8), connectivity=8)
+    tile = max(1, int(round(AREA_TILE_M / cell)))  # large areas in pieces of at most AREA_TILE_M square
+    yy, xx = np.mgrid[0:H, 0:W]
+    tid = (yy // tile) * (W // tile + 1) + xx // tile
+    n0, lab0 = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
+    big_comp = np.bincount(lab0.ravel(), minlength=n0) * cell * cell > AREA_TILE_M ** 2  # only those are cut
+    key = np.where(lab0 > 0, lab0.astype(np.int64) * (tid.max() + 1) + np.where(big_comp[lab0], tid, 0), 0)
+    uniq, lab = np.unique(key, return_inverse=True)
+    lab = lab.reshape(H, W).astype(np.int32)  # 0 = not weak (key 0 sorts first)
+    n = len(uniq)
+    stats = np.zeros((n, 5), np.int64)
+    stats[:, cv2.CC_STAT_AREA] = np.bincount(lab.ravel(), minlength=n)
+    cent = np.stack([np.bincount(lab.ravel(), weights=xx.ravel(), minlength=n),
+                     np.bincount(lab.ravel(), weights=yy.ravel(), minlength=n)], 1) / np.maximum(
+        stats[:, cv2.CC_STAT_AREA], 1)[:, None]
     areas, labels = [], np.full((H, W), -1, np.int32)
     for i in range(1, n):
         a = stats[i, cv2.CC_STAT_AREA] * cell * cell
@@ -457,7 +576,7 @@ def ground_areas(project):
                               float(lo[0] + (xs.max() + 1) * cell), float(lo[1] + (ys.max() + 1) * cell)]})
     areas.sort(key=lambda x: x["detail"])
     np.save(os.path.join(_dir(project), "ground_labels.npy"), labels)
-    json.dump(areas, open(os.path.join(_dir(project), "ground.json"), "w"))
+    json.dump({"version": AREAS_VERSION, "areas": areas}, open(os.path.join(_dir(project), "ground.json"), "w"))
     return areas
 
 
@@ -468,16 +587,23 @@ def suggest_targets(objs):
 
 
 def donors(objs, target, used=(), exclude=()):
-    """Donor candidates for target, best first: as sharp as their photos, clean, denser than the median, of a similar
-    shape (height and radius within 0.6-1.67 x, similar height / radius); ranked by absolute detail (small Gaussians,
-    photos taken close, shrunk rather than enlarged); used ones after the others."""
-    dens = np.median([o["per_m2"] for o in objs])
-    ok = [o for o in objs if o["id"] != target["id"] and o["id"] not in exclude
-          and (o.get("sharp") or 0) >= DONOR_SHARP and o["per_m2"] >= dens and o["veg_share"] >= CLEAN
-          and 0.6 < o["height"] / target["height"] < 1.67 and 0.6 < o["radius"] / target["radius"] < 1.67
-          and abs(np.log(o["height"] / o["radius"]) - np.log(target["height"] / target["radius"])) < 0.35]
-    ok.sort(key=lambda o: (o["id"] in used, o["median_size_cm"] * max(1.0, target["height"] / o["height"]) ** 2
-                           * (1 + o["cm_per_px"])))
+    """Donor candidates for target, best first: rated as sharp as DONOR_SHARP of their photos, mostly vegetation
+    (CLEAN), any size from DONOR_SCALE[0] to DONOR_SCALE[1] times the target's height, roughly its proportions
+    (height / width within DONOR_SHAPE in log); ranked by sharpness (capped at 1), less for enlarging (every Gaussian
+    grows with it) and for unlike proportions; ones used already after the others. (Until 2026-10-31: within
+    0.6-1.67 x, closely alike, denser than the median, ranked by Gaussian size: it hid berlin's good trees, big
+    healthy ones use fewer, larger Gaussians, and chose hedge fragments.) At least DONOR_PHOTOS photos; seen from
+    all round (`sides`: side_len low) ranks higher: a splat's tree is good only where it was photographed from."""
+    def score(o):
+        s = target["height"] / o["height"]
+        shape = abs(np.log(o["height"] / o["radius"]) - np.log(target["height"] / target["radius"]))
+        return min(o["sharp"], 1.0) - 0.5 * max(0.0, np.log(s)) - 0.3 * shape + 0.5 * (1 - o.get("side_len", 1.0))
+    ok = [o for o in objs if o["id"] != target["id"] and o["id"] not in exclude and o.get("photos", 0) >= 2
+          and o.get("side_photos", DONOR_PHOTOS) >= DONOR_PHOTOS
+          and (o.get("sharp") or 0) >= DONOR_SHARP and o["veg_share"] >= CLEAN
+          and DONOR_SCALE[0] <= target["height"] / o["height"] <= DONOR_SCALE[1]
+          and abs(np.log(o["height"] / o["radius"]) - np.log(target["height"] / target["radius"])) < DONOR_SHAPE]
+    ok.sort(key=lambda o: (o["id"] in used, -score(o)))
     return ok
 
 
@@ -491,6 +617,8 @@ class _Scene:
         self.crown, self.lo, self.cell = d["crown"], d["lo"], float(d["cell"])
         self.ground = Ground(d["ground_grid"], d["ground_origin"])
         self.objs = {o["id"]: o for o in _json(os.path.join(_dir(project), "objects.json"))["objects"]}
+        if any("side_az" not in o for o in self.objs.values()):  # found before sides existed
+            sides(project, list(self.objs.values()))
         self.P = self.g["means"].astype(np.float64)
         self.gz = self.P[:, 2] - self.ground(self.P[:, 0], self.P[:, 1])
         self.op = 1 / (1 + np.exp(-self.g["opacities"].reshape(-1)))
@@ -546,6 +674,12 @@ class _Scene:
                   "rough": np.sqrt(np.maximum(zz - zm ** 2, 0)).astype(np.float32).reshape(H, W)}
         return self.R
 
+    def covered(self):
+        """(H, W) bool: cells over the measured mesh (`mesh_cover`)."""
+        if getattr(self, "_covered", None) is None:
+            self._covered = mesh_cover(self.project, self.lo, self.cell, self.crown.shape)
+        return self._covered
+
     def blurry(self):
         """(H, W) bool: cells the detail map rates below GOOD_SOURCE (or did not see); none without a current map."""
         H, W = self.crown.shape
@@ -556,67 +690,262 @@ class _Scene:
         if list(m["splat"]) != _key(base(self.project)):
             return np.zeros((H, W), bool)
         k = int(round(float(m["cell"]) / self.cell))
-        big = np.repeat(np.repeat(~(np.nan_to_num(m["ratio"], nan=0.0) >= GOOD_SOURCE), k, 0), k, 1)
+        _, good = detail_thresholds(m["ratio"], m["weight"])
+        big = np.repeat(np.repeat(~(np.nan_to_num(m["ratio"], nan=0.0) >= good), k, 0), k, 1)
         out = np.ones((H, W), bool)
         h, w = min(H, big.shape[0]), min(W, big.shape[1])
         out[:h, :w] = big[:h, :w]
         return out
 
+    def disc(self, x, y, r):
+        """(H, W) bool: the cells within r of (x, y)."""
+        H, W = self.crown.shape
+        yy, xx = np.mgrid[0:H, 0:W]
+        cx, cy = self.lo[0] + (xx + 0.5) * self.cell, self.lo[1] + (yy + 0.5) * self.cell
+        return np.hypot(cx - x, cy - y) <= r
+
+    def polygon(self, pts):
+        """(H, W) bool: the cells whose centres lie inside the polygon pts ([[x, y], ...], ENU)."""
+        H, W = self.crown.shape
+        q = (np.asarray(pts, float) - self.lo) / self.cell - 0.5  # cell centre coordinates (column, row)
+        m = np.zeros((H, W), np.uint8)
+        cv2.fillPoly(m, [np.round(q * 16).astype(np.int32)], 1, lineType=cv2.LINE_8, shift=4)
+        return m > 0
+
+    def region(self, shape):
+        """(H, W) bool of a shape: [x, y, r] (a disc) or {"polygon": [[x, y], ...]}."""
+        if isinstance(shape, dict):
+            return self.polygon(shape["polygon"])
+        return self.disc(*shape)
+
     def ground_hole(self, e):
         """(H, W) bool: a ground edit's cells: its weak area (ground_labels at MAP_CELL) or its circle."""
         H, W = self.crown.shape
+        if e.get("polygon"):
+            return self.polygon(e["polygon"])
         if e.get("circle"):
-            x, y, r = e["circle"]
-            yy, xx = np.mgrid[0:H, 0:W]
-            cx, cy = self.lo[0] + (xx + 0.5) * self.cell, self.lo[1] + (yy + 0.5) * self.cell
-            return np.hypot(cx - x, cy - y) <= r
+            return self.disc(*e["circle"])
         lab = np.load(os.path.join(_dir(self.project), "ground_labels.npy"))
         k = int(round(MAP_CELL / self.cell))
-        big = np.repeat(np.repeat(lab == e["area"], k, 0), k, 1)
+        big = np.repeat(np.repeat(lab == e["area"], k, 0), k, 1).astype(np.float32)
+        # rounded: the 2 m map cells gave staircase outlines and square corners (the most visible seam on kladno_dira)
+        big = cv2.GaussianBlur(big, (0, 0), AREA_SMOOTH_M / self.cell) > 0.5
         out = np.zeros((H, W), bool)
         h, w = min(H, big.shape[0]), min(W, big.shape[1])
         out[:h, :w] = big[:h, :w]
         return out
 
-    def fill(self, hole, avoid, old_top=CUT):
-        """(copied arrays, old ground indices, stats): the hole's ground from PatchMatch sources; the hole's own
-        Gaussians up to old_top above the ground go."""
+    def suggest_template(self, hole, avoid):
+        """The most similar detailed patch for a ground hole: (x, y, r) of a disc of the hole's size (r within
+        TEMPLATE_R) whose cells are open, detailed (>= the good threshold where the detail map exists) and over the
+        measured mesh (at least TEMPLATE_VALID of them), and whose mean description is nearest the hole's own: what the
+        photos show (the detail map's photo colour and texture energy at two scales: blur-free, a smeared road's photos
+        still show a road) and the semantic feature, each normalized over the site; without the photo arrays (maps from
+        before 2026-10-31) the splat's colour instead and no texture. Distance does not count (the user: similarity in
+        colour, texture and semantics is what matters). Judged by the hole's own content, not by its rim: on
+        kladno_dira a road's rim of grass made the fill copy another ground. None if no place qualifies."""
         from modelforge import patchfill
         R = self.rasters()
+        D = patchfill.descriptors(R)
+        have = R["n"] > 0
+        H, W = hole.shape
+        groups = []  # (name, (H, W, n)): normalized per number, then weighted per group (weighting first is undone)
+        photo = self.photo_maps()
+        if photo is not None:
+            groups += [("colour", photo[0]), ("texture", photo[1])]
+        else:
+            groups.append(("colour", D[..., :3]))
+        if R.get("feat") is not None:
+            groups.append(("semantic", D[..., 3:11]))
+        A = np.concatenate([g for _, g in groups], -1).astype(np.float32)
+        known = np.isfinite(A).all(-1) & have
+        A[~known] = 0
+        mu, sd = A[known].mean(0), A[known].std(0) + 1e-6
+        A = np.where(known[..., None], (A - mu) / sd, 0).astype(np.float32)
+        w = np.concatenate([np.full(g.shape[-1], TEMPLATE_W.get(n, 1.0) / np.sqrt(g.shape[-1])) for n, g in groups])
+        A *= w.astype(np.float32)  # each group the same say, whatever its number of dimensions
+        k = A.shape[-1]
+        inner = hole & known
+        if not inner.any():
+            return None
+        want = A[inner].mean(0)
+        rad = float(np.clip(np.sqrt(hole.sum() / np.pi) * self.cell, *TEMPLATE_R))
+        rc = max(1, int(round(rad / self.cell)))
+        yy, xx = np.mgrid[-rc:rc + 1, -rc:rc + 1]
+        K = (np.hypot(yy, xx) <= rc).astype(np.float32)
+        near_hole = cv2.dilate(hole.astype(np.uint8), np.ones((2 * rc + 1, 2 * rc + 1), np.uint8)) > 0
+        ok = (known & ~R["obj"] & ~avoid & ~self.blurry() & ~near_hole & self.covered()).astype(np.float32)
+        cnt = cv2.filter2D(ok, -1, K, borderType=cv2.BORDER_CONSTANT)
+        frac = cnt / K.sum()
+        mean = np.stack([cv2.filter2D(A[..., j] * ok, -1, K, borderType=cv2.BORDER_CONSTANT) for j in range(k)], -1)
+        mean /= np.maximum(cnt, 1e-6)[..., None]
+        cost = np.linalg.norm(mean - want, axis=-1)
+        cost[frac < TEMPLATE_VALID] = np.inf
+        if not np.isfinite(cost).any():
+            return None
+        i, j = np.unravel_index(np.argmin(cost), cost.shape)
+        return [float(self.lo[0] + (j + 0.5) * self.cell), float(self.lo[1] + (i + 0.5) * self.cell), rad]
+
+    def photo_maps(self):
+        """The detail map's photo colour (H, W, 3) and texture (H, W, 2) on the fine grid, NaN where no photo saw
+        it; None without them (a map from before they were recorded) or without a current map."""
+        path = os.path.join(_dir(self.project), "detail.npz")
+        if not os.path.exists(path):
+            return None
+        m = np.load(path)
+        if "photo_rgb" not in m.files or list(m["splat"]) != _key(base(self.project)):
+            return None
+        H, W = self.crown.shape
+        k = int(round(float(m["cell"]) / self.cell))
+        out = []
+        for a in (m["photo_rgb"], m["photo_tex"]):
+            big = np.repeat(np.repeat(a, k, 0), k, 1)
+            full = np.full((H, W, a.shape[-1]), np.nan, np.float32)
+            h, w = min(H, big.shape[0]), min(W, big.shape[1])
+            full[:h, :w] = big[:h, :w]
+            out.append(full)
+        return out
+
+    def fill(self, hole, avoid, old_top=CUT, template=None, feather=None, blend=None):
+        """(copied arrays, old indices to drop, stats): the hole's ground from PatchMatch sources; the hole's own
+        Gaussians up to old_top above the ground go (any size: the smear is often large ones). template (x, y, r) or
+        {"polygon"}: sources only there (the user's choice of good ground; kladno_dira, 2026-10-31: a road was filled
+        with a different ground's texture).
+
+        The transition (the user asked to make it seamless, 2026-10-31):
+        - feather (m, FEATHER_M): the copy reaches that far beyond the hole, crossfading by opacity: the copied
+          Gaussians fade out and the original ground layer fades in across the band (no hard edge);
+        - blend (BLEND): gradient-domain colour blending (as Poisson image editing / a healing brush): the colour
+          difference between the surroundings and the copy along the edge is spread smoothly over the patch (a
+          harmonic fill) and added to the copy, so the edge matches and the copied texture stays."""
+        from modelforge import patchfill
+        feather = FEATHER_M if feather is None else feather
+        blend = BLEND if blend is None else blend
+        R = self.rasters()
         W, H, cell = R["W"], R["H"], self.cell
-        off, cost = patchfill.fill(R, hole, avoid | self.blurry())
-        gm = (self.gz >= -GROUND_TOP) & (self.gz <= GROUND_TOP) & self.inside \
-            & (np.exp(self.g["scales"].max(1)) < MAX_COPY_M)
-        gi = np.flatnonzero(gm)
+        have = R["n"] > 0
+        # the band beyond the hole the copy crossfades over: ground cells (nothing standing) within `feather`
+        dist_out = cv2.distanceTransform((~hole).astype(np.uint8), cv2.DIST_L2, 3) * cell
+        band = ~hole & (dist_out <= feather) & have & ~R["obj"] if feather > 0 else np.zeros_like(hole)
+        region = hole | band
+        off, cost = patchfill.fill(R, region, avoid | (~self.region(template) if template else self.blurry()))
+        gm = (self.gz >= -GROUND_TOP) & (self.gz <= GROUND_TOP) & self.inside
+        small = np.exp(self.g["scales"].max(1)) < MAX_COPY_M
+        gi = np.flatnonzero(gm & small)
         gc = self.cij[gi, 1] * W + self.cij[gi, 0]
         order = np.argsort(gc)
         gi, gc = gi[order], gc[order]
-        hy, hx = np.nonzero(hole & np.isfinite(cost))
+        hy, hx = np.nonzero(region & np.isfinite(cost))
         sc = (hy + off[hy, hx, 0]) * W + (hx + off[hy, hx, 1])
         a, b = np.searchsorted(gc, sc), np.searchsorted(gc, sc, "right")
         src = np.concatenate([gi[i:j] for i, j in zip(a, b)]) if len(a) else np.zeros(0, np.int64)
-        shift = np.repeat(np.stack([off[hy, hx, 1], off[hy, hx, 0]], 1) * cell, b - a, axis=0)
+        tcell = np.repeat(np.arange(len(hy)), b - a)  # each copied Gaussian's target cell (index into hy, hx)
+        shift = np.stack([off[hy, hx, 1], off[hy, hx, 0]], 1)[tcell] * cell
         q = {k: v[src].copy() for k, v in self.g.items()}
         x, y = self.P[src, 0] - shift[:, 0], self.P[src, 1] - shift[:, 1]
         q["means"] = np.stack([x, y, self.ground(x, y) + self.gz[src]], 1).astype(np.float32)
-        ring = (cv2.dilate(hole.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) & ~hole & (R["n"] > 0) & ~R["obj"]
-        if len(src) and ring.any():
-            q["sh"][:, 0] += 0.5 * (R["col"][ring].mean(0) - q["sh"][:, 0].mean(0))
+        # weights: 1 in the hole, falling to 0 across the band
+        wcell = np.where(hole[hy, hx], 1.0, np.clip(1.0 - dist_out[hy, hx] / max(feather, 1e-6), 0.0, 1.0))
+        stats = {"cells": int(hole.sum()), "band_cells": int(band.sum()), "gaussians": int(len(src)),
+                 "template": bool(template)}
+        if blend > 0 and len(src):
+            corr = self._blend_field(R, region, hy, hx, tcell, q["sh"][:, 0])
+            if corr is not None:
+                q["sh"][:, 0] += blend * corr[tcell]
+                stats["blend_mean"] = round(float(np.abs(corr).mean()), 3)
+        elif len(src) and not template:  # the former global pull (blend 0)
+            ring = (cv2.dilate(hole.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) & ~hole & have & ~R["obj"]
+            if ring.any():
+                q["sh"][:, 0] += 0.5 * (R["col"][ring].mean(0) - q["sh"][:, 0].mean(0))
         old = np.flatnonzero(gm & (self.gz <= old_top))
         old = old[hole[self.cij[old, 1], self.cij[old, 0]]]
+        if band.any():  # crossfade: copied Gaussians in the band weighted w, the original ground layer there 1 - w
+            w = wcell[tcell].astype(np.float32)
+            op = 1 / (1 + np.exp(-q["opacities"].reshape(-1)))
+            q["opacities"] = _logit(op * w).reshape(q["opacities"].shape)
+            keep = w > 0.02
+            q = {k: v[keep] for k, v in q.items()}
+            ob = np.flatnonzero(gm)
+            ob = ob[band[self.cij[ob, 1], self.cij[ob, 0]]]
+            wo = 1.0 - np.clip(1.0 - dist_out[self.cij[ob, 1], self.cij[ob, 0]] / feather, 0.0, 1.0)
+            faded = {k: v[ob].copy() for k, v in self.g.items()}
+            op = 1 / (1 + np.exp(-faded["opacities"].reshape(-1)))
+            faded["opacities"] = _logit(op * wo).reshape(faded["opacities"].shape)
+            q = {k: np.concatenate([q[k], faded[k]]) for k in q}
+            old = np.concatenate([old, ob])
         d = np.hypot(off[hy, hx, 0], off[hy, hx, 1]) * cell
-        return q, old, {"cells": int(hole.sum()), "gaussians": int(len(src)),
-                        "source_distance_m": round(float(np.median(d)), 1) if len(d) else None}
+        stats["source_distance_m"] = round(float(np.median(d)), 1) if len(d) else None
+        return q, old, stats
 
-    def donor(self, target, donor, taken_target):
-        """The donor's Gaussians fitted to the target (see the module doc)."""
+    def haze_over(self, hole):
+        """Indices of the large Gaussians (> HAZE_M) hanging over a ground hole up to HAZE_TOP_M above the ground: the
+        fog that makes weak ground weak (a fill under it looked like a carpet laid under fog). Weak areas exclude the
+        objects' footprints, so trees and bushes are not touched."""
+        idx = np.flatnonzero(self.inside)
+        idx = idx[hole[self.cij[idx, 1], self.cij[idx, 0]]]
+        big = np.exp(self.g["scales"][idx].max(1)) > HAZE_M
+        return idx[big & (self.gz[idx] > GROUND_TOP) & (self.gz[idx] < HAZE_TOP_M)]
+
+    def _blend_field(self, R, region, hy, hx, tcell, sh0):
+        """(len(hy), 3) colour correction per region cell: on the region's border cells the difference between the
+        surroundings (the mean colour of their outside neighbours' ground) and the copy there, harmonically
+        interpolated over the region (Laplace with those boundary values: Poisson blending of a constant-gradient
+        source). None if the region has no measurable border."""
+        H, W = region.shape
+        n = len(hy)
+        cnt = np.bincount(tcell, minlength=n).astype(np.float64)
+        F = np.stack([np.bincount(tcell, weights=sh0[:, c], minlength=n) for c in range(3)], 1) / np.maximum(cnt, 1)[:, None]
+        outside = ~region & (R["n"] > 0) & ~R["obj"]
+        col = np.where(outside[..., None], R["col"], 0).astype(np.float32)
+        k = np.ones((2 * BLEND_WIN + 1, 2 * BLEND_WIN + 1), np.float32)  # wide: one dark neighbour must not decide
+        s_out = cv2.filter2D(col, -1, k, borderType=cv2.BORDER_CONSTANT)
+        n_out = cv2.filter2D(outside.astype(np.float32), -1, k, borderType=cv2.BORDER_CONSTANT)
+        # the copy's colour near each border cell, over the same window
+        Fg = np.zeros((H, W, 3), np.float32)
+        Fn = np.zeros((H, W), np.float32)
+        Fg[hy, hx], Fn[hy, hx] = F * (cnt > 0)[:, None], (cnt > 0)
+        s_in = cv2.filter2D(Fg, -1, k, borderType=cv2.BORDER_CONSTANT)
+        n_in = cv2.filter2D(Fn, -1, k, borderType=cv2.BORDER_CONSTANT)
+        one = np.ones((3, 3), np.float32)
+        border = (cv2.filter2D(outside.astype(np.float32), -1, one, borderType=cv2.BORDER_CONSTANT)[hy, hx] > 0) \
+            & (n_out[hy, hx] >= 3) & (n_in[hy, hx] >= 3)
+        if not border.any():
+            return None
+        y0, y1, x0, x1 = hy.min(), hy.max() + 1, hx.min(), hx.max() + 1
+        grid = np.zeros((y1 - y0, x1 - x0, 3), np.float32)
+        known = np.zeros((y1 - y0, x1 - x0), bool)
+        d = s_out[hy, hx] / np.maximum(n_out[hy, hx], 1)[:, None] - s_in[hy, hx] / np.maximum(n_in[hy, hx], 1)[:, None]
+        grid[hy[border] - y0, hx[border] - x0] = np.clip(d[border], -BLEND_MAX, BLEND_MAX)
+        known[hy[border] - y0, hx[border] - x0] = True
+        # smoothed along the border (normalized convolution): no spot of the rim dominates
+        sm = cv2.GaussianBlur(grid * known[..., None], (0, 0), BLEND_WIN)
+        wn = cv2.GaussianBlur(known.astype(np.float32), (0, 0), BLEND_WIN)
+        grid = np.where(known[..., None], sm / np.maximum(wn, 1e-6)[..., None], 0).astype(np.float32)
+        field = np.stack([rig.fill_holes(grid[..., c], known) for c in range(3)], -1)
+        return field[hy - y0, hx - x0]
+
+    def donor(self, target, donor, taken_target, turn=False):
+        """The donor's Gaussians fitted to the target (see the module doc); turn: turned about the vertical so the
+        donor's photographed side faces the target's (`sides`; the sunlit side moves with it)."""
         t, d = self.objs[target], self.objs[donor]
-        di = self.taken(donor)
-        di = di[self.gz[di] > CUT]
+        # its own Gaussians: centred over its footprint up to 0.5 m above its top, at most DONOR_MAX_M large; not the
+        # haze around it nor floaters above (removal takes those, copying must not: white clouds), nor sky-coloured
+        # ones (sky seen through the crown in its own photos: white specks once moved); large ones stay (a healthy
+        # crown is mostly Gaussians > 0.5 m: without them the copy was hollow twigs)
+        m = self.mask(donor)
+        di = np.flatnonzero(self.inside)
+        di = di[m[self.cij[di, 1], self.cij[di, 0]]]
+        smax = np.exp(self.g["scales"][di].max(1))
+        rgb = np.clip(self.g["sh"][di, 0] * 0.28209479177387814 + 0.5, 0, 1)
+        sky = (rgb.min(1) > 0.6) & (rgb.max(1) - rgb.min(1) < 0.12)
+        di = di[(self.gz[di] > CUT) & (self.gz[di] < d["height"] + 0.5) & (smax < DONOR_MAX_M) & ~sky]
         s = t["height"] / d["height"]
         q = {k: v[di].copy() for k, v in self.g.items()}
-        x = (self.P[di, 0] - d["x"]) * s + t["x"]
-        y = (self.P[di, 1] - d["y"]) * s + t["y"]
+        dx, dy = (self.P[di, 0] - d["x"]) * s, (self.P[di, 1] - d["y"]) * s
+        if turn:
+            a = float(t["side_az"] - d["side_az"])
+            dx, dy = _turn(q, a, dx, dy)
+        x, y = dx + t["x"], dy + t["y"]
         q["means"] = np.stack([x, y, self.ground(x, y) + self.gz[di] * s], 1).astype(np.float32)
         q["scales"] = q["scales"] + np.float32(np.log(s))
         rt = np.clip(self.gz[taken_target] / t["height"], 0, 0.999)
@@ -626,6 +955,25 @@ class _Scene:
             if mt.sum() >= 10 and md.sum() >= 10:
                 q["sh"][md, 0] += COLOUR * (self.g["sh"][taken_target[mt], 0].mean(0) - q["sh"][md, 0].mean(0))
         return q, s
+
+
+def _logit(p):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p)).astype(np.float32)
+
+
+def _turn(q, a, dx, dy):
+    """Turn arrays q (load_splat layout; in place: orientations and SH bands) and their horizontal offsets (dx, dy)
+    by a radians about the vertical; returns the turned offsets."""
+    from modelforge.export import splat_to_enu
+    ca, sa = np.cos(a), np.sin(a)
+    Rz = np.array([[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]])
+    q["quats"] = splat_to_enu.quat_mul(splat_to_enu.quat_from_rot(Rz), q["quats"].astype(np.float64)).astype(np.float32)
+    K = q["sh"].shape[1] - 1
+    if K:  # c'(d) = c(Rz^T d): the view-dependent colour turns with it
+        X = splat_to_enu.sh_rotation(Rz.T, int(round(np.sqrt(K + 1))) - 1)
+        q["sh"][:, 1:, :] = (q["sh"][:, 1:, :].transpose(0, 2, 1) @ X.T).transpose(0, 2, 1).astype(np.float32)
+    return ca * dx - sa * dy, sa * dx + ca * dy
 
 
 def _build(project, eds, on_line=print):
@@ -639,7 +987,17 @@ def _build(project, eds, on_line=print):
     drop, add, stats = [], [], []
     for e in eds:
         if e.get("kind") == "ground":  # texture repair: the area's ground layer is replaced
-            q, old, fs = sc.fill(holes[e["id"]], avoid, old_top=GROUND_TOP)
+            tmpl = e.get("source")
+            if tmpl == "auto":  # the most similar detailed patch (recorded in the stats)
+                tmpl = sc.suggest_template(holes[e["id"]], avoid)
+            q, old, fs = sc.fill(holes[e["id"]], avoid, old_top=GROUND_TOP, template=tmpl)
+            haze = sc.haze_over(holes[e["id"]])  # the fog above weak ground goes too
+            old = np.union1d(old, haze)
+            fs["haze_removed"] = int(len(haze))
+            if isinstance(tmpl, dict):
+                fs["template_polygon"] = tmpl["polygon"]
+            elif tmpl is not None:
+                fs["template_at"] = [round(v, 2) for v in tmpl]
             drop.append(old)
             add.append(q)
             stats.append({"id": e["id"], "removed": int(len(old)), "fill": fs})
@@ -649,12 +1007,13 @@ def _build(project, eds, on_line=print):
         drop.append(taken)
         st = {"id": e["id"], "removed": int(len(taken))}
         if e.get("fill", True):
-            q, old, fs = sc.fill(holes[e["id"]], avoid)
+            src = e.get("source")  # under an object the hole's content is the object: "auto" judges by the rim then
+            q, old, fs = sc.fill(holes[e["id"]], avoid, template=None if src == "auto" else src)
             drop.append(old)
             add.append(q)
             st["fill"] = fs
         if e.get("donor") is not None:
-            q, s = sc.donor(e["object"], e["donor"], taken)
+            q, s = sc.donor(e["object"], e["donor"], taken, turn=e.get("turn", False))
             add.append(q)
             st.update(donor_gaussians=int(len(q["means"])), scale=round(float(s), 3))
         stats.append(st)
@@ -688,21 +1047,25 @@ def apply(project, on_line=print):
     return stats
 
 
-def add(project, obj, donor=None, fill=True, on_line=print):
+def add(project, obj, donor=None, fill=True, on_line=print, turn=False):
     """Append an edit (remove obj, fill its ground, place donor) and apply all. Returns the edit."""
     eds = edits(project)
     if any(e.get("object") == obj for e in eds):
         raise RuntimeError(f"object {obj} is already edited (undo that edit first)")
     e = {"id": max([x["id"] for x in eds], default=-1) + 1, "object": int(obj),
-         "donor": None if donor is None else int(donor), "fill": bool(fill), "time": time.strftime("%Y-%m-%d %H:%M")}
+         "donor": None if donor is None else int(donor), "fill": bool(fill), "turn": bool(turn),
+         "time": time.strftime("%Y-%m-%d %H:%M")}
     json.dump(eds + [e], open(os.path.join(_dir(project), "edits.json"), "w"), indent=1)
     apply(project, on_line)
     return e
 
 
 def add_many(project, items, on_line=print):
-    """Append several edits and apply once: (obj, donor or None, fill) for objects (already edited ones skipped), or
-    dicts {"kind": "ground", "area": k} / {"kind": "ground", "circle": [x, y, r]} for texture repair."""
+    """Append several edits and apply once: (obj, donor or None, fill[, turn[, source]]) for objects (already edited
+    ones skipped), or dicts {"area": k} / {"circle": [x, y, r]} / {"polygon": [[x, y], ...]} for texture repair;
+    "source": [x, y, r] or {"polygon": [[x, y], ...]} (either kind)
+    takes the ground fill only from that circle (a template of good ground), "auto" (ground repairs) from the most
+    similar detailed patch (`_Scene.suggest_template`)."""
     eds = edits(project)
     done = {e["object"] for e in eds if "object" in e}
     areas = {e.get("area") for e in eds if e.get("kind") == "ground" and "area" in e}
@@ -713,13 +1076,15 @@ def add_many(project, items, on_line=print):
             if it.get("area") is not None and it["area"] in areas:
                 continue
             eds.append({"id": nxt, "kind": "ground", "fill": True, "time": now,
-                        **{k: it[k] for k in ("area", "circle") if it.get(k) is not None}})
+                        **{k: it[k] for k in ("area", "circle", "polygon", "source") if it.get(k) is not None}})
         else:
-            obj, donor, fill = it
+            obj, donor, fill, *rest = it  # (obj, donor, fill[, turn[, source (x, y, r) of the ground fill]])
             if obj in done:
                 continue
             eds.append({"id": nxt, "object": int(obj), "donor": None if donor is None else int(donor),
-                        "fill": bool(fill), "time": now})
+                        "fill": bool(fill), "turn": bool(rest[0]) if rest else False, "time": now,
+                        **({"source": rest[1] if rest[1] == "auto" or isinstance(rest[1], dict) else list(rest[1])}
+                           if len(rest) > 1 and rest[1] is not None else {})})
             done.add(obj)
         nxt += 1
     json.dump(eds, open(os.path.join(_dir(project), "edits.json"), "w"), indent=1)

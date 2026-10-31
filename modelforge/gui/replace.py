@@ -4,7 +4,8 @@ Find and rate objects (a job), then either **automatic** (proposals: objects ren
 each to be removed with its ground filled, or replaced by a donor where one fits; tick them, Apply checked) or
 **manual** (Pick, Ctrl + click an object; its donor candidates listed best first; remove + fill, or replace with the
 chosen donor); **ground texture** (Map weak ground: a detail map of render vs photo; weak areas outlined in magenta,
-ticked ones repaired; or a circle picked by Ctrl + click with a radius). Every applied edit is listed with Go and Undo. Objects are marked by upright cylinders: orange the
+ticked ones repaired; or an area drawn as a polygon by Ctrl + clicking its corners; optionally from a template: a
+polygon of good ground drawn the same way, the only place the fill copies from). Every applied edit is listed with Go and Undo. Objects are marked by upright cylinders: orange the
 selected one, red the proposals, cyan the donor candidates."""
 import os
 import threading
@@ -18,8 +19,18 @@ from modelforge.gui.semantic import best_view, cylinder_segments
 
 NODE = "/replace"
 COLOURS = {"selected": (255, 140, 0), "proposal": (230, 40, 40), "donor": (0, 200, 230), "area": (230, 0, 230),
-           "circle": (255, 230, 0)}
+           "circle": (255, 230, 0), "template": (40, 220, 40)}
 MAX_ROWS = 40
+COPY_FROM = {"the most similar detailed patch": "auto", "similar sharp ground anywhere": None, "my template": "mine"}  # Ground texture → Copy from
+
+
+def poly_area(pts):
+    """Area (m2) of a polygon [[x, y], ...] (shoelace)."""
+    p = np.asarray(pts, float)
+    if len(p) < 3:
+        return 0.0
+    x, y = p[:, 0], p[:, 1]
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
 
 
 class ReplacePanel:
@@ -27,8 +38,10 @@ class ReplacePanel:
         self.app, self.gui = app, gui
         self.lock = threading.RLock()
         self.objs, self.selected, self.donor_list, self.proposals = None, None, [], []
-        self.picking = None  # "object" / "circle": what the next Ctrl + click picks
-        self.areas, self.area_props, self.circle = [], [], None  # weak ground areas, their rows, the picked circle
+        self.picking = None  # "object" / "area" / "template": what the next Ctrl + click picks
+        self.areas, self.area_props = [], []  # weak ground areas, their rows
+        self.poly = {"area": [], "template": []}  # polygons being drawn / drawn: corners [x, y] (ENU)
+        self.closed = {"area": False, "template": False}
         self.request = None  # what the next replace job does: ("find",) / ("apply", items) / ("undo", id)
         self._rows, self._markers = [], []
         gui.add_markdown(
@@ -52,6 +65,11 @@ class ReplacePanel:
                 initial_value="remove + fill ground",
                 hint="What the proposals do. A donor must be as sharp as its photos, clean (nothing else standing "
                      "over it) and of a similar shape; where none fits, the object is removed and its ground filled.")
+            self.g_turn = gui.add_checkbox(
+                "Turn donors to face the views", initial_value=False,
+                hint="A tree in a splat is good only from where it was photographed: turns each donor about the "
+                     "vertical so its photographed side faces the side its target was photographed from. The "
+                     "sunlit side turns with it (fine under an overcast sky). Also for Manual.")
             b = gui.add_button("Suggest", icon=viser.Icon.SPARKLES,
                                hint="Lists the objects rendered much blurrier than their photos (sharpness < "
                                     f"{replace.TARGET_SHARP}) that are mostly vegetation. Tick the ones to change.")
@@ -78,9 +96,27 @@ class ReplacePanel:
                                hint="Renders 300 photos and compares each with the splat window by window: how much "
                                     "of the photos' detail the splat keeps, placed on a 2 m grid on the ground. Weak "
                                     f"areas: below {replace.WEAK_GROUND} of it, at least {replace.MIN_GROUND_M2:.0f} "
-                                    "m2, no object on them. Needs Find and rate objects first. Seconds to a minute.")
+                                    "m2, no object on them. Finds the objects first if that has not run (their ground "
+                                    "model; no rating). A minute or two.")
             b.on_click(lambda _: self._start(("map",)))
             self.g_area_md = gui.add_markdown("")
+            with gui.add_folder("Template: good ground to copy from", expand_by_default=True):
+                b = gui.add_button("Draw a template (Ctrl + click corners)", icon=viser.Icon.POLYGON,
+                                   hint="Then Ctrl + click the corners of a patch of good ground of the kind the "
+                                        "repair should have (e.g. the same road where it is sharp), and Finish. The "
+                                        "repairs copy only from inside it (nothing standing on it is used).")
+                b.on_click(lambda _: self._arm("template"))
+                row = gui.add_button_group("", options=("Undo corner", "Finish", "Clear"))
+                row.on_click(lambda ev: self._poly_action("template", ev.target.value))
+                self.g_copy_from = gui.add_dropdown(
+                    "Copy from", options=tuple(COPY_FROM), initial_value="the most similar detailed patch",
+                    hint="Where Repair checked areas / Repair circle copy the ground from. The most similar detailed "
+                         "patch: a disc of the repair's size where the splat is sharp, whose colour and kind (the "
+                         "semantic features: road, gravel, grass ...) match the weak area's own best (its green ring "
+                         "shows after the repair). Similar sharp ground anywhere: per cell, matched by the area's "
+                         "surroundings. My template: the green polygon drawn above.")
+                self.g_copy_from.on_update(lambda _: self._draw_markers())
+                self.g_tmpl_md = gui.add_markdown("_No template._")
             self.g_show_areas = gui.add_checkbox("Show weak areas", initial_value=True,
                                                  hint="Magenta outlines on the ground, labelled g<id>.")
             self.g_show_areas.on_update(lambda _: self._draw_markers())
@@ -88,16 +124,15 @@ class ReplacePanel:
             b = gui.add_button("Repair checked areas", icon=viser.Icon.CHECK,
                                hint="Replaces the ground layer of the ticked areas (one job).")
             b.on_click(lambda _: self.repair_checked())
-            b = gui.add_button("Pick a spot (Ctrl + click)", icon=viser.Icon.POINTER,
-                               hint="Then Ctrl + click the ground: a circle of the radius below is repaired there.")
-            b.on_click(lambda _: self._arm("circle"))
-            self.g_radius = gui.add_slider("Radius (m)", min=0.5, max=20.0, step=0.5, initial_value=3.0,
-                                           hint="The size of the circle Repair circle replaces.")
-            self.g_radius.on_update(lambda _: self._draw_markers())
-            self.g_circle_md = gui.add_markdown("")
-            b = gui.add_button("Repair circle", icon=viser.Icon.CIRCLE_CHECK,
-                               hint="Replaces the ground layer inside the yellow circle.")
-            b.on_click(lambda _: self.repair_circle())
+            b = gui.add_button("Draw the area to repair (Ctrl + click corners)", icon=viser.Icon.POLYGON,
+                               hint="Then Ctrl + click the corners of the ground to repair, and Finish.")
+            b.on_click(lambda _: self._arm("area"))
+            row = gui.add_button_group("", options=("Undo corner", "Finish", "Clear"))
+            row.on_click(lambda ev: self._poly_action("area", ev.target.value))
+            self.g_area_draw_md = gui.add_markdown("")
+            b = gui.add_button("Repair the drawn area", icon=viser.Icon.CIRCLE_CHECK,
+                               hint="Replaces the ground layer inside the yellow polygon.")
+            b.on_click(lambda _: self.repair_drawn())
         with gui.add_folder("Edits", expand_by_default=True):
             self.g_edits_folder = gui.add_folder("Applied", expand_by_default=True)
             b = gui.add_button("Undo all", icon=viser.Icon.ARROW_BACK_UP, hint="Back to the splat before any edit.")
@@ -140,7 +175,7 @@ class ReplacePanel:
 
     def _area_status(self):
         if self.objs is None:
-            self.g_area_md.content = "_Find and rate objects first._"
+            self.g_area_md.content = "_No weak ground mapped (Map weak ground)._"
         elif not self.areas:
             self.g_area_md.content = "_No weak ground mapped (Map weak ground)._"
         else:
@@ -162,19 +197,71 @@ class ReplacePanel:
                 self.area_props.append((a["id"], cb))
                 self._arows += [cb, b]
 
+    def _source(self):
+        """What the ground repairs copy from: {"polygon": ...} (my template), "auto" or None (Copy from)."""
+        how = COPY_FROM[self.g_copy_from.value]
+        if how == "mine":
+            if not self.closed["template"]:
+                return None
+            return {"polygon": [list(c) for c in self.poly["template"]]}
+        return how
+
+    def _poly_md(self, which):
+        return self.g_area_draw_md if which == "area" else self.g_tmpl_md
+
+    def _poly_status(self, which):
+        pts = self.poly[which]
+        md = self._poly_md(which)
+        if not pts:
+            md.content = "_No template._" if which == "template" else ""
+        elif not self.closed[which]:
+            md.content = f"{len(pts)} corners: **Ctrl + click** the next, then Finish."
+        else:
+            what = "repairs copy from the green polygon" if which == "template" else "Repair the drawn area"
+            md.content = f"{len(pts)} corners, {poly_area(pts):,.1f} m²: {what}."
+
+    def _poly_action(self, which, action):
+        """Undo corner / Finish / Clear of the polygon being drawn (which: "area" or "template")."""
+        pts = self.poly[which]
+        if action == "Undo corner" and pts:
+            pts.pop()
+            self.closed[which] = False
+            if self.picking is None and pts:
+                self.picking = which
+        elif action == "Finish":
+            if len(pts) < 3:
+                self._poly_md(which).content = "_A polygon needs at least 3 corners._"
+                return
+            self.closed[which] = True
+            if self.picking == which:
+                self.picking = None
+            if which == "template":
+                self.g_copy_from.value = "my template"
+        elif action == "Clear":
+            self.poly[which] = []
+            self.closed[which] = False
+            if self.picking == which:
+                self.picking = None
+            if which == "template" and self.g_copy_from.value == "my template":
+                self.g_copy_from.value = "the most similar detailed patch"
+        self._poly_status(which)
+        self._draw_markers()
+
     def repair_checked(self):
-        items = [{"area": aid} for aid, cb in self.area_props if cb.value]
+        src = self._source()
+        items = [{"area": aid, **({"source": src} if src else {})} for aid, cb in self.area_props if cb.value]
         if items:
             self._start(("apply", items))
 
-    def repair_circle(self):
-        if self.circle is None:
-            self.g_circle_md.content = "_Pick a spot first._"
+    def repair_drawn(self):
+        if not self.closed["area"]:
+            self.g_area_draw_md.content = "_Draw the area first (at least 3 corners, then Finish)._"
             return
-        x, y = self.circle
-        self.circle = None
-        self.g_circle_md.content = ""
-        self._start(("apply", [{"circle": [x, y, float(self.g_radius.value)]}]))
+        pts = [list(c) for c in self.poly["area"]]
+        self.poly["area"], self.closed["area"] = [], False
+        self._poly_status("area")
+        src = self._source()
+        self._start(("apply", [{"polygon": pts, **({"source": src} if src else {})}]))
 
     def _ground_z(self, x, y):
         d = np.load(os.path.join(self.app.path, replace.DIR, "objects.npz"))
@@ -192,6 +279,9 @@ class ReplacePanel:
     def _objs_by_id(self):
         return {o["id"]: o for o in (self.objs or [])}
 
+    def _queries(self):
+        return {q.strip(): replace.QUERIES.get(q.strip(), 0.58) for q in self.g_kind.value.split(",") if q.strip()}
+
     def _start(self, request):
         self.request = request
         self.app.run_stage("replace")
@@ -202,11 +292,13 @@ class ReplacePanel:
         req = self.request or ("find",)
         self.request = None
         if req[0] == "find":
-            qs = {q.strip(): replace.QUERIES.get(q.strip(), 0.58) for q in self.g_kind.value.split(",") if q.strip()}
-            objs = replace.find(project, qs, on_line)
+            objs = replace.find(project, self._queries(), on_line)
             objs = replace.rate(project, on_line, on_progress, token)
             msg = f"{len(objs)} objects found and rated, {len(replace.suggest_targets(objs))} look broken"
         elif req[0] == "map":
+            if replace.objects(project) is None:  # the map uses the objects' ground and keeps off their footprints
+                on_line("replace: finding the objects first (the map needs their ground model)")
+                replace.find(project, self._queries(), on_line)
             areas = replace.detail_map(project, on_line, on_progress, token)
             msg = f"weak ground mapped: {len(areas)} areas, {sum(a['area_m2'] for a in areas):,.0f} m2"
         elif req[0] == "apply":
@@ -256,7 +348,8 @@ class ReplacePanel:
                 self._rows += [cb, b]
 
     def apply_checked(self):
-        items = [(p["object"], p["donor"], True) for p in self.proposals if p.get("check") and p["check"].value]
+        turn = bool(self.g_turn.value)
+        items = [(p["object"], p["donor"], True, turn) for p in self.proposals if p.get("check") and p["check"].value]
         if items:
             self.proposals = []
             self._draw_proposals()
@@ -264,29 +357,31 @@ class ReplacePanel:
 
     # --------------------------------------------------------------------------------------------- manual
     def _arm(self, what="object"):
-        md = self.g_pick_md if what == "object" else self.g_circle_md
+        md = {"object": self.g_pick_md, "area": self.g_area_draw_md, "template": self.g_tmpl_md}[what]
         if not self.objs:
-            md.content = "_Find and rate objects first._"
+            md.content = ("_Find and rate objects first._" if what == "object" else
+                          "_Map weak ground first (it sets up the ground model)._")
             return
         self.picking = what
+        if what != "object":  # a new polygon
+            self.poly[what], self.closed[what] = [], False
+            self._draw_markers()
         md.content = ("**Ctrl + click** a tree or bush in the 3D view." if what == "object" else
-                      "**Ctrl + click** the ground in the 3D view.")
+                      "**Ctrl + click** the corners of the polygon in the 3D view, then Finish.")
 
     def on_pick(self, origin, direction):
         """A Ctrl + click while picking: select the object under it. True if it used the click."""
         if not self.picking:
             return False
-        what, self.picking = self.picking, None
+        what = self.picking
         hit = self.app.ray_hit(origin, direction)
-        if what == "circle":
-            if hit is None:
-                self.g_circle_md.content = "Nothing there: Pick a spot again."
-                return True
-            self.circle = (float(hit[0]), float(hit[1]))
-            self.g_circle_md.content = (f"Circle at ({hit[0]:.1f}, {hit[1]:.1f}): set the radius, then Repair "
-                                        "circle.")
+        if what in ("area", "template"):  # a corner; picking goes on until Finish
+            if hit is not None:
+                self.poly[what].append([float(hit[0]), float(hit[1])])
+            self._poly_status(what)
             self._draw_markers()
             return True
+        self.picking = None
         oid = replace.object_at(self.app.path, hit[0], hit[1]) if hit is not None else None
         if oid is None:
             self.g_pick_md.content = "No object there: Pick again and Ctrl + click on a tree or bush."
@@ -326,7 +421,7 @@ class ReplacePanel:
                 self.g_pick_md.content = "_No donor candidate fits this object._"
                 return
             donor = int(v[1:].split()[0])
-        self._start(("apply", [(self.selected, donor, True)]))
+        self._start(("apply", [(self.selected, donor, True, bool(self.g_turn.value))]))
 
     # --------------------------------------------------------------------------------------------- edits
     def _draw_edits(self):
@@ -341,17 +436,24 @@ class ReplacePanel:
             areas = {a["id"]: a for a in self.areas}
             for e in eds:
                 if e.get("kind") == "ground":
-                    if e.get("circle"):
+                    if e.get("polygon"):
+                        pts = np.asarray(e["polygon"], float)
+                        x, y = pts.mean(0)
+                        r = float(np.sqrt(poly_area(pts) / np.pi))
+                        what = f"ground polygon {poly_area(pts):.0f} m²" + (" from template" if e.get("source") else "")
+                    elif e.get("circle"):
                         x, y, r = e["circle"]
                         what = f"ground circle {r:.1f} m"
+                        if e.get("source"):
+                            what += " from template"
                     else:
                         a = areas.get(e.get("area"), {"x": 0.0, "y": 0.0, "radius": 1.0})
                         x, y, r = a["x"], a["y"], a["radius"]
-                        what = f"ground g{e.get('area')}"
+                        what = f"ground g{e.get('area')}" + (" from template" if e.get("source") else "")
                     go = (lambda c, x=x, y=y, r=r: self._go_ground(x, y, r, c))
                 else:
-                    what = (f"#{e['object']} → donor #{e['donor']}" if e.get("donor") is not None
-                            else f"#{e['object']} removed")
+                    what = (f"#{e['object']} → donor #{e['donor']}{' (turned)' if e.get('turn') else ''}"
+                        if e.get("donor") is not None else f"#{e['object']} removed")
                     go = (lambda c, o=e["object"]: self.go(o, c))
                 row = self.gui.add_button_group(f"{what}", options=("Go", "Undo"))
                 row.on_click(lambda ev, e=e, go=go: go(ev.client) if ev.target.value == "Go"
@@ -387,12 +489,37 @@ class ReplacePanel:
             scene.add_line_segments(f"{name}/cylinder", cylinder_segments(o["radius"] * 1.1, o["height"] * 1.05),
                                     colors=COLOURS[kind], thickness=3.0, thickness_units="screen")
             scene.add_label(f"{name}/label", f"#{oid}", position=(0.0, 0.0, o["height"] * 1.15))
-        if self.circle is not None:
-            x, y = self.circle
-            r = float(self.g_radius.value)
-            scene.add_frame(f"{NODE}/circle", show_axes=False, position=(x, y, self._ground_z(x, y)))
-            scene.add_line_segments(f"{NODE}/circle/ring", cylinder_segments(r, 0.3, struts=4),
-                                    colors=COLOURS["circle"], thickness=4.0, thickness_units="screen")
+        for which, colour in (("area", COLOURS["circle"]), ("template", COLOURS["template"])):
+            pts = self.poly[which]
+            if not pts:
+                continue
+            P = np.array([[x, y, self._ground_z(x, y) + 0.3] for x, y in pts], np.float32)
+            for k, c in enumerate(P):  # the corners
+                scene.add_icosphere(f"{NODE}/{which}_corner_{k}", radius=0.25, color=colour, position=tuple(c))
+            if len(P) >= 2:
+                seg = np.stack([P[:-1], P[1:]], 1)
+                if self.closed[which]:
+                    seg = np.concatenate([seg, np.stack([P[-1:], P[:1]], 1)])
+                scene.add_line_segments(f"{NODE}/{which}_poly", seg, colors=colour, thickness=4.0,
+                                        thickness_units="screen")
+            if which == "template":
+                scene.add_label(f"{NODE}/template_label", "template", position=tuple(P.mean(0) + [0, 0, 0.8]))
+        st = os.path.join(self.app.path, replace.DIR, "state.json") if self.app.path else None
+        if st and os.path.exists(st):  # the templates the applied ground repairs copied from
+            import json
+            for e in json.load(open(st)).get("edits", []):
+                tp = (e.get("fill") or {}).get("template_polygon")
+                if tp:
+                    P = np.array([[x, y, self._ground_z(x, y) + 0.15] for x, y in tp], np.float32)
+                    scene.add_line_segments(f"{NODE}/used_{e['id']}", np.stack([P, np.roll(P, -1, 0)], 1),
+                                            colors=COLOURS["template"], thickness=2.0, thickness_units="screen")
+                t = (e.get("fill") or {}).get("template_at")
+                if t:
+                    name = f"{NODE}/used_{e['id']}"
+                    scene.add_frame(name, show_axes=False, position=(t[0], t[1], self._ground_z(t[0], t[1])))
+                    scene.add_line_segments(f"{name}/ring", cylinder_segments(t[2], 0.15, struts=0),
+                                            colors=COLOURS["template"], thickness=2.0, thickness_units="screen")
+                    scene.add_label(f"{name}/label", f"source of edit {e['id']}", position=(0.0, 0.0, 0.6))
         if self.areas and self.g_show_areas.value:
             segs = self._area_outlines()
             if len(segs):

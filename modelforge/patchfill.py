@@ -6,13 +6,13 @@ offset to a source cell is searched whose PATCH x PATCH neighbourhood matches th
 cells compare as they are, hole cells by their current fill. PatchMatch (Barnes 2009): initialized from the border
 inwards (onion peel, each cell taking a random good offset of its filled neighbours or a random source), then ITERS
 rounds of propagation (the offsets of the left / upper neighbours, then right / lower) and random search around the
-current offset, each followed by updating the hole cells' descriptors from their sources. Distant sources cost
-DIST_W per metre."""
+current offset, each followed by updating the hole cells' descriptors from their sources. Distance does not count
+(the user, 2026-10-31: what matters is similarity in colour, texture and semantics; a penalty per metre was used
+before)."""
 import cv2
 import numpy as np
 
 PATCH, ITERS, RANDOM = 5, 6, 8
-DIST_W = 0.004  # cost per metre of offset (a 100 m source costs as much as 0.4 of descriptor mismatch)
 
 
 def descriptors(R):
@@ -53,7 +53,6 @@ def fill(R, hole, avoid, rng=None):
     filled = known.copy()
     off = np.zeros((H, W, 2), int)
     cost = np.full((H, W), np.inf)
-    cell = R["cell"]
     win = [(dy, dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
 
     def patch_cost(y, x, oy, ox):
@@ -69,7 +68,7 @@ def fill(R, hole, avoid, rng=None):
                 n += 1
         if n == 0:
             return np.inf
-        return tot / n + DIST_W * np.hypot(oy, ox) * cell
+        return tot / n
 
     hy, hx = np.nonzero(hole)
     # onion peel: hole cells by their distance to known cells

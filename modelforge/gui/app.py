@@ -54,6 +54,7 @@ DENSE_QUALITY_DEFAULT = next(k for k, v in DENSE_QUALITY.items() if v == dense.D
 SUNLIGHT = {"off": False, "traced from the SfM mesh": True, "learned per Gaussian": "learned"}  # Splat tab → regularize["sun"]
 
 QUICK_SHORT = {"Cameras": "Cams", "Residuals": "Resid", "Trajectory": "Traj"}  # quick bar labels (two short rows)
+QUICK_LOD = {"LoD 2M": 2_000_000, "LoD 500k": 500_000}  # quick bar: View -> LoD budget (the user asked, 2026-10-31)
 STAGE_HINTS = {
     "features": "Keypoints for every image into features.db: SIFT (upright, up to 8192 per image) or a learned "
                 "extractor (Features → Extractor), one camera per lens. Minutes.",
@@ -1275,8 +1276,8 @@ class App:
         # the rest onto further rows, stretching a short last row; 12 buttons at 6 per row give an even 2 x 6 grid
         # (the user found one row of 13 too wide, ~1250 px)
         per_row = (len(self._quick_items()) + 1) // 2
-        self.quick.float(x=8, y=8, width=24 + 72 * per_row, height=136)
-        self.photo_panel.float(x=16 + 24 + 72 * per_row, y=8, width=PHOTO_PANEL_WIDTH,
+        self.quick.float(x=8, y=8, width=24 + 80 * per_row, height=136)  # ~80 px: "○ LoD 500k"
+        self.photo_panel.float(x=16 + 24 + 80 * per_row, y=8, width=PHOTO_PANEL_WIDTH,
                                height=round(PHOTO_PANEL_WIDTH / self.aspect) + 96)
         self.photo_panel.minimize()  # folded by default (the user asked); the Tie points tab opens it
         self.map.panel.float(x=8, y=152, width=map_mod.WINDOW_WIDTH, height=map_mod.WINDOW_WIDTH + 330)
@@ -3134,7 +3135,9 @@ class App:
                 ("Center", True, False),
                 ("Tile", bool(self.path) and os.path.exists(os.path.join(self.path, splat_tiles.STATE)), False),
                 ("Fly", self.project is not None, self._flight is not None),
-                ("Map", True, getattr(self, "map_open", False)))
+                ("Map", True, getattr(self, "map_open", False)),
+                ("LoD 2M", True, int(self.g_lod_budget.value) == QUICK_LOD["LoD 2M"]),  # View: LoD budget
+                ("LoD 500k", True, int(self.g_lod_budget.value) == QUICK_LOD["LoD 500k"]))
 
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
@@ -3154,7 +3157,8 @@ class App:
                      "thumbnails, with the cameras on), Resid (red prior → refined segments), Traj (trajectories), "
                      "Plan (the Ingest flight plan), Tiles (the splat tiles' boundaries); Orbit, Center (look at the whole scene), "
                      "Tile (go to the tile a tiled splat run trains now, else a paused one, else the next), Fly (the camera "
-                     "path), Map (the 2D map window). ● on, ○ off, · nothing yet. Same as the View tab.")
+                     "path), Map (the 2D map window), LoD 2M / LoD 500k (View → LoD budget: Gaussians the level "
+                     "of detail sends to the browser). ● on, ○ off, · nothing yet. Same as the View tab.")
         long = {v: k for k, v in QUICK_SHORT.items()}
 
         def click(e):
@@ -3200,6 +3204,8 @@ class App:
             self.recenter(client)
         elif name == "Tile":
             self.focus_training_tile(client)
+        elif name in QUICK_LOD:
+            self.g_lod_budget.value = QUICK_LOD[name]  # its on_update redraws the splat
         elif name == "Map":
             self.map_open = not self.map_open
             if self.map_open:

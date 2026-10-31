@@ -130,7 +130,7 @@ def test_replace_panel_flow(tmp_path, monkeypatch):
     def _rated(p):  # the small tree smeared, the big one sharp
         objs = replace.objects(p)
         for o in objs:
-            o.update(sharp=0.9 if o["height"] > 7 else 0.05, psnr=25.0, photos=3)
+            o.update(sharp=0.9 if o["height"] > 7 else 0.05, psnr=25.0, photos=3, side_photos=30, side_len=0.3)
         replace._save_objects(p, objs)
         return objs
     real_find = replace.find
@@ -162,8 +162,10 @@ def test_replace_panel_flow(tmp_path, monkeypatch):
         panel.g_auto_action.value = "replace by a donor where one fits"
         panel.suggest()
         assert len(panel.proposals) == 1 and panel.proposals[0]["donor"] is not None
+        panel.g_turn.value = True
         panel.apply_checked()
         assert len(replace.edits(project)) == 1 and replace.edits(project)[0]["donor"] is not None
+        assert replace.edits(project)[0]["turn"] is True
         panel._start(("undo", "all"))
         assert open(splat_mesh.splat_path(project), "rb").read() == original
         # manual: pick the small tree, remove + fill
@@ -244,8 +246,8 @@ def test_replace_panel_ground_texture(tmp_path, monkeypatch):
             panel.run_job(project, lambda m: None, None, None)
             panel.refresh()
 
-        def ray_hit(self, origin, direction):
-            return np.array([-12.0, 12.0, 0.0])
+        def ray_hit(self, origin, direction):  # the ray's origin is the spot hit (the test clicks corners)
+            return np.array([origin[0], origin[1], 0.0])
 
         def glide_to(self, *a, **k):
             pass
@@ -253,8 +255,7 @@ def test_replace_panel_ground_texture(tmp_path, monkeypatch):
     try:
         app = App(server)
         panel = gui_replace.ReplacePanel(app, server.gui)
-        panel._start(("find",))
-        panel._start(("map",))
+        panel._start(("map",))  # without Find first: it finds the objects itself
         assert len(panel.areas) == 1 and abs(panel.areas[0]["x"]) < 1 and abs(panel.areas[0]["y"] - 10) < 1
         assert len(panel._area_outlines()) >= 4 and "1 weak areas" in panel.g_area_md.content
         for _, cb in panel.area_props:
@@ -262,13 +263,255 @@ def test_replace_panel_ground_texture(tmp_path, monkeypatch):
         panel.repair_checked()
         assert [e.get("area") for e in replace.edits(project)] == [panel.areas[0]["id"]]
         assert "1 repaired" in panel.g_area_md.content and not panel.area_props  # repaired: no longer offered
-        panel._arm("circle")
-        assert panel.on_pick(np.zeros(3), np.array([0, 0, -1.0])) and panel.circle == (-12.0, 12.0)
-        panel.g_radius.value = 2.0
-        panel.repair_circle()
+        click = lambda x, y: panel.on_pick(np.array([x, y, 50.0]), np.array([0, 0, -1.0]))  # noqa: E731
+        panel._arm("template")  # a template polygon: corners, one undone, Finish
+        for x, y in ((8, -16), (16, -16), (16, -8), (30, 30)):
+            assert click(x, y)
+        panel._poly_action("template", "Undo corner")  # the stray (30, 30)
+        panel._poly_action("template", "Finish")
+        assert panel.closed["template"] and panel.g_copy_from.value == "my template"
+        assert panel.poly["template"] == [[8.0, -16.0], [16.0, -16.0], [16.0, -8.0]]
+        assert "32.0 m²" in panel.g_tmpl_md.content
+        panel._arm("area")  # the area to repair
+        for x, y in ((-14, 10), (-10, 10), (-10, 14), (-14, 14)):
+            assert click(x, y)
+        panel._poly_action("area", "Finish")
+        assert panel.picking is None and not click(0, 0)  # done: Ctrl + click is the pivot's again
+        panel.repair_drawn()
         eds = replace.edits(project)
-        assert len(eds) == 2 and eds[1]["circle"] == [-12.0, 12.0, 2.0] and panel.circle is None
+        assert len(eds) == 2 and eds[1]["polygon"] == [[-14.0, 10.0], [-10.0, 10.0], [-10.0, 14.0], [-14.0, 14.0]]
+        assert eds[1]["source"]["polygon"][0] == [8.0, -16.0] and not panel.poly["area"]
+        panel._poly_action("template", "Clear")
+        assert panel._source() == "auto"  # back to the most similar detailed patch
         panel._start(("undo", "all"))
         assert open(splat_mesh.splat_path(project), "rb").read() == original
     finally:
         server.stop()
+
+
+def test_turn_rotates_offsets_orientation_and_view_colour():
+    """_turn by 90 deg: an offset east goes north, a Gaussian long along x is long along y, and a colour seen
+    brightest from the east (+x) is brightest from the north (+y)."""
+    from modelforge.gui import data as gdata
+    sh = np.zeros((1, 4, 3), np.float32)
+    sh[0, 3, :] = 1.0  # degree 1: the third coefficient follows +x (gsplat's order: y, z, x)
+    q = {"quats": np.array([[1.0, 0, 0, 0]], np.float32), "sh": sh.copy()}
+    dx, dy = replace._turn(q, np.pi / 2, np.array([1.0]), np.array([0.0]))
+    assert np.allclose([dx[0], dy[0]], [0, 1], atol=1e-6)
+    w, x, y, z = q["quats"][0].astype(np.float64)
+    R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                  [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                  [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+    assert np.allclose(R[:, 0], [0, 1, 0], atol=1e-5)  # the local x axis now points north
+    cols = np.concatenate([np.full((1, 3), 0.5), q["sh"][:, 1:, :].reshape(1, -1)], 1)
+    dirs = np.array([[1.0, 0, 0], [0, 1.0, 0], [-1.0, 0, 0], [0, -1.0, 0]])
+    lum = [gdata.sh_view_colour(cols, d[None])[0].sum() for d in dirs]
+    base = np.concatenate([np.full((1, 3), 0.5), sh[:, 1:, :].reshape(1, -1)], 1)
+    lum0 = [gdata.sh_view_colour(base, d[None])[0].sum() for d in dirs]
+    assert np.argmax(lum0) in (0, 2) and np.argmax(lum) in (1, 3)  # the bright side turned by a quarter
+    assert lum[(np.argmax(lum0) + 1) % 4] == max(lum)
+
+
+def test_ground_repair_from_a_template(tmp_path, monkeypatch):
+    """A template circle decides where the fill copies from: a hole in the green west filled from a template in the
+    blue east is blue; without the template it stays green (similar ground nearby)."""
+    monkeypatch.setattr(replace, "BLEND", 0.0)  # where the fill copies from, by its colour: no blending / feather
+    monkeypatch.setattr(replace, "FEATHER_M", 0.0)
+    project, kind, n_ground, _ = _scene(tmp_path)
+    g = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    east = (g["means"][:, 0] > 5) & (np.arange(len(g["means"])) < n_ground)
+    g["sh"][east, 0] = (np.array([0.1, 0.2, 0.8]) - 0.5) / 0.28209479177387814  # blue
+    difix.write_splat(None, splat_mesh.splat_path(project), g)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+
+    def blue_share(source):
+        replace.undo(project, "all", on_line=lambda m: None)
+        replace.add_many(project, [{"circle": [-10.0, 10.0, 2.0], **({"source": source} if source else {})}],
+                         on_line=lambda m: None)
+        out = splat_mesh.load_splat(splat_mesh.splat_path(project))
+        inside = np.hypot(out["means"][:, 0] + 10, out["means"][:, 1] - 10) < 1.8
+        rgb = out["sh"][inside, 0] * 0.28209479177387814 + 0.5
+        return float((rgb[:, 2] > rgb[:, 1]).mean())
+    assert blue_share(None) < 0.1
+    assert blue_share([12.0, -12.0, 4.0]) > 0.9
+    assert replace.edits(project)[0]["source"] == [12.0, -12.0, 4.0]
+
+
+def test_automatic_template_matches_the_area_not_its_rim(tmp_path, monkeypatch):
+    """Copy from "the most similar detailed patch": a weak blue spot inside the green west (blurred: one uniform
+    blue) gets its template in the blue east and comes out blue; a green spot gets a green template."""
+    monkeypatch.setattr(replace, "BLEND", 0.0)  # where the fill copies from, by its colour: no blending / feather
+    monkeypatch.setattr(replace, "FEATHER_M", 0.0)
+    project, kind, n_ground, _ = _scene(tmp_path)
+    g = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    ground = np.arange(len(g["means"])) < n_ground
+    P = g["means"]
+    blue = ground & ((P[:, 0] > 5) | (np.hypot(P[:, 0] + 10, P[:, 1] - 10) < 2.5))  # the east + a spot in the west
+    g["sh"][blue, 0] = (np.array([0.1, 0.2, 0.8]) - 0.5) / 0.28209479177387814
+    difix.write_splat(None, splat_mesh.splat_path(project), g)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+    replace.add_many(project, [{"circle": [-10.0, 10.0, 2.0], "source": "auto"},
+                               {"circle": [-10.0, -12.0, 2.0], "source": "auto"}], on_line=lambda m: None)
+    st = json.load(open(os.path.join(project, replace.DIR, "state.json")))["edits"]
+    t_blue, t_green = st[0]["fill"]["template_at"], st[1]["fill"]["template_at"]
+    assert t_blue[0] > 5 and t_green[0] < 5 and 3.0 <= t_blue[2] <= 8.0
+    out = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    rgb = out["sh"][:, 0] * 0.28209479177387814 + 0.5
+    spot = np.hypot(out["means"][:, 0] + 10, out["means"][:, 1] - 10) < 1.8
+    other = np.hypot(out["means"][:, 0] + 10, out["means"][:, 1] + 12) < 1.8
+    assert (rgb[spot, 2] > rgb[spot, 1]).mean() > 0.9 and (rgb[other, 2] > rgb[other, 1]).mean() < 0.1
+
+
+def test_weak_areas_only_over_the_mesh(tmp_path):
+    """Weak ground is proposed only over the measured mesh (the SfM mesh's trimmed part here): of two weak squares,
+    the one beyond the mesh's edge is not listed; without a mesh both are."""
+    project, kind, *_ = _scene(tmp_path)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+    d = np.load(os.path.join(project, replace.DIR, "objects.npz"))
+    lo = d["lo"]
+    H, W = (np.array(d["crown"].shape) * float(d["cell"]) / replace.MAP_CELL).astype(int) + 1
+    yy, xx = np.mgrid[0:H, 0:W]
+    cx, cy = lo[0] + (xx + 0.5) * replace.MAP_CELL, lo[1] + (yy + 0.5) * replace.MAP_CELL
+    weak = ((np.abs(cx + 12) < 3) | (np.abs(cx - 12) < 3)) & (np.abs(cy + 15) < 3)  # away from both trees
+    ratio = np.where(weak, 0.05, 0.9).astype(np.float32)
+    np.savez(os.path.join(project, replace.DIR, "detail.npz"), ratio=ratio, weight=np.ones_like(ratio), lo=lo,
+             cell=replace.MAP_CELL, splat=np.array(replace._key(replace.base(project))))
+    assert sorted(round(a["x"]) for a in replace.ground_areas(project)) == [-12, 12]
+    # a mesh over the west half only (two triangles per 1 m square)
+    gx, gy = np.meshgrid(np.arange(-20, 1.0), np.arange(-20, 21.0))
+    V = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], 1)
+    nx = gx.shape[1]
+    f = []
+    for r in range(gx.shape[0] - 1):
+        for c in range(nx - 1):
+            a = r * nx + c
+            f += [[a, a + 1, a + nx], [a + 1, a + nx + 1, a + nx]]
+    os.makedirs(os.path.join(project, "sfmmesh"))
+    v = np.zeros(len(V), [(k, "f4") for k in "xyz"])
+    for i, k in enumerate("xyz"):
+        v[k] = V[:, i]
+    fa = np.zeros(len(f), [("vertex_indices", "i4", (3,))])
+    fa["vertex_indices"] = np.array(f)
+    plyfile.PlyData([plyfile.PlyElement.describe(v, "vertex"), plyfile.PlyElement.describe(fa, "face")]).write(
+        os.path.join(project, "sfmmesh", "mesh_trimmed.ply"))
+    assert [round(a["x"]) for a in replace.ground_areas(project)] == [-12]
+
+
+def test_polygon_repair_changes_only_inside(tmp_path, monkeypatch):
+    """A ground repair drawn as a polygon replaces the ground layer inside it only (copying from a template polygon:
+    the blue east), everything outside stays."""
+    monkeypatch.setattr(replace, "BLEND", 0.0)  # where the fill copies from, by its colour: no blending / feather
+    monkeypatch.setattr(replace, "FEATHER_M", 0.0)
+    project, kind, n_ground, _ = _scene(tmp_path)
+    g = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    east = (g["means"][:, 0] > 5) & (np.arange(len(g["means"])) < n_ground)
+    g["sh"][east, 0] = (np.array([0.1, 0.2, 0.8]) - 0.5) / 0.28209479177387814
+    difix.write_splat(None, splat_mesh.splat_path(project), g)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+    tri = [[-16.0, 8.0], [-8.0, 8.0], [-12.0, 16.0]]
+    replace.add_many(project, [{"polygon": tri, "source": {"polygon": [[8, -18], [18, -18], [18, -8], [8, -8]]}}],
+                     on_line=lambda m: None)
+    out = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    P = out["means"]
+    rgb = out["sh"][:, 0] * 0.28209479177387814 + 0.5
+    blue = rgb[:, 2] > rgb[:, 1]
+    inside = (P[:, 1] > 8.6) & (P[:, 1] < 15) & (np.abs(P[:, 0] + 12) < (16 - P[:, 1]) / 2 - 0.6)  # well inside
+    outside = (np.hypot(P[:, 0] + 12, P[:, 1] - 11) < 9) & ((P[:, 1] < 7) | (P[:, 1] > 17))
+    assert blue[inside].mean() > 0.9 and blue[outside].mean() < 0.02
+    st = json.load(open(os.path.join(project, replace.DIR, "state.json")))["edits"][0]["fill"]
+    assert st["template_polygon"][0] == [8, -18]
+
+
+def test_template_matches_photo_texture_not_distance(tmp_path):
+    """The automatic template compares what the photos show (colour, texture at two scales) and the semantics, not the
+    distance: a weak spot whose photos show coarse texture gets its template on the far coarse ground, although
+    smooth ground of the same colour lies right next to it."""
+    project, kind, *_ = _scene(tmp_path)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+    d = np.load(os.path.join(project, replace.DIR, "objects.npz"))
+    lo = d["lo"]
+    H, W = (np.array(d["crown"].shape) * float(d["cell"]) / replace.MAP_CELL).astype(int) + 1
+    yy, xx = np.mgrid[0:H, 0:W]
+    cx, cy = lo[0] + (xx + 0.5) * replace.MAP_CELL, lo[1] + (yy + 0.5) * replace.MAP_CELL
+    coarse = (cx > 10) | (np.hypot(cx + 4, cy + 14) < 2.5)  # the far east + the weak spot (its photos)
+    rgb = np.full((H, W, 3), 0.4, np.float32)
+    tex = np.where(coarse[..., None], [2.0, 1.5], [-1.0, -2.0]).astype(np.float32)
+    weak = np.hypot(cx + 4, cy + 14) < 2.5
+    ratio = np.where(weak, 0.05, 0.9).astype(np.float32)
+    np.savez(os.path.join(project, replace.DIR, "detail.npz"), ratio=ratio, weight=np.ones_like(ratio), lo=lo,
+             cell=replace.MAP_CELL, splat=np.array(replace._key(replace.base(project))), photo_rgb=rgb, photo_tex=tex)
+    sc = replace._Scene(project)
+    t = sc.suggest_template(sc.disc(-4.0, -14.0, 2.0), np.zeros_like(sc.crown, bool))
+    assert t is not None and t[0] > 10  # the coarse ground, ~20 m away, not the smooth ground beside the spot
+
+
+def _two_tone(tmp_path, monkeypatch, n_bright=None):
+    """The scene with the east ground (x > 5) a third brighter than the west, its checker texture kept."""
+    project, kind, n_ground, _ = _scene(tmp_path)
+    g = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    east = (g["means"][:, 0] > 5) & (np.arange(len(g["means"])) < n_ground)
+    rgb = g["sh"][east, 0] * 0.28209479177387814 + 0.5
+    g["sh"][east, 0] = (np.clip(rgb + 0.25, 0, 1) - 0.5) / 0.28209479177387814
+    difix.write_splat(None, splat_mesh.splat_path(project), g)
+    replace.find(project, kind=kind, on_line=lambda m: None)
+    return project
+
+
+def _lum_profile(project, centre, r):
+    """Mean luminance of the ground layer in rings around centre (0.5 m wide) out to r + 3 m; and the texture
+    (std of luminance) inside r - 1 m."""
+    out = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    P = out["means"]
+    op = 1 / (1 + np.exp(-out["opacities"].reshape(-1)))
+    lum = (out["sh"][:, 0] * 0.28209479177387814 + 0.5).mean(1)
+    d = np.hypot(P[:, 0] - centre[0], P[:, 1] - centre[1])
+    low = np.abs(P[:, 2]) < 0.3
+    rings = np.arange(0, r + 3, 0.5)
+    prof = [float(np.average(lum[low & (d >= a) & (d < a + 0.5)], weights=op[low & (d >= a) & (d < a + 0.5)]))
+            for a in rings]
+    inner = low & (d < r - 1)
+    return np.array(prof), float(lum[inner].std())
+
+
+def test_blending_removes_the_step_at_the_edge_and_keeps_the_texture(tmp_path, monkeypatch):
+    """A hole in the dark west filled from the bright east: without blending a step of ~0.25 in luminance at the edge;
+    with gradient-domain blending (+ feathering) the patch meets its surroundings without a step and keeps the
+    template's checker texture."""
+    project = _two_tone(tmp_path, monkeypatch)
+    centre, r = (-10.0, 12.0), 3.0
+    template = {"polygon": [[8, -18], [18, -18], [18, -8], [8, -8]]}
+
+    def run(blend, feather):
+        monkeypatch.setattr(replace, "BLEND", blend)
+        monkeypatch.setattr(replace, "FEATHER_M", feather)
+        replace.undo(project, "all", on_line=lambda m: None)
+        replace.add_many(project, [{"circle": [centre[0], centre[1], r], "source": template}], on_line=lambda m: None)
+        return _lum_profile(project, centre, r)
+    (hard, tex_hard), (soft, tex_soft) = run(0.0, 0.0), run(1.0, 1.0)
+    inside, outside = slice(0, 4), slice(int(r / 0.5) + 2, None)  # rings well inside / beyond the edge (+ band)
+    step_hard = hard[inside].mean() - hard[outside].mean()
+    step_soft = soft[inside].mean() - soft[outside].mean()
+    assert step_hard > 0.15 and abs(step_soft) < 0.04
+    assert np.abs(np.diff(soft)).max() < 0.5 * np.abs(np.diff(hard)).max()  # no jump between neighbouring rings
+    assert tex_soft > 0.6 * tex_hard  # the copied texture stays
+
+
+def test_feather_crossfades_opacity_across_the_band(tmp_path, monkeypatch):
+    """With a 1.5 m feather the copied Gaussians' opacity falls off across the band beyond the hole and the original
+    ground layer's rises; beyond the band nothing changes."""
+    project = _two_tone(tmp_path, monkeypatch)
+    monkeypatch.setattr(replace, "FEATHER_M", 1.5)
+    before = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    replace.add_many(project, [{"circle": [-10.0, 12.0, 3.0]}], on_line=lambda m: None)
+    after = splat_mesh.load_splat(splat_mesh.splat_path(project))
+    d0 = np.hypot(before["means"][:, 0] + 10, before["means"][:, 1] - 12)
+    far = d0 > 5.5
+    keep = {tuple(np.round(p, 4)) for p in after["means"]}
+    assert all(tuple(np.round(p, 4)) in keep for p in before["means"][far][::50])  # unchanged beyond the band
+    d1 = np.hypot(after["means"][:, 0] + 10, after["means"][:, 1] - 12)
+    op = 1 / (1 + np.exp(-after["opacities"].reshape(-1)))
+    ground = np.abs(after["means"][:, 2]) < 0.3
+    near_in = ground & (d1 > 3.1) & (d1 < 3.6)
+    near_out = ground & (d1 > 4.0) & (d1 < 4.5)
+    assert 0.05 < op[near_in].min() and op[near_in].max() < op[ground & (d1 < 2)].max() + 1e-6
+    assert op[near_in].mean() < 0.95 and op[near_out].mean() < 0.95  # both halves faded, none at full strength

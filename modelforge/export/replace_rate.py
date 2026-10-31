@@ -96,7 +96,8 @@ def main(spec_path):
 def detail_map(spec_path):
     """A top-down map of how much of the photos' detail the splat keeps (python replace_rate.py --map SPEC.json).
     SPEC: npz, transforms, root, photos (how many, spread over the flight), lo (x, y), cell, shape (H, W), out (.npz:
-    ratio (H, W) float32, NaN where nothing was seen; weight). Per photo: render (RGB + expected depth) and photo
+    ratio (H, W) float32, NaN where nothing was seen; weight; photo_rgb (H, W, 3), photo_tex (H, W, 2): what the
+    photos show there, blur-free: mean colour, log detail energy after a 1 px and a 3 px blur). Per photo: render (RGB + expected depth) and photo
     (undistorted) at half size; local detail = the mean squared Laplacian (after a 1 px blur) over WIN px windows; the
     ratio render / photo of each window centre (every STEP px) goes to the cell its rendered surface point lies in,
     weighted by the photo's detail there (flat sky or road counts little)."""
@@ -114,10 +115,13 @@ def detail_map(spec_path):
     H, W = spec["shape"]
     lo, cell = np.array(spec["lo"], float), float(spec["cell"])
     num, den = np.zeros(H * W), np.zeros(H * W)
+    # what the photos show there, blur-free (the template search compares it): colour, and texture as the detail
+    # energy at two scales (fine grain vs coarse stones)
+    cnt, col, tex = np.zeros(H * W), np.zeros((H * W, 3)), np.zeros((H * W, 2))
     pick = np.linspace(0, len(frames) - 1, min(int(spec["photos"]), len(frames))).astype(int)
 
-    def energy(a):
-        g = cv2.GaussianBlur(cv2.cvtColor(a, cv2.COLOR_RGB2GRAY).astype(np.float32), (0, 0), 1.0)
+    def energy(a, sigma=1.0):
+        g = cv2.GaussianBlur(cv2.cvtColor(a, cv2.COLOR_RGB2GRAY).astype(np.float32), (0, 0), sigma)
         return cv2.boxFilter(cv2.Laplacian(g, cv2.CV_32F) ** 2, -1, (WIN, WIN))
     for n, j in enumerate(pick):
         f = frames[j]
@@ -149,10 +153,18 @@ def detail_map(spec_path):
         c = ci[inb] * W + cj[inb]
         np.add.at(num, c, (r[ok] * np.sqrt(wt[ok]))[inb])
         np.add.at(den, c, np.sqrt(wt[ok])[inb])
+        pc = cv2.boxFilter(ph.astype(np.float32) / 255, -1, (WIN, WIN))[vv, uu][ok][inb]
+        tx = np.stack([np.log(ep[vv, uu] + 1e-3), np.log(energy(ph, 3.0)[vv, uu] * 9 + 1e-3)], -1)[ok][inb]
+        np.add.at(cnt, c, 1.0)
+        np.add.at(col, c, pc)
+        np.add.at(tex, c, tx)
         print(f"[rate] photo {n + 1} / {len(pick)}", flush=True)
     with np.errstate(invalid="ignore", divide="ignore"):
         ratio = np.where(den > 0, num / den, np.nan).reshape(H, W).astype(np.float32)
-    np.savez(spec["out"], ratio=ratio, weight=den.reshape(H, W).astype(np.float32))
+    n = np.maximum(cnt, 1)[:, None]
+    np.savez(spec["out"], ratio=ratio, weight=den.reshape(H, W).astype(np.float32),
+             photo_rgb=np.where(cnt[:, None] > 0, col / n, np.nan).reshape(H, W, 3).astype(np.float32),
+             photo_tex=np.where(cnt[:, None] > 0, tex / n, np.nan).reshape(H, W, 2).astype(np.float32))
 
 
 if __name__ == "__main__":

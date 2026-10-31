@@ -294,7 +294,12 @@ def test_quick_bar(app):
     app.g_points.value = False
     assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "○", "Cams": "○", "Thumbs": "·",
                        "Resid": "○", "Traj": "○", "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
-                       "Center": "⌖", "Tile": "⌖", "Fly": "○", "Map": "○"}  # no trajectories by default; cameras, thumbs off
+                       "Center": "⌖", "Tile": "⌖", "Fly": "○", "Map": "○", "LoD 2M": "○",
+                       "LoD 500k": "●"}  # no trajectories by default; cameras, thumbs off; the default LoD budget
+    app._quick_click("LoD 2M", None)
+    assert app.g_lod_budget.value == 2_000_000 and state()["LoD 2M"] == "●" and state()["LoD 500k"] == "○"
+    app._quick_click("LoD 500k", None)
+    assert app.g_lod_budget.value == 500_000 and state()["LoD 500k"] == "●"
     app._quick_click("Tile", Client())  # no tiled run (or a test project's own): nothing breaks
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"

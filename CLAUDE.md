@@ -2368,7 +2368,8 @@ Code layout:
     - The choice is remembered in `ROOT/.modelforge_gui.json`.
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
-    - One button group in **two rows** (8 + 7 since ⌖ Tile) (the user found one row of 13, ~1250 px, too wide):
+    - One button group in **two rows** (9 + 8 since LoD 2M / LoD 500k, 2026-10-31: they set View → LoD budget, ● on the
+      current one) (the user found one row of 13, ~1250 px, too wide):
       ● / ○ / · Splat, Mesh, Dense (fused points), Points (sparse), Cams, Thumbs (camera
       thumbnails; available while Cams is on) / Resid (View "Prior → refined": the red prior →
       refined segments), Traj (View "Trajectories"), Plan, Tiles (View "Tile boundaries"), Orbit, ⌖ Center,
