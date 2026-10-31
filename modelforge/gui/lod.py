@@ -16,6 +16,7 @@ import time
 import numpy as np
 
 from modelforge import splat_lod
+from modelforge.gui import data as gdata
 
 NODE = "/dense/splat_lod"
 SETTLE = 0.4  # s after the camera stopped
@@ -23,16 +24,7 @@ MOVING_EVERY = 2.0  # s between updates while it keeps moving
 MIN_MOVE = 0.02  # of the distance to the nearest cell: smaller moves do not count
 
 
-def pack(centers, covariances, rgbs, opacities):
-    """viser's splat buffer (N x 8 uint32), as add_gaussian_splats packs it."""
-    from viser._assignable_props_api import colors_to_uint8
-    n = len(centers)
-    cov_triu = np.asarray(covariances).reshape((-1, 9))[:, np.array([0, 1, 2, 4, 5, 8])]
-    return np.concatenate([np.ascontiguousarray(centers, dtype=np.float32).view(np.uint8),
-                           np.zeros((n, 4), dtype=np.uint8),
-                           np.ascontiguousarray(cov_triu, dtype=np.float16).view(np.uint8),
-                           colors_to_uint8(np.asarray(rgbs)), colors_to_uint8(np.asarray(opacities))],
-                          axis=-1).view(np.uint32)
+pack = gdata.pack_splats  # viser's splat buffer (with the SH words when rgbs carry them)
 
 
 class SplatLod:
@@ -67,7 +59,7 @@ class SplatLod:
     def _build(self, path, splat=None):
         from modelforge import worker
         from modelforge.gui import jobqueue
-        need = 1.0 + 0.6 * self.app._splat_total / 1e6
+        need = 1.0 + 1.0 * self.app._splat_total / 1e6  # with the SH bands
         if jobqueue._available_gb() < need + jobqueue.MIN_FREE_GB:
             self.app._on_log(f"level of detail: not built, needs ~{need:.0f} GB of free RAM")
             return
@@ -92,11 +84,18 @@ class SplatLod:
         threading.Thread(target=go, daemon=True).start()
 
     # --- drawing -----------------------------------------------------------------------------------------
-    def show(self, idx):
-        """Draw the splat from idx (a new splat or the first time): the cut for the last camera."""
+    def show(self, idx, swap=False):
+        """Draw the splat from idx (a new splat or the first time): the cut for the last camera. swap (the live
+        preview's next snapshot): the cells' objects stay and get the new buffers (no gap), extra ones go."""
         with self.lock:
             if self.idx is not idx:
-                self._clear()
+                if swap and self.idx is not None:
+                    n = len(idx["cells"])
+                    for k in [k for k in self.handles if k >= n]:
+                        self.handles.pop(k).remove()
+                    self.drawn = {}
+                else:
+                    self._clear()
                 self.idx = idx
             self._apply(self._cut())
 
@@ -119,8 +118,7 @@ class SplatLod:
         """Draw a cell: a new viser object the first time, else its buffer replaced in place."""
         h = self.handles.get(key)
         if h is None:
-            self.handles[key] = self.app.server.scene.add_gaussian_splats(name, centers=c, covariances=cov, rgbs=rgb,
-                                                                          opacities=op)
+            self.handles[key] = gdata.add_splats(self.app.server.scene, name, c, cov, rgb, op)
             return
         h.buffer = pack(c, cov, rgb, op)
 
@@ -155,7 +153,7 @@ class SplatLod:
             for i in changed:
                 k = cut[i]
                 cell = self.idx["cells"][i]
-                c, cov, rgb, op = splat_lod.load_cell(project, k, cell, self.splat)
+                c, cov, rgb, op = splat_lod.load_cell(project, k, cell, self.splat, self.app.sh_degree())
                 if (sem.rel is not None or self.app.rig.shown) and self.splat is None:  # the project splat's
                     src, parent = splat_lod.cell_sources(project, k, cell)
                     c, cov, rgb, op = self.app.decorate(c, cov, rgb, op, src, parent)

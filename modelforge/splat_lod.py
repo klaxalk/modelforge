@@ -7,11 +7,11 @@ Built once per splat (stage `splat-lod`, `python -m modelforge.splat_lod PROJECT
 - per cell levels 0 (all), 1, 2, ... of ~1/4 the Gaussians each: Gaussians are merged per voxel (cubic, its size
   searched so the count comes out right) by opacity x area weighted moment matching (hierarchical 3DGS, Kerbl et al.
   2024): mean, covariance = sum w (S_i + d_i d_i^T) / sum w, colour = weighted mean, opacity = covered area / the
-  merged Gaussian's area (<= 1). Gaussians larger than the voxel stay as they are (they are coarse already). Band 0
-  only: the GUI shows base colours.
+  merged Gaussian's area (<= 1). Gaussians larger than the voxel stay as they are (they are coarse already). The
+  higher SH bands are averaged like the colour (for View -> Splat colours: view-dependent).
 - PROJECT/splat/lod/: index.json (cells: box, per level offset / count / voxel size; the splat's size + mtime) and
   per level L<k>_centers.npy (float32), L<k>_cov.npy (float16 upper triangle xx xy xz yy yz zz), L<k>_rgba.npy
-  (uint8), the cells' Gaussians one after the other (memory-mapped by the GUI); L0_parent.npy = each level-0
+  (uint8), L<k>_sh.npy (the bands above 0 as gui.data.sh_quantize's bytes, when the splat has them), the cells' Gaussians one after the other (memory-mapped by the GUI); L0_parent.npy = each level-0
   Gaussian's index in splat_enu.ply, L<k>_parent.npy (k >= 1, in level 0's order) = the level-k Gaussian (within its
   cell) it was merged into (the semantic search highlights a merged Gaussian by its best child).
 
@@ -37,11 +37,12 @@ MAX_LEVELS = 5
 COV_SCALE = 1.0  # merged covariances x this (calibrated: build/lod/calibrate.py)
 PIXELS = 2.0  # a level is fine enough once its voxel is under this many pixels (karlak: merged levels beat level 0 up to ~3 px)
 OUTSIDE_WEIGHT = 0.25  # cells outside the view refine later
-BUDGET = 500_000  # Gaussians in the browser (View -> LoD budget; 2M until 2026-10-30): 32 bytes each, so 16 MB per
-# full send, for browsers on another computer. kn_odin (a room, 0.93M Gaussians, 16 cells): renders at 24 camera views
+BUDGET = 500_000  # Gaussians in the browser (View -> LoD budget; 2M until 2026-10-30, then 500k, 250k the same day;
+# 500k again since 2026-10-31, the user's choice: at 250k berlin_all's 64 cells sat at the coarsest level): 32 bytes
+# each, so 16 MB per full send, for browsers on another computer. kn_odin (a room, 0.93M Gaussians, 16 cells): renders at 24 camera views
 # vs the full splat median 72 dB / worst 32 dB at 500k; 300k 39 / 25 dB with coarse objects at the views' edges
 TRIU = np.array([0, 1, 2, 4, 5, 8])
-VERSION = 1
+VERSION = 2  # 2: L<k>_sh.npy
 
 
 def lod_dir(project, splat=None):
@@ -49,6 +50,8 @@ def lod_dir(project, splat=None):
     splat from before Difix: splat/splat_enu.pre_difix.ply -> splat/lod_pre_difix)."""
     if not splat or os.path.normpath(splat) == SPLAT:
         return os.path.join(project, OUT)
+    if splat.startswith("lod:"):  # a LoD folder itself (the live preview's, LIVE_DIRS)
+        return os.path.join(project, splat[4:])
     stem = os.path.splitext(os.path.basename(splat))[0].replace("splat_enu.", "").replace(".", "_")
     return os.path.join(project, os.path.dirname(splat), "lod_" + stem)
 
@@ -123,7 +126,7 @@ def merge(c, cov, rgb, op, v, cov_scale=COV_SCALE):
     S = covs + d[:, :, None] * d[:, None, :]
     cm = np.stack([np.bincount(g, w * S[:, i, j], m) for i in range(3) for j in range(3)], -1).reshape(m, 3, 3)
     cm = cm / W[:, None, None] * cov_scale
-    col = np.stack([np.bincount(g, w * rgbs[:, k], m) for k in range(3)], -1) / W[:, None]
+    col = np.stack([np.bincount(g, w * rgbs[:, k], m) for k in range(rgbs.shape[1])], -1) / W[:, None]
     evm = np.linalg.eigvalsh(cm)
     am = np.sqrt(np.maximum(evm[:, 1] * evm[:, 2], 1e-30))
     opm = np.clip(W / am, 0, 1)
@@ -151,9 +154,30 @@ def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL
     out = lod_dir(project, splat)
     splat = os.path.join(project, splat or SPLAT)
     key = _splat_key(splat)
+    (progress or (lambda s: None))("level of detail: reading the splat")
+    c, cov, rgb, op = gdata.load_splat(splat, None, sh_degree=3)  # rgb: band 0 + the higher bands as columns
+    return build_arrays(out, key, c, cov, rgb, op, progress, token, cov_scale, cell_max, t0=t0)
+
+
+LIVE_DIRS = (os.path.join("splat", "lod_live_a"), os.path.join("splat", "lod_live_b"))  # the live preview's, alternating
+
+
+def build_live(folder, npz, transforms, out):
+    """The level of detail of a live training snapshot (gui.data.load_live_splat: ENU, band 0) into folder/out (one
+    of LIVE_DIRS: the GUI shows the other one meanwhile), for modelforge.worker."""
+    from modelforge.gui import data as gdata
+    t0 = time.time()
+    key = _splat_key(npz)
+    step, _, (c, cov, rgb, op) = gdata.load_live_splat(npz, transforms, None)
+    return build_arrays(os.path.join(folder, out), key, c, cov, rgb, op, t0=t0, extra={"step": step})
+
+
+def build_arrays(out, key, c, cov, rgb, op, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL_MAX,
+                 t0=None, extra=None):
+    """The level of detail of viser arrays (rgb may carry SH columns) into the folder out; returns the index."""
+    from modelforge.gui import data as gdata
+    t0 = time.time() if t0 is None else t0
     say = progress or (lambda s: None)
-    say("level of detail: reading the splat")
-    c, cov, rgb, op = gdata.load_splat(splat, None)
     n = len(c)
     cells = _cells(c, cell_max)
     tmp = out + ".part"
@@ -191,8 +215,10 @@ def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL
         np.save(os.path.join(tmp, f"L{k}_centers.npy"), np.concatenate([p[0] for p in parts]).astype(np.float32))
         np.save(os.path.join(tmp, f"L{k}_cov.npy"),
                 np.concatenate([p[1].reshape(-1, 9)[:, TRIU] for p in parts]).astype(np.float16))
-        rgba = np.concatenate([np.c_[p[2], p[3]] for p in parts])
+        rgba = np.concatenate([np.c_[p[2][:, :3], p[3]] for p in parts])
         np.save(os.path.join(tmp, f"L{k}_rgba.npy"), np.clip(np.round(rgba * 255), 0, 255).astype(np.uint8))
+        if rgb.shape[1] > 3:
+            np.save(os.path.join(tmp, f"L{k}_sh.npy"), gdata.sh_quantize(np.concatenate([p[2][:, 3:] for p in parts])))
         np.save(os.path.join(tmp, f"L{k}_parent.npy"), np.concatenate([p[4] for p in parts]))
         ci = 0
         for cell in meta:
@@ -202,7 +228,7 @@ def build(project, progress=None, token=None, cov_scale=COV_SCALE, cell_max=CELL
                 ci += 1
     idx_out = {"version": VERSION, "splat": key, "gaussians": n, "cells": meta, "cov_scale": cov_scale,
                "levels": {str(k): sum(len(p[0]) for p in v) for k, v in levels.items()},
-               "seconds": round(time.time() - t0, 1)}
+               "seconds": round(time.time() - t0, 1), **(extra or {})}
     json.dump(idx_out, open(os.path.join(tmp, "index.json"), "w"))
     shutil.rmtree(out, ignore_errors=True)
     os.replace(tmp, out)
@@ -214,8 +240,9 @@ def build_in(folder, splat=None):
     build(folder, splat=splat)
 
 
-def load_cell(project, k, cell, splat=None):
-    """viser arrays (centers, covariances, rgbs, opacities) of one cell at level k."""
+def load_cell(project, k, cell, splat=None, sh_degree=0):
+    """viser arrays (centers, covariances, rgbs, opacities) of one cell at level k; sh_degree > 0: rgbs with the
+    higher SH bands as columns (gui.data.splat_arrays), when the index has them."""
     lv = cell["levels"][k]
     s = slice(lv["offset"], lv["offset"] + lv["n"])
     d = lod_dir(project, splat)
@@ -223,7 +250,13 @@ def load_cell(project, k, cell, splat=None):
     t = np.asarray(np.load(os.path.join(d, f"L{k}_cov.npy"), mmap_mode="r")[s], dtype=np.float32)
     rgba = np.asarray(np.load(os.path.join(d, f"L{k}_rgba.npy"), mmap_mode="r")[s], dtype=np.float32) / 255
     cov = t[:, [0, 1, 2, 1, 3, 4, 2, 4, 5]].reshape(-1, 3, 3)
-    return np.ascontiguousarray(c), cov, np.ascontiguousarray(rgba[:, :3]), np.ascontiguousarray(rgba[:, 3:])
+    rgb = rgba[:, :3]
+    shf = os.path.join(d, f"L{k}_sh.npy")
+    if sh_degree and os.path.exists(shf):
+        from modelforge.gui import data as gdata
+        rest = gdata.sh_dequantize(np.load(shf, mmap_mode="r")[s])
+        rgb = np.c_[rgb, rest[:, :3 * min((int(sh_degree) + 1) ** 2 - 1, rest.shape[1] // 3)]]
+    return np.ascontiguousarray(c), cov, np.ascontiguousarray(rgb, dtype=np.float32), np.ascontiguousarray(rgba[:, 3:])
 
 
 def cell_sources(project, k, cell, splat=None):

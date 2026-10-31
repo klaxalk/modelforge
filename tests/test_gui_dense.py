@@ -291,9 +291,11 @@ def test_quick_bar(app):
     state = lambda: {lbl.split(" ", 1)[1]: lbl[0] for lbl in app._quick_labels}  # noqa: E731
     app.g_splat.value, app.g_mesh.value, app.g_dense_pts.value = True, "off", False
     app._sync_quickbar()
-    assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "●", "Cams": "○", "Thumbs": "·",
-                       "Resid": "○", "Traj": "●", "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
-                       "Center": "⌖", "Fly": "○", "Map": "○"}  # the default view: points and trajectories; cameras, thumbs off
+    app.g_points.value = False
+    assert state() == {"Splat": "●", "Mesh": "○", "Dense": "○", "Points": "○", "Cams": "○", "Thumbs": "·",
+                       "Resid": "○", "Traj": "○", "Plan": state()["Plan"], "Tiles": "○", "Orbit": "○",
+                       "Center": "⌖", "Tile": "⌖", "Fly": "○", "Map": "○"}  # no trajectories by default; cameras, thumbs off
+    app._quick_click("Tile", Client())  # no tiled run (or a test project's own): nothing breaks
     app._quick_click("Splat", None)
     assert not app.g_splat.value and state()["Splat"] == "○"
     app._quick_click("Tiles", None)  # View: Tile boundaries
@@ -624,3 +626,36 @@ def test_live_snapshot_shows_in_the_dropdown(app, monkeypatch):
     app.g_snapshot.value = "priors"  # a real pick still loads
     assert app.snap.name == "priors"
     app.refresh_snapshot_list(select="main")
+
+
+def test_end_estimate():
+    """The state line's end estimate: the progress rate over the last ETA_WINDOW seconds; it starts over when the
+    progress goes back (the next stage or tile)."""
+    from modelforge.gui import app as gapp
+    s = []
+    assert gapp._eta(s, 5.0, 1000.0) is None  # one sample: no rate yet
+    assert gapp._eta(s, 10.0, 1010.0) is None  # < 20 s of progress
+    assert abs(gapp._eta(s, 25.0, 1040.0) - 75 * 40 / 20) < 1e-6  # 20 % in 40 s: 75 % in 150 s
+    t = 1040.0
+    for k in range(30):  # it slows down: the window follows the recent rate
+        t += 60
+        gapp._eta(s, 25.0 + 0.5 * (k + 1), t)
+    rem = gapp._eta(s, 40.0, t + 60)
+    assert 100 * 60 < rem < 200 * 60 and t - s[0][0] <= gapp.ETA_WINDOW + 60
+    assert gapp._eta(s, 3.0, t + 70) is None and s == [(t + 70, 3.0)]  # back to 3 %: a new count
+    assert gapp._eta(s, None, t + 80) is None and not s
+    assert gapp._fmt_eta(4380, 0).endswith("(in 1 h 13 min)") and gapp._fmt_eta(20, 0).endswith("(in 1 min)")
+
+
+def test_replacing_results_asks_first(app, project):
+    """Run full pipeline / Train + export splat list what they would replace; without a browser they run at once."""
+    found = dict(app.replaced_results("all"))
+    assert "the refined SfM model" in found
+    assert set(dict(app.replaced_results("splat"))) <= {"the splat", "a paused training that Resume would continue"}
+    started = []
+    app.run_stage, real = (lambda st: started.append(st)), app.run_stage
+    try:
+        app._confirm_replace("splat", None)
+        assert started == ["splat"]
+    finally:
+        app.run_stage = real

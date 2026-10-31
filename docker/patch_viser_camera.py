@@ -14,6 +14,15 @@ the code after unpacking; each pattern occurs once, in the camera controls' per-
    hidden input data-fly names (`report`), so the server pauses the clock (`paused`, for every browser, the
    slider and the photo window) and continues it from t.
 
+View-dependent splat colours (SH below; View → Splat colours, modelforge/gui/data.py `pack_splats`): viser draws one
+RGB per Gaussian (band 0). A splat buffer may carry spherical-harmonic coefficients after its 8 words per Gaussian: the
+first Gaussian's reserved word (3, which the renderer overwrites with the group index) holds 0x4D46 << 16 | degree << 8 |
+K, then K words per Gaussian follow the N x 8 block (a float16 scale, then int8 coefficients, coefficient-major with
+interleaved channels). window.__mfMerge (the merge of all splat objects) keeps the 8-word layout for the sorter and the
+main texture and gathers the coefficients into a second texture (mfShTex, ceil(K / 4) texels per Gaussian, zeros for
+objects without them); the vertex shader adds the bands for the direction from the camera to the Gaussian, as gsplat
+does. Buffers without the tag are drawn as before.
+
 window.__mfV (viser's message sender for the page's uploader) is set every frame, and upload acknowledgements of
 the streaming uploads go to window.__mfAck. Splat buffer updates are staged until the sort worker has ordered them (SPLAT below): no gap, no stale order.
 
@@ -61,13 +70,75 @@ SPLAT = (
      "e.material.dispose(),e.textureT_camera_groups.dispose()},500);u.current=new Float32Array;"
      "s.current.material.uniforms.transitionInState.value=1;s.current.material.uniforms.numGaussians.value="
      "P.numGaussians;s.current.textureBuffer.needsUpdate=!0;f()}else{let e=s.current.textureBuffer.image.data;"
-     "e.fill(0),e.set(P.gaussianBuffer),s.current.textureBuffer.needsUpdate=!0}t.mutable.current.requestRender()}};"
+     "e.fill(0),e.set(P.gaussianBuffer),s.current.textureBuffer.needsUpdate=!0,mfShTex(s.current.material,P.gaussianBuffer,P.numGaussians,a)}t.mutable.current.requestRender()}};"
      "m({updateBuffer:p.gaussianBuffer,updateGroupIndices:p.groupIndices,updateNumGroups:p.numGroups,gen:G})}"
      "else if(g){"),
 )
+# View-dependent colours (see the module doc). GLSL on single lines: no // comments. No arrays or loops: every
+# coefficient byte is read with constant indices (dynamically indexed local arrays, the first version, worked in
+# software WebGL but drew nothing on the user's GPU), and only the texels a degree needs are fetched.
+def _sh_glsl():
+    def coef(k):  # coefficient k (0..14) as r, g, b: byte 2 + 3k + ch of the Gaussian's words
+        parts = []
+        for ch in range(3):
+            b = 2 + 3 * k + ch
+            w = b // 4
+            parts.append(f"mfB(w{w // 4}.{'xyzw'[w % 4]}, {8 * (b % 4)}u)")
+        return f"vec3({', '.join(parts)})"
+
+    fetch = "texelFetch(mfShTex, ivec2((b + {o}u) % uint(ts.x), (b + {o}u) / uint(ts.x)), 0)"
+    return (
+        "float mfB(uint w, uint s) { float v = float((w >> s) & 255u); return v > 127.0 ? v - 256.0 : v; } "
+        "vec3 mfSh(uint idx, vec3 d) { ivec2 ts = textureSize(mfShTex, 0); uint b = idx * mfShT; "
+        f"uvec4 w0 = {fetch.format(o=0)}; float x = d.x, y = d.y, z = d.z; "
+        f"vec3 r = 0.4886025119029199 * (-y * {coef(0)} + z * {coef(1)} - x * {coef(2)}); "
+        f"if (mfDeg > 1) {{ uvec4 w1 = {fetch.format(o=1)}; float xx = x * x, yy = y * y, zz = z * z; "
+        f"r += 1.0925484305920792 * x * y * {coef(3)} - 1.0925484305920792 * y * z * {coef(4)} "
+        f"+ 0.31539156525252005 * (2.0 * zz - xx - yy) * {coef(5)} - 1.0925484305920792 * x * z * {coef(6)} "
+        f"+ 0.5462742152960396 * (xx - yy) * {coef(7)}; "
+        f"if (mfDeg > 2) {{ uvec4 w2 = {fetch.format(o=2)}; "
+        f"r += -0.5900435899266435 * y * (3.0 * xx - yy) * {coef(8)} + 2.890611442640554 * x * y * z * {coef(9)} "
+        f"- 0.4570457994644658 * y * (4.0 * zz - xx - yy) * {coef(10)} "
+        f"+ 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * {coef(11)} "
+        f"- 0.4570457994644658 * x * (4.0 * zz - xx - yy) * {coef(12)} + 1.445305721320277 * z * (xx - yy) * {coef(13)} "
+        f"- 0.5900435899266435 * x * (xx - 3.0 * yy) * {coef(14)}; }} }} "
+        "return r * (unpackHalf2x16(w0.x).x / 127.0); } ")
+
+
+SH_FN = _sh_glsl()
+# the SH texture of a material (created, resized or refilled; a 1 x 1 dummy without coefficients: an integer sampler
+# must be bound to an integer texture); module scope, so three.js' DataTexture (Gi) and formats are in reach
+SH_TEX = ("function mfShTex(f,e,r,n){let S=e.mfSh,T=S?e.mfShT:1,u=f.uniforms,o=u.mfShTex&&u.mfShTex.value,"
+          "w=S?Math.max(1,Math.min(r*T,n)):1,h=S?Math.max(1,Math.ceil(r*T/w)):1;"
+          "if(o&&o.image.width===w&&o.image.height===h){let D=o.image.data;D.fill(0),S&&D.set(S),o.needsUpdate=!0}"
+          "else{window.__mfShInfo=`${w}x${h} texels, ${T} per Gaussian, degree ${S?e.mfDeg:0}, ${r} Gaussians`;"
+          "S&&window.__mfDiag&&window.__mfDiag(`sh texture ${window.__mfShInfo}`);"
+          "let D=new Uint32Array(w*h*4);S&&D.set(S);let X=new Gi(D,w,h,le,L);X.internalFormat=`RGBA32UI`,"
+          "X.needsUpdate=!0,o&&o.dispose();if(u.mfShTex)u.mfShTex.value=X;else{u.mfShTex={value:X};"
+          "f.addEventListener(`dispose`,()=>u.mfShTex.value.dispose())}}"
+          "u.mfShT?u.mfShT.value=T:u.mfShT={value:T};let G=S?e.mfDeg:0;u.mfDeg?u.mfDeg.value=G:u.mfDeg={value:G};"
+          "f.uniformsNeedUpdate=!0}")
+MERGE = ("function bne(e){let t=0;for(let n of Object.values(e))t+=n.length;let n=t/8,r=new Uint32Array(t),"
+         "i=new Uint32Array(n),a=0;for(let[t,n]of Object.values(e).entries()){i.fill(t,a/8,(a+n.length)/8),r.set(n,a);"
+         "for(let e=0;e<n.length;e+=8)r[a+e+3]=t;a+=n.length}return{numGaussians:n,gaussianBuffer:r,"
+         "numGroups:Object.keys(e).length,groupIndices:i}}")
+SH = (
+    (MERGE, "function bne(e){return window.__mfMerge(e)}"),
+    ("function pz(e,t,n){", SH_TEX + "function pz(e,t,n){"),
+    ("let f=new fz;return f.fog=!0,", "let f=new fz;mfShTex(f,e,r,n);return f.fog=!0,"),
+    ("e.fill(0),e.set(p.gaussianBuffer),s.current.textureBuffer.needsUpdate=!0,",
+     "e.fill(0),e.set(p.gaussianBuffer),s.current.textureBuffer.needsUpdate=!0,"
+     "mfShTex(s.current.material,p.gaussianBuffer,p.numGaussians,a),"),
+    ("uniform float transitionInState;",
+     "uniform float transitionInState; uniform usampler2D mfShTex; uniform uint mfShT; uniform int mfDeg;"),
+    ("mat4 getGroupTransform(uint i) {", SH_FN + "mat4 getGroupTransform(uint i) {"),
+    ("// Throw the Gaussian off the screen if it's too close, too far, or too small.",
+     "if (mfDeg > 0) vRgba.rgb = clamp(vRgba.rgb + mfSh(sortedIndex, normalize(transpose(mat3(T_camera_group)) "
+     "* c_cam.xyz)), 0.0, 1.0); // Throw the Gaussian off the screen if it's too close, too far, or too small."),
+)
 EDITS = ('.replaceAll("`KeyQ`","`KeyF`").replaceAll("`KeyE`","`KeyR`")'
          f'.replace("{HOOK}","{NEW_HOOK}")'
-         + "".join(f'.{"replaceAll" if old == SPLAT_SEND else "replace"}("{old}","{new}")' for old, new in SPLAT))
+         + "".join(f'.{"replaceAll" if old == SPLAT_SEND else "replace"}("{old}","{new}")' for old, new in SPLAT + SH))
 
 FLY = """<script id="mf-fly">(()=>{
 let P=null,Pk=null,C=null,Ck=null,t0=0,touch=-1e9,hold=false,frozen=null,resumed=0,seq=0;
@@ -112,13 +183,43 @@ window.__mfFly=(n,root,keys,a)=>{const el=document.getElementById("mf-move-speed
 })()</script>"""
 
 
+MERGE_JS = """<script id="mf-sh">window.__mfMerge=e=>{
+let B=Object.values(e),n=0,T=0,D=0,P=[];
+for(const b of B){const h=b.length>=8?b[3]>>>0:0;let K=0,d=0;if(h>>>16===0x4D46){K=h&255;d=h>>>8&255}
+ const g=b.length/(8+K);P.push([b,g,K]);n+=g;if(K){T=Math.max(T,Math.ceil(K/4));D=Math.max(D,d)}}
+const r=new Uint32Array(n*8),i=new Uint32Array(n),S=T?new Uint32Array(n*T*4):null;let a=0;
+P.forEach(([b,g,K],t)=>{i.fill(t,a,a+g);r.set(b.subarray(0,g*8),a*8);for(let k=0;k<g;k++)r[(a+k)*8+3]=t;
+ if(K){const s=b.subarray(g*8);if(K===4*T)S.set(s,a*4*T);else for(let k=0;k<g;k++)S.set(s.subarray(k*K,k*K+K),(a+k)*4*T)}
+ a+=g});
+if(S){r.mfSh=S;r.mfShT=T;r.mfDeg=D}
+return{numGaussians:n,gaussianBuffer:r,numGroups:B.length,groupIndices:i}};</script>"""
+# WebGL diagnostics to the GUI log (gui/app.py `_page_diag`, through the hidden input data-diag names): the GPU and its
+# limits, the SH texture's shape, GL errors (polled each second), lost contexts, three.js errors and warnings
+DIAG_JS = """<script id="mf-diag">(()=>{const q=[],seen=new Set();let sent=0,gl=null,lost=0;
+window.__mfDiag=s=>{s=String(s).slice(0,400);if(!seen.has(s)&&seen.size<200){seen.add(s);q.push(s)}};
+for(const k of ["error","warn"]){const f=console[k].bind(console);console[k]=(...a)=>{f(...a);try{const s=a.map(String).join(" ");
+ if(/THREE|WebGL|shader|GL_|context|program/i.test(s)&&!/computeBoundingSphere|reversed depth|Clock/.test(s))window.__mfDiag(k+": "+s)}catch(e){}}}
+setInterval(()=>{const c=document.querySelector("canvas");
+ if(!gl&&c){gl=c.getContext("webgl2");if(gl){const x=gl.getExtension("WEBGL_debug_renderer_info");
+  window.__mfDiag("gpu "+(x?gl.getParameter(x.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER))+" | max texture "+
+   gl.getParameter(gl.MAX_TEXTURE_SIZE)+" | vertex texture units "+gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS)+
+   " | "+navigator.userAgent);
+  c.addEventListener("webglcontextlost",()=>{lost++;window.__mfDiag("WebGL context lost ("+lost+")")});
+  c.addEventListener("webglcontextrestored",()=>window.__mfDiag("WebGL context restored"))}}
+ if(gl){const e=gl.getError();if(e)window.__mfDiag("GL error 0x"+e.toString(16)+(window.__mfShInfo?" (sh "+window.__mfShInfo+")":""))}
+ const el=document.getElementById("mf-move-speed"),u=el&&el.dataset.diag,a=window.__mfV;
+ while(q.length&&u&&a&&a.sendMessage&&sent<300){a.sendMessage({type:"GuiUpdateMessage",uuid:u,updates:{value:(++sent)+" "+q.shift()}})}},1000)})();</script>"""
+
+
 def main(index):
     page = open(index).read()
     page, n = re.subn(re.escape(DECODE) + r"[^\n]*?;(?=\s*const run=)", lambda _: DECODE + EDITS + ";", page, count=1)
     assert n == 1, "viser's bundle loader not found"
     page = re.sub(r'<script id="mf-fly">.*?</script>', "", page, flags=re.S)
-    page = page.replace("</head>", FLY.replace("\n", "") + "</head>", 1)
-    assert NEW_HOOK in page and "__mfFly" in page
+    page = re.sub(r'<script id="mf-(sh|diag)">.*?</script>', "", page, flags=re.S)
+    page = page.replace("</head>", FLY.replace("\n", "") + MERGE_JS.replace("\n", "") + DIAG_JS.replace("\n", "")
+                        + "</head>", 1)
+    assert NEW_HOOK in page and "__mfFly" in page and "__mfMerge" in page
     open(index, "w").write(page)
 
 

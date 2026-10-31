@@ -637,7 +637,6 @@ def load_textured_mesh(ply_path):
 
 
 SPLAT_SHOWN = 1_000_000  # a finished splat larger than this is shown as a random subset (View: All gaussians)
-LIVE_SPLAT_SHOWN = 300_000  # live training snapshots: always at most this many (9.6 MB per update over the network)
 
 
 def splat_count(ply_path):
@@ -651,13 +650,14 @@ def splat_count(ply_path):
     return 0
 
 
-def load_splat(ply_path, max_gaussians=SPLAT_SHOWN, seed=0):
-    """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays (None: all)."""
+def load_splat(ply_path, max_gaussians=SPLAT_SHOWN, seed=0, sh_degree=0):
+    """ENU splat (modelforge.export.splat_to_enu output) as viser gaussian-splat arrays (None: all); sh_degree > 0:
+    rgbs carry the higher SH bands as extra columns (`splat_arrays`)."""
     import plyfile
-    return splat_arrays(plyfile.PlyData.read(ply_path)["vertex"].data, max_gaussians, seed)
+    return splat_arrays(plyfile.PlyData.read(ply_path)["vertex"].data, max_gaussians, seed, sh_degree)
 
 
-def load_live_splat(npz_path, transforms_path, max_gaussians=LIVE_SPLAT_SHOWN, seed=0):
+def load_live_splat(npz_path, transforms_path, max_gaussians=None, seed=0):
     """A training snapshot (modelforge.export.ckpt_dump) mapped to ENU, as viser arrays; (step, arrays).
     Band 0 only: the preview shows base colours, so no SH rotation is needed."""
     from modelforge.export import splat_to_enu
@@ -683,8 +683,10 @@ def splat_subset(n, max_gaussians=SPLAT_SHOWN, seed=0):
     return np.arange(n)
 
 
-def splat_arrays(v, max_gaussians=SPLAT_SHOWN, seed=0):
-    """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities (None: all)."""
+def splat_arrays(v, max_gaussians=SPLAT_SHOWN, seed=0, sh_degree=0):
+    """Structured splat vertices (ENU) -> viser centers, covariances, rgbs, opacities (None: all). sh_degree > 0 (up
+    to what the splat has): rgbs get 3 x ((d + 1)^2 - 1) more columns, the higher SH bands (`sh_rest`), which
+    `pack_splats` sends for the browser's view-dependent colours."""
     idx = splat_subset(len(v), max_gaussians, seed)
     v = v[idx]
     centers = np.stack([v["x"], v["y"], v["z"]], -1).astype(np.float32)
@@ -698,4 +700,110 @@ def splat_arrays(v, max_gaussians=SPLAT_SHOWN, seed=0):
     cov = np.einsum("nij,nj,nkj->nik", R, s2, R).astype(np.float32)
     rgb = np.clip(0.5 + SH_C0 * np.stack([v[f"f_dc_{i}"] for i in range(3)], -1), 0, 1).astype(np.float32)
     opacity = (1 / (1 + np.exp(-v["opacity"].astype(np.float64))))[:, None].astype(np.float32)
+    if sh_degree:
+        rest = sh_rest(v, sh_degree)
+        if rest.shape[1]:
+            rgb = np.ascontiguousarray(np.c_[rgb, rest], dtype=np.float32)
     return centers, cov, rgb, opacity
+
+
+# View-dependent colours in the browser (View -> Splat colours; docker/patch_viser_camera.py, SH): viser draws band 0.
+SPLAT_COLOURS = {"base colour": 0, "view-dependent, 1 band": 1, "view-dependent, full": 3}
+SH_TAG = 0x4D46  # "MF": the buffer carries SH words (see pack_splats)
+
+
+def sh_degree_of(v):
+    """The SH degree a splat's vertices hold (f_rest_* fields: 3 x ((d + 1)^2 - 1))."""
+    n = sum(1 for k in v.dtype.names if k.startswith("f_rest_")) // 3
+    return int(round(np.sqrt(n + 1))) - 1
+
+
+def sh_rest(v, degree):
+    """The SH bands 1..degree (capped at the splat's) of structured vertices: (N, 3 C) float32, C = (d + 1)^2 - 1
+    coefficients in order, each as r, g, b (a lower degree is a column prefix). The PLY's f_rest_* are channel-major:
+    f_rest_{channel * C_file + coefficient}."""
+    have = sh_degree_of(v)
+    d = min(int(degree), have)
+    if d <= 0:
+        return np.zeros((len(v), 0), np.float32)
+    cf, c = (have + 1) ** 2 - 1, (d + 1) ** 2 - 1
+    return np.stack([v[f"f_rest_{ch * cf + k}"] for k in range(c) for ch in range(3)], -1).astype(np.float32)
+
+
+def sh_quantize(rest):
+    """(N, 3 C) SH coefficients -> (N, 2 + 3 C) uint8: a float16 scale (the largest |coefficient|), then each
+    coefficient as int8 of the scale / 127."""
+    rest = np.asarray(rest, np.float32)
+    scale = np.abs(rest).max(1) if rest.shape[1] else np.zeros(len(rest), np.float32)
+    s16 = np.maximum(scale, 1e-8).astype(np.float16)
+    q = np.clip(np.round(rest / np.maximum(s16.astype(np.float32), 1e-8)[:, None] * 127), -127, 127).astype(np.int8)
+    return np.c_[s16[:, None].view(np.uint8), q.view(np.uint8)]
+
+
+def sh_dequantize(b):
+    """sh_quantize's bytes back to (N, 3 C) float32."""
+    b = np.ascontiguousarray(b, np.uint8)
+    s = b[:, :2].copy().view(np.float16)[:, 0].astype(np.float32)
+    return b[:, 2:].view(np.int8).astype(np.float32) * (s / 127)[:, None]
+
+
+def pack_splats(centers, covariances, rgbs, opacities):
+    """viser's splat buffer, as add_gaussian_splats packs it (N x 8 uint32); with SH columns in rgbs (`splat_arrays`)
+    a flat buffer: the N x 8 block with SH_TAG << 16 | degree << 8 | K in the first Gaussian's reserved word, then K
+    words per Gaussian (`sh_quantize`'s bytes, zero-padded), which the patched browser evaluates per view."""
+    from viser._assignable_props_api import colors_to_uint8
+    rgbs = np.asarray(rgbs)
+    n = len(centers)
+    cov_triu = np.asarray(covariances).reshape((-1, 9))[:, np.array([0, 1, 2, 4, 5, 8])]
+    main = np.concatenate([np.ascontiguousarray(centers, dtype=np.float32).view(np.uint8),
+                           np.zeros((n, 4), dtype=np.uint8),
+                           np.ascontiguousarray(cov_triu, dtype=np.float16).view(np.uint8),
+                           colors_to_uint8(rgbs[:, :3]), colors_to_uint8(np.asarray(opacities))],
+                          axis=-1).view(np.uint32)
+    c = (rgbs.shape[1] - 3) // 3 if rgbs.ndim == 2 else 0
+    if c <= 0 or n == 0:
+        return main
+    degree = int(round(np.sqrt(c + 1))) - 1
+    b = sh_quantize(rgbs[:, 3:3 + 3 * c])
+    k = -(-b.shape[1] // 4)
+    words = np.zeros((n, 4 * k), np.uint8)
+    words[:, :b.shape[1]] = b
+    main[0, 3] = SH_TAG << 16 | degree << 8 | k
+    return np.concatenate([main.ravel(), words.view(np.uint32).ravel()])
+
+
+def add_splats(scene, name, centers, covariances, rgbs, opacities):
+    """scene.add_gaussian_splats, also for rgbs with SH columns (its own message with pack_splats' buffer)."""
+    if np.asarray(rgbs).shape[1] == 3:
+        return scene.add_gaussian_splats(name, centers=centers, covariances=covariances, rgbs=rgbs,
+                                         opacities=opacities)
+    from viser import _messages
+    from viser._scene_handles import GaussianSplatHandle
+    msg = _messages.GaussianSplatsMessage(name=name, props=_messages.GaussianSplatsProps(
+        buffer=pack_splats(centers, covariances, rgbs, opacities), scale=1.0))
+    return GaussianSplatHandle._make(scene, msg, name, (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0), True)
+
+
+SH_C1 = 0.4886025119029199
+SH_C2 = (1.0925484305920792, -1.0925484305920792, 0.31539156525252005, -1.0925484305920792, 0.5462742152960396)
+SH_C3 = (-0.5900435899266435, 2.890611442640554, -0.4570457994644658, 0.3731763325901154, -0.4570457994644658,
+         1.445305721320277, -0.5900435899266435)
+
+
+def sh_view_colour(rgb, dirs):
+    """The colour the browser draws (the shader's sum, for tests): rgbs with SH columns, unit directions from the
+    camera to each Gaussian -> (N, 3) in [0, 1]."""
+    c = (rgb.shape[1] - 3) // 3
+    sh = rgb[:, 3:3 + 3 * c].reshape(len(rgb), c, 3)
+    x, y, z = (dirs[:, i:i + 1] for i in range(3))
+    out = rgb[:, :3] + SH_C1 * (-y * sh[:, 0] + z * sh[:, 1] - x * sh[:, 2])
+    if c >= 8:
+        xx, yy, zz = x * x, y * y, z * z
+        out = out + (SH_C2[0] * x * y * sh[:, 3] + SH_C2[1] * y * z * sh[:, 4] + SH_C2[2] * (2 * zz - xx - yy) * sh[:, 5]
+                     + SH_C2[3] * x * z * sh[:, 6] + SH_C2[4] * (xx - yy) * sh[:, 7])
+        if c >= 15:
+            out = out + (SH_C3[0] * y * (3 * xx - yy) * sh[:, 8] + SH_C3[1] * x * y * z * sh[:, 9]
+                         + SH_C3[2] * y * (4 * zz - xx - yy) * sh[:, 10] + SH_C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+                         * sh[:, 11] + SH_C3[4] * x * (4 * zz - xx - yy) * sh[:, 12] + SH_C3[5] * z * (xx - yy)
+                         * sh[:, 13] + SH_C3[6] * x * (xx - 3 * yy) * sh[:, 14])
+    return np.clip(out, 0, 1)

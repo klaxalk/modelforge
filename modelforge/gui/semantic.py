@@ -400,8 +400,10 @@ class SemanticPanel:
             keep = r >= thr
             return centers[keep], cov[keep], rgb[keep], op[keep]
         a = np.clip((r - thr) / max(1e-6, 1.0 - thr) * 0.7 + 0.3, 0, 1) * (r >= thr)  # tint 30-100 %
-        rgb = rgb * (1 - a[:, None]) + RED * a[:, None]
-        return centers, cov, rgb.astype(np.float32), op
+        out = np.array(rgb, np.float32)  # with SH columns (view-dependent colours) the tint fades them too
+        out[:, :3] = rgb[:, :3] * (1 - a[:, None]) + RED * a[:, None]
+        out[:, 3:] *= (1 - a[:, None])
+        return centers, cov, out, op
 
 
 def cylinder_segments(r, h, n=48, struts=8):

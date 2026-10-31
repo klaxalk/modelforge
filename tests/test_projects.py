@@ -94,8 +94,15 @@ def test_gui_switches_projects(tmp_path):
         app.projects.g_list.value = "real"
         app.projects.open_selected()
         assert app.project is not None and app.snap.name == "refined"
-        assert app.g_points.value and app.g_traj.value and not app.g_cams.value  # the default view
-        assert not app.g_splat.value and not app.g_corr.value and app.g_mesh.value == "off" and not app.g_plan.value
+        def layers():  # the default view: one layer (splat, else a mesh, else dense, else sparse points)
+            return [app.g_splat.value, app.g_mesh.value != "off", app.g_dense_pts.value, app.g_points.value]
+        want = [app.dense["splat"] is not None, False, False, False]
+        if not want[0]:
+            want[1] = bool(app.dense["meshes"])
+            want[2] = not want[1] and app.dense["fused"] is not None
+            want[3] = not any(want[:3])
+        assert layers() == want and not app.g_traj.value and not app.g_cams.value
+        assert not app.g_corr.value and not app.g_plan.value
         n = len(os.listdir(os.path.join(REAL, "images")))
         assert len(app.cam_handles) == len(app.project.names) == n
         assert f"{n} images" in app.g_header.content
@@ -107,7 +114,7 @@ def test_gui_switches_projects(tmp_path):
                                     "count": 50}])
         assert app.semantic._markers
         app.open_project(real)
-        assert app.snap.name == "refined" and app.g_points.value and not app.g_cams.value
+        assert app.snap.name == "refined" and layers() == want and not app.g_cams.value
         assert not app.semantic._markers and not app.semantic.objs  # the old search's markers are gone
 
         app.ingest.g_pv_image.image = np.full((36, 64, 3), 200, np.uint8)  # a frame of the old project

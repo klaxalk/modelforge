@@ -3,11 +3,13 @@ Difix3D repository importable; modelforge/difix.py starts it).
 
 python difix_refine.py SPEC.json
 SPEC: splat_npz (ENU: means, quats wxyz, scales log, opacities logit, sh (N, K, 3)), repo (Difix3D), model, transforms,
-images_dirs (where the photos are, the training size first: images_N, images), downscale, sky_dir (sky masks at the training size, or null), steps, rounds,
+images_dirs (where the photos are, the training size first: images_N, images), root (the project: a photo not in
+images_N is read at its transforms.json file_path, e.g. registered/images/), downscale, sky_dir (sky masks at the training size, or null), steps, rounds,
 shift_m, rot_m (metres per radian in the pose distance), novel_prob, novel_weight, difix_width (0 = the training
 size), targets (4 x 4 OpenCV c2w in the transforms' world), out_npz, workdir, cache_gb, flatten, needle,
 needle_ratio (the shape terms of the splat's own training, nsplugin/mf_splatfacto_lidar.py; 0 = off), keep_shape (no
-Gaussian more elongated than it was, or than needle_ratio; default true).
+Gaussian more elongated than it was, or than needle_ratio; default true), cleaner ("difix" (default) or "fixer"; see
+_cleaner), fixer_dir, fixer_timestep. novel_prob 0 trains on the photos only (a control: no views are cleaned).
 
 A fine-tune of the splat as it is (no densification): every steps / rounds steps the pseudo views move shift_m
 towards their targets (starting at the nearest training camera), are rendered with that camera's intrinsics, cleaned
@@ -108,6 +110,38 @@ class Photos:
         return out
 
 
+def _cleaner(spec):
+    """clean(render PIL, reference photo PIL) -> the cleaned render (PIL, the render's size), by spec["cleaner"]:
+    "difix" (nvidia/difix_ref, Stable Diffusion turbo with the reference photo; at difix_width, 0 = the render's
+    size) or "fixer" (nvidia/Fixer, Cosmos-Predict2 0.6B, one step, no reference; at difix_width or its training
+    width 1024, the height by the aspect in multiples of 16; spec["fixer_dir"] holds build/fixer's run_fixer.py and
+    models)."""
+    w = int(spec.get("difix_width") or 0)
+    if spec.get("cleaner", "difix") == "fixer":
+        sys.path.insert(0, spec["fixer_dir"])
+        import run_fixer
+        model = run_fixer.load(int(spec.get("fixer_timestep", 250)))
+        w = w or 1024
+
+        def clean(pil, ref):
+            size = (w // 16 * 16, max(16, int(round(pil.height * w / pil.width / 16)) * 16))
+            return run_fixer.fix(model, pil, size)
+        return clean
+    sys.path.insert(0, spec["repo"])
+    from src.pipeline_difix import DifixPipeline
+    difix = DifixPipeline.from_pretrained(spec["model"], trust_remote_code=True, torch_dtype=torch.float16)
+    difix.set_progress_bar_config(disable=True)
+    difix.to("cuda")
+
+    def clean(pil, ref):
+        size = (w, int(round(pil.height * w / pil.width / 8)) * 8) if 0 < w < pil.width else pil.size
+        size = (size[0] // 8 * 8, size[1] // 8 * 8)
+        return difix(prompt="remove degradation", image=pil.resize(size, Image.LANCZOS),
+                     ref_image=ref.resize(size, Image.LANCZOS), num_inference_steps=1, timesteps=[199],
+                     guidance_scale=0.0).images[0].resize(pil.size, Image.LANCZOS)
+    return clean
+
+
 def main(spec_path):
     spec = json.load(open(spec_path))
     dev = torch.device("cuda")
@@ -139,8 +173,10 @@ def main(spec_path):
                       "K": np.array([[cam["fl_x"], 0, cam["cx"]], [0, cam["fl_y"], cam["cy"]], [0, 0, 1]]),
                       "dist": np.array([cam.get(k, 0.0) for k in ("k1", "k2", "p1", "p2")] + [cam.get("k3", 0.0)]),
                       "gain": float(f.get("mf_exposure", 1.0)),
-                      "path": next((os.path.join(dd, name) for dd in spec["images_dirs"]
-                                    if os.path.exists(os.path.join(dd, name))), os.path.join(spec["images_dirs"][-1], name)),
+                      "path": next((q for q in [os.path.join(dd, name) for dd in spec["images_dirs"][:1]]
+                                    + ([os.path.join(spec["root"], f["file_path"])] if spec.get("root") else [])
+                                    + [os.path.join(dd, name) for dd in spec["images_dirs"][1:]]
+                                    if os.path.exists(q)), os.path.join(spec["images_dirs"][-1], name)),
                       "sky": os.path.join(spec["sky_dir"], name + ".png") if spec.get("sky_dir") else None})
     photos = Photos(views, float(spec.get("cache_gb", 4.0)))
     print(f"[difix] {len(views)} training photos, {len(P['means']):,} gaussians, {len(spec['targets'])} target "
@@ -159,12 +195,8 @@ def main(spec_path):
             near_plane=0.01, far_plane=1e10, packed=False)
         return img[0].clamp(0, 1), alpha[0, ..., 0]
 
-    sys.path.insert(0, spec["repo"])
-    from src.pipeline_difix import DifixPipeline
-    difix = DifixPipeline.from_pretrained(spec["model"], trust_remote_code=True, torch_dtype=torch.float16)
-    difix.set_progress_bar_config(disable=True)
-    difix.to("cuda")
-    print(f"[difix] model loaded ({time.time() - t0:.0f} s)", flush=True)
+    clean = _cleaner(spec)
+    print(f"[difix] {spec.get('cleaner', 'difix')} loaded ({time.time() - t0:.0f} s)", flush=True)
 
     novel = []
     rounds, steps = max(1, int(spec["rounds"])), int(spec["steps"])
@@ -184,13 +216,8 @@ def main(spec_path):
             ref_lin = (photo.float() / 255).clamp(1e-6, 1) ** 2.2 / ref["gain"]  # to the median exposure
             ref_img = Image.fromarray((ref_lin.clamp(0, 1) ** (1 / 2.2) * 255).byte().numpy())
             pil = Image.fromarray((img.cpu().numpy() * 255).astype(np.uint8))
-            w = int(spec.get("difix_width") or 0)
-            size = (w, int(round(pil.height * w / pil.width / 8)) * 8) if 0 < w < pil.width else pil.size
-            size = (size[0] // 8 * 8, size[1] // 8 * 8)
             torch.cuda.empty_cache()
-            fixed = difix(prompt="remove degradation", image=pil.resize(size, Image.LANCZOS),
-                          ref_image=ref_img.resize(size, Image.LANCZOS), num_inference_steps=1, timesteps=[199],
-                          guidance_scale=0.0).images[0].resize(pil.size, Image.LANCZOS)
+            fixed = clean(pil, ref_img)
             if k < 8:  # render | Difix | reference, for a look
                 Image.fromarray(np.concatenate([np.asarray(pil), np.asarray(fixed), np.asarray(ref_img)], 1)).resize(
                     (3 * 640, round(640 * pil.height / pil.width))).save(os.path.join(sdir, f"{k:03d}.jpg"), quality=85)
@@ -214,7 +241,7 @@ def main(spec_path):
         del ls
     t1 = time.time()
     for step in range(steps):
-        if step % every == 0 and step // every < rounds:
+        if step % every == 0 and step // every < rounds and p_novel > 0:
             fix(step // every + 1)
         if novel and rng.random() < p_novel:
             c2w, K, W, H, target, mask = novel[rng.integers(len(novel))]

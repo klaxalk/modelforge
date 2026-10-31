@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shutil
 import threading
 import time
 import traceback
@@ -35,6 +36,7 @@ from modelforge.gui.lod import SplatLod
 from modelforge.gui.videos import VideosPanel
 from modelforge.gui.ingest import IngestPanel, source_color
 from modelforge.gui.projects import ProjectsPanel
+from modelforge.gui.replace import ReplacePanel
 from modelforge.gui.rig import RigPanel
 from modelforge.gui.semantic import SemanticPanel
 from modelforge.gui.exclude import COLOR as EXCLUDED_COLOR, ExcludePanel
@@ -107,6 +109,8 @@ STAGE_HINTS = {
                   "step builds the same cloud first. Seconds to a minute.",
     "lidarmesh-colour": "Colour the LiDAR mesh from the photos, as the SfM mesh (weighted mean of the photos that "
                         "see each vertex, occlusion tested). A few minutes.",
+    "replace": "Replace tab: find and rate objects, apply or undo edits (remove an object, fill its ground, place a "
+               "donor).",
     "difix": "Refine the finished splat towards the Difix tab's target views: renders moved step by step from the "
              "nearest photo towards each target, cleaned by Difix (a diffusion model), trained on together with the "
              "photos. Better from those views and near them; the splat before the first refinement is kept (Undo).",
@@ -197,6 +201,50 @@ def _fmt_s(sec):
     return f"{sec // 60} min {sec % 60:02d} s" if sec >= 60 else f"{sec} s"
 
 
+ETA_WINDOW = 600.0  # s: the end estimate follows the progress rate over this long (splat steps slow down as it grows)
+
+
+def _eta(samples, pct, now):
+    """Seconds until the progress bar reaches 100 %, from its rate since the oldest sample kept (samples: [(t, pct)],
+    updated here: a sample per change, those older than ETA_WINDOW dropped); None while it cannot tell (< 20 s of
+    progress, nothing moved yet, done)."""
+    if pct is None:
+        samples.clear()
+        return None
+    if samples and pct < samples[-1][1] - 0.5:  # it went back: another stage or tile, a new count
+        samples.clear()
+    if not samples or pct != samples[-1][1]:
+        samples.append((now, pct))
+    while len(samples) > 2 and now - samples[1][0] > ETA_WINDOW:
+        samples.pop(0)
+    t0, p0 = samples[0]
+    if pct >= 100 or pct <= p0 or now - t0 < 20:
+        return None
+    return (100.0 - pct) * (now - t0) / (pct - p0)
+
+
+def _fmt_eta(rem, now=None):
+    """'≈ 22:46 (in 1 h 12 min)': the clock time (local, the GUI's timezone) and how long."""
+    now = time.time() if now is None else now
+    end = time.localtime(now + rem)
+    clock = time.strftime("%H:%M" if rem < 20 * 3600 else "%a %H:%M", end)
+    m = int(round(rem / 60))
+    left = f"{m // 60} h {m % 60} min" if m >= 60 else f"{max(m, 1)} min"
+    return f"≈ {clock} (in {left})"
+
+
+def use_timezone(root):
+    """The GUI's clock times (log, history, end estimates) in the user's timezone: ROOT/.modelforge_gui.json
+    "timezone" (e.g. Europe/Prague), else $TZ; the container itself runs on UTC."""
+    try:
+        tz = json.load(open(os.path.join(root, ".modelforge_gui.json"))).get("timezone")
+    except (OSError, ValueError):
+        tz = None
+    if tz and os.path.exists(os.path.join("/usr/share/zoneinfo", tz)):
+        os.environ["TZ"] = tz
+        time.tzset()
+
+
 def _download_payload(paths):
     """(filename, bytes) for the browser: the file itself, or a .zip when the export has several files."""
     if len(paths) == 1:
@@ -277,6 +325,7 @@ class App:
             self.load_snapshot(self._main_snapshot(names))
         if self.project is None:
             self._draw_grid()  # under the Ingest plan's tracks
+        self._pick_default_layer = True  # the default view's one layer (_default_layer), once its files are known
         self._refresh_dense()
         self._set_plan_visible(self.project is None)  # the default view (_default_view): no flight plan
         self.server.on_client_connect(self._on_connect)
@@ -295,6 +344,10 @@ class App:
         self.g_header = gui.add_markdown(self._header())
         # where the browser's keyboard movement reads its speed, the orbit and Fly's clock (docker/patch_viser_camera.py): in the right panel,
         # which is always on screen
+        # the page's WebGL diagnostics (GPU, limits, GL errors, the SH colour texture; patch_viser_camera.py DIAG_JS):
+        # to the log and build/gui.log, so a problem in a browser on another computer shows here
+        self.g_page_diag = gui.add_text("page diagnostics", initial_value="", visible=False)
+        self.g_page_diag.on_update(lambda e: self._page_diag(e.client_id, e.target.value))
         self.g_speed_html = gui.add_html(self._speed_html())
         self.g_fly_path_html = gui.add_html(self._fly_path_html())  # the path View → Fly flies, in the browsers
         # the browser tab's title and icon follow it (docker/patch_viser_page.py), kept by _watch_status
@@ -308,7 +361,7 @@ class App:
                                 "tab; the mesh from the splat is the Splat mesh tab's), with the settings of the tabs below (and the "
                                 "Ingest plan: images are extracted first if the project has none yet). Stages that "
                                 "need a GPU are skipped without one.")
-        b.on_click(lambda _: self.run_stage("all"))
+        b.on_click(lambda e: self._confirm_replace("all", e.client))
         self.g_buttons["all"] = b
         self.g_stop = gui.add_button("Stop", icon=viser.Icon.PLAYER_STOP, color="red", disabled=True,
                                      hint="Stop the running job (a stage, the full pipeline, splat training or an "
@@ -339,7 +392,7 @@ class App:
             self.g_snapshot.on_update(lambda _: self._snapshot_picked())
             self.g_stats = gui.add_markdown("")
             with gui.add_folder("Layers"):
-                self.g_points = gui.add_checkbox("Points", initial_value=True,
+                self.g_points = gui.add_checkbox("Points", initial_value=False,
                                                  hint="Sparse 3D points of the snapshot.")
                 self.g_point_size = gui.add_slider(
                     "Point size", min=0.1, max=5.0, step=0.1, initial_value=1.0,
@@ -353,7 +406,7 @@ class App:
                                                  hint="Grey frustums at the telemetry poses.")
                 self.g_corr = gui.add_checkbox("Prior → refined", initial_value=False,
                                                hint="Red segments from each prior position to the estimated one.")
-                self.g_traj = gui.add_checkbox("Trajectories", initial_value=True,
+                self.g_traj = gui.add_checkbox("Trajectories", initial_value=False,
                                                hint="Grey: prior path; blue: estimated path.")
                 self.g_grid = gui.add_checkbox(
                     "Ground grid", initial_value=True,
@@ -404,9 +457,18 @@ class App:
                     hint=f"Show every Gaussian of the splat (when Level of detail is off or the splat fits its "
                          f"budget). Off: a random subset of at most "
                          f"{gdata.SPLAT_SHOWN:,}, which keeps the browser responsive. The live preview while training "
-                         f"always sends at most {gdata.LIVE_SPLAT_SHOWN:,} (each update travels to the browser). "
+                         f"goes through the level of detail too (built for each snapshot). "
                          f"Millions of Gaussians need a strong GPU "
                          f"in the browser and take a while to send.")
+                colours = self._load_settings().get("splat_colours", "base colour")
+                self.g_splat_colours = gui.add_dropdown(
+                    "Splat colours", tuple(gdata.SPLAT_COLOURS),
+                    initial_value=colours if colours in gdata.SPLAT_COLOURS else "base colour",
+                    hint="Base colour: one colour per Gaussian (32 bytes each), what viser draws. View-dependent: the "
+                         "browser also evaluates the splat's spherical harmonics for the direction it looks from, "
+                         "as the trained splat and the exports render: highlights, sheen and colours that change "
+                         "with the angle. 1 band: +12 bytes per Gaussian (~1.4x the data); full: all bands the splat "
+                         "has (+48 bytes, ~2.5x). The live preview while training stays base colour.")
                 self.g_splat_lod = gui.add_checkbox(
                     "Level of detail", initial_value=True,
                     hint="A splat with more Gaussians than the budget is shown in cells, each at the detail the "
@@ -427,6 +489,7 @@ class App:
                 self.g_tiles_view.on_update(lambda _: (self._draw_tiles(), self._sync_quickbar()))
                 self.g_splat_all.on_update(lambda _: self._splat_all_changed())
                 self.g_splat_lod.on_update(lambda _: self._draw_splat())
+                self.g_splat_colours.on_update(lambda _: self._splat_colours_changed())
                 self.g_lod_budget.on_update(lambda _: self._draw_splat())
                 self.g_dense_pts.on_update(lambda _: self._draw_dense_points())
                 self.g_mesh.on_update(lambda _: self._draw_mesh())
@@ -534,6 +597,8 @@ class App:
             self.semantic = SemanticPanel(self, gui)
         with self.left.add_tab("Rig", viser.Icon.ROBOT):  # articulated objects cut out of the splat (gui/rig.py)
             self.rig = RigPanel(self, gui)
+        with self.left.add_tab("Replace", viser.Icon.TREE):  # content-aware repair: weak objects, ground (gui/replace.py)
+            self.replace = ReplacePanel(self, gui)
         self.lod = SplatLod(self)
         self._mem = memory.Sampler()  # peaks of the running job's stages (memory.record)
 
@@ -966,7 +1031,7 @@ class App:
                                hint="ns-train on transforms.json + sparse_pc.ply, then ns-export and conversion "
                                     "to splat/splat_enu.ply in the project's ENU frame (aligned with the "
                                     "cameras and the mesh).")
-            b.on_click(lambda _: self.run_stage("splat"))
+            b.on_click(lambda e: self._confirm_replace("splat", e.client))
             self.g_buttons["splat"] = b
             self.g_splat_pause = gui.add_button(
                 "Pause training", icon=viser.Icon.PLAYER_PAUSE, disabled=True,
@@ -1028,6 +1093,12 @@ class App:
                     hint="How far the renders move per round, from the nearest photo's camera towards each target "
                          "(turns count 10 m per radian). A target farther than rounds x step from every photo is "
                          "not reached: Difix can only fix renders that still resemble the photos.")
+                self.g_difix_cleaner = gui.add_dropdown(
+                    "Model", options=tuple(difix.CLEANERS), initial_value="Difix",
+                    hint="What cleans the renders. Difix: NVIDIA's Stable Diffusion turbo model, guided by the "
+                         "nearest photo (non-commercial license). Fixer: its successor on Cosmos-Predict2 0.6B, no "
+                         "photo guidance, ~2 GB of GPU memory, ~0.3 s per view, commercial use allowed "
+                         "(build/fixer).")
                 self.g_difix_width = gui.add_dropdown(
                     "Difix resolution", options=tuple(difix.WIDTHS), initial_value="training size",
                     hint="Difix runs at its input size: the training size is best (karlak: LPIPS 0.260 vs 0.293) "
@@ -1320,6 +1391,7 @@ class App:
         """Drop the last live snapshot: it belongs to another run (or project) and must not be redrawn."""
         self._splat_live_on = False
         self._live_splat = self._live_src = None
+        self._end_live_lod()
 
     def refresh_after_images_changed(self):
         """Another image set (Images used): the old run's live preview and History no longer apply."""
@@ -1340,6 +1412,7 @@ class App:
             self._forget_live_splat()  # a paused run's live preview belongs to the old project
             self.semantic.clear_for_switch()  # the old project's search markers and results
             self.rig.close()
+            self.replace.close()
             self.server.scene.remove_by_name("/dense/splat_live")
             self.project = Project(path) if os.path.exists(os.path.join(path, "poses.json")) else None
             self.views.refresh()  # this project's saved views, tie points, Difix and registration state
@@ -1578,15 +1651,31 @@ class App:
         self._refresh_dense()
 
     def _default_view(self):
-        """What a project opens with, as on start (the user asked): Points and Trajectories only; the other
-        layers are a click away (View tab, quick bar). The flight plan is set after the Ingest tab switched."""
-        for box, on in ((self.g_points, True), (self.g_traj, True), (self.g_cams, False), (self.g_thumbs, False),
+        """What a project opens with, as on start (the user asked): one layer, the best there is (`_default_layer`,
+        chosen in _refresh_dense once the project's files are known); no trajectories; the others are a click away
+        (View tab, quick bar). The flight plan is set after the Ingest tab switched."""
+        self._pick_default_layer = True
+        for box, on in ((self.g_points, False), (self.g_traj, False), (self.g_cams, False), (self.g_thumbs, False),
                         (self.g_priors, False), (self.g_corr, False), (self.g_dense_pts, False),
                         (self.g_splat, False), (self.g_tiles_view, False)):
             if box.value != on:
                 box.value = on
         if self.g_mesh.value != "off":
             self.g_mesh.value = "off"
+
+    DEFAULT_MESHES = ("lidar", "sfm", "splat", "delaunay", "poisson")  # the mesh a project opens with, first found
+
+    def _default_layer(self, meshes):
+        """The one layer a project opens with (the user asked, 2026-10-30, with the level of detail in place): the
+        splat if there is one, else a mesh, else the dense points, else the sparse points."""
+        if self.dense["splat"] is not None:
+            self.g_splat.value = True
+        elif meshes:
+            self.g_mesh.value = next((m for m in self.DEFAULT_MESHES if m in meshes), meshes[0])
+        elif self.dense["fused"] is not None:
+            self.g_dense_pts.value = True
+        else:
+            self.g_points.value = True
 
     def _auto_show_sparse(self, max_cameras=2000):
         """Points and Cameras start off (thousands of frustums hide a splat); a project with nothing else to
@@ -1614,7 +1703,13 @@ class App:
                                           "loop": f["loop"], "paused": bool(f["holds"]), "dist": f["dist"],
                                           "hold": 1.0, "report": self.g_fly_report._impl.uuid}), quote=True)
         return (f'<span id="mf-move-speed" data-speed="{self.move_speed:g}" data-orbit="{orbit:g}" '
-                f'data-fly="{fly}"></span>')
+                f'data-fly="{fly}" data-diag="{self.g_page_diag._impl.uuid}"></span>')
+
+    def _page_diag(self, client_id, value):
+        """A browser's WebGL report (docker/patch_viser_camera.py MERGE_JS)."""
+        line = f"browser {client_id}: {str(value)[:400]}"
+        print(line, flush=True)
+        self._on_log(line)
 
     def _status_html(self):
         """Hidden element for the browser tab: "ModelForge · <job> 42 % · <project>", or idle / failed."""
@@ -1624,6 +1719,9 @@ class App:
             label = self._job["label"] if self.running else "extraction"
             pct = self.g_progress.value if self.running and self.g_progress.visible else None
             what = f"{label} {pct:.0f} %" if pct else label
+            eta = getattr(self, "_eta_text", "")
+            if pct and eta:
+                what += " · " + eta.split(" (")[0]  # ≈ 22:46
             if self._token is not None and self._token.cancelled:
                 what = f"stopping {label}"
         elif getattr(getattr(self, "queue", None), "current", None) and self.queue.current.get("external"):
@@ -1813,6 +1911,8 @@ class App:
         try:
             if self.rig.on_pick(ev.ray_origin, ev.ray_direction):
                 return
+            if self.replace.on_pick(ev.ray_origin, ev.ray_direction):
+                return
         except Exception:  # noqa: BLE001 - a pick never breaks navigation
             traceback.print_exc()
         hit = self.ray_hit(ev.ray_origin, ev.ray_direction)
@@ -1897,6 +1997,51 @@ class App:
                 c.camera.far = far
             except Exception:  # the browser went away
                 pass
+
+    def training_tile(self):
+        """(tile, what) of a tiled run (tiles.json): the tile training now, else a paused / partial one, else the one
+        Resume trains next (the fewest steps of those not done or left out); None without tiles or when all are done."""
+        try:
+            tiles = json.load(open(os.path.join(self.path, splat_tiles.STATE)))["tiles"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        for status, what in (("training", "training"), ("paused", "paused"), ("partial", "paused")):
+            k = next((k for k, t in enumerate(tiles) if t.get("status") == status), None)
+            if k is not None:
+                return k, what
+        skip = splat_tiles.skipped(self.path)
+        todo = [k for k, t in enumerate(tiles) if t.get("status") != "done" and k not in skip]
+        return (min(todo, key=lambda k: int(tiles[k].get("step") or 0)), "next to train") if todo else None
+
+    def focus_training_tile(self, client):
+        """Quick bar → ⌖ Tile: glide to frame its sparse points (its cropped sparse_pc.ply)."""
+        import plyfile
+        found = self.training_tile() if self.path else None
+        if found is None:
+            self._notify(client, "No tiled run", "Splat tab → Tiles: no tile to go to.")
+            return
+        k, what = found
+        try:
+            v = plyfile.PlyData.read(os.path.join(splat_tiles.tile_dir(self.path, k), "sparse_pc.ply"))["vertex"].data
+            xyz = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
+        except (OSError, ValueError, KeyError):
+            xyz = np.zeros((0, 3))
+        if len(xyz) < 10:
+            self._notify(client, f"Tile {k}", "no sparse points to frame")
+            return
+        lo, hi = np.percentile(xyz, [2, 98], axis=0)
+        mid, extent = (lo + hi) / 2, max(float(np.linalg.norm(hi - lo)), 1.0)
+        self.glide_to(client, mid + np.array([0.0, -0.6, 0.5]) * extent, mid)
+        self._notify(client, f"Tile {k}", what)
+
+    def _notify(self, client, title, body):
+        """A short notice in one browser (top of the 3D view), closing by itself."""
+        if client is None:
+            return
+        try:
+            client.add_notification(title, body, auto_close_seconds=4.0)
+        except Exception:  # noqa: BLE001 - the browser went away
+            pass
 
     def recenter(self, client=None):
         """Center button (and on connect / project switch): look at the scene from the south, above it,
@@ -2387,6 +2532,7 @@ class App:
         self._token = jobs.Token()
         self.g_stop.disabled = False
         self._run_id = getattr(self, "_run_id", 0) + 1
+        self._eta_samples, self._eta_text = [], ""  # the end estimate starts over
         for b in self.g_buttons.values():
             b.disabled = True
         self.g_progress.visible = True
@@ -2505,7 +2651,7 @@ class App:
                     stage = sfm[3]
                 seq = list(sfm) + self._register_steps() if stage == "sfm" else (stage,)
             elif stage in ("splat", "splatmesh", "splatmesh-fill", "splat-resume", "analyze", "semantic", "splat-tiles", "sfmmesh", "difix", "register",
-                           "sfmmesh-fill", "sfmmesh-colour", "images", "difix-suggest", "ortho", "lidarmesh",
+                           "sfmmesh-fill", "sfmmesh-colour", "images", "difix-suggest", "ortho", "lidarmesh", "replace",
                            "lidarmesh-colour", "lidarcloud"):
                 seq = (stage,)
             elif stage == "sfmmesh-all":
@@ -2659,6 +2805,13 @@ class App:
                                                                 self._on_count_progress("register", "photo", k, n)})
                     report = pipeline.Report(project)
                     self._refresh_register()
+                elif st == "replace":
+                    msg = self.replace.run_job(project, self._on_log,
+                                               lambda ph, k, n: self._on_count_progress("replace", ph, k, n), self._token)
+                    self._splat_variant = None  # show the edited splat
+                    self._refresh_dense()
+                    self._history(f"✅ **replace** · {msg}")
+                    continue
                 elif st == "ortho":
                     meta = ortho.run(project, on_line=self._on_log, token=self._token)
                     self._history(f"✅ **orthophoto** · {meta['gaussians']:,} gaussians, {meta['mpp'] * 100:.1f} cm per "
@@ -2673,6 +2826,7 @@ class App:
                     difix.run(project, self.difix_views.views(), steps=int(self.g_difix_steps.value),
                               rounds=int(self.g_difix_rounds.value), shift_m=float(self.g_difix_shift.value),
                               difix_width=difix.WIDTHS[self.g_difix_width.value], on_line=self._on_log,
+                              cleaner=difix.CLEANERS[self.g_difix_cleaner.value],
                               job=self._token, on_progress=lambda ph, k, n: self._on_count_progress("difix", ph, k, n))
                     report = pipeline.Report(project)
                     self._splat_variant = None  # show the new result
@@ -2818,6 +2972,7 @@ class App:
         self._token = worker.FileToken(self.path)
         self.g_stop.disabled = False
         self._run_id = getattr(self, "_run_id", 0) + 1
+        self._eta_samples, self._eta_text = [], ""  # the end estimate starts over
         for b in self.g_buttons.values():
             b.disabled = True
         self._job = {"name": label, "t0": d["started"], "label": f"{label} (re-attached)", "stage_t0": d["started"],
@@ -2904,6 +3059,50 @@ class App:
             row = client.gui.add_button_group("", options=("Stop", "Keep running"))
         row.on_click(lambda ev: (m.close(), self.stop() if ev.target.value == "Stop" else None))
 
+    def replaced_results(self, stage):
+        """What running stage ("splat" or "all") would replace in the open project: [(what, detail)]."""
+        if not self.path:
+            return []
+        p, out = self.path, []
+
+        def mb(f):
+            return f"{os.path.getsize(f) / 1e6:,.0f} MB"
+        if stage == "all":
+            if os.path.exists(os.path.join(p, "sparse", "refined", "images.bin")):
+                out.append(("the refined SfM model", "sparse/refined"))
+            m = os.path.join(p, "sfmmesh", "mesh.ply")
+            if os.path.exists(m):
+                extra = [w for w, f in (("patched holes", "patched.npy"), ("photo colours", "mesh_coloured.ply"))
+                         if os.path.exists(os.path.join(p, "sfmmesh", f))]
+                out.append(("the SfM mesh" + (f" (with its {' and '.join(extra)})" if extra else ""),
+                            f"sfmmesh/mesh.ply, {mb(m)}"))
+        sp = os.path.join(p, "splat", "splat_enu.ply")
+        if os.path.exists(sp):
+            out.append(("the splat", f"splat/splat_enu.ply, {gdata.splat_count(sp):,} Gaussians"))
+        r = splat.resume_info(p)
+        if r:
+            out.append(("a paused training that Resume would continue",
+                        f"step {int(r.get('step') or 0):,}" + (f", tile {r['tile']}" if r.get("tiles") else "")))
+        return out
+
+    def _confirm_replace(self, stage, client):
+        """Run full pipeline / Train + export splat: ask first when it would replace results (the user asked: a
+        misclick replaces hours of work); without any, or without a browser (tests), run at once."""
+        found = self.replaced_results(stage)
+        if not found or client is None:
+            self.run_stage(stage)
+            return
+        label = "Run full pipeline" if stage == "all" else "Train + export splat"
+        listed = "\n".join(f"- {what} ({detail})" for what, detail in found)
+        with client.gui.add_modal(f"{label}: replace the results?") as m:
+            client.gui.add_markdown(
+                f"**{label}** starts over and replaces what this project has:\n\n{listed}\n\n"
+                "They are overwritten, not kept. "
+                + ("To continue a paused training instead, use **Resume training** in the Splat tab."
+                   if any(w.startswith("a paused") for w, _ in found) else ""))
+            row = client.gui.add_button_group("", options=("Replace and run", "Cancel"))
+        row.on_click(lambda ev: (m.close(), self.run_stage(stage) if ev.target.value == "Replace and run" else None))
+
     def stop(self):
         """Stop (after the confirmation): cancel the running job and / or an extraction (in a thread: killing a
         subprocess may wait a few seconds)."""
@@ -2933,13 +3132,14 @@ class App:
                  self.g_tiles_view.value),  # View: Tile boundaries
                 ("Orbit", True, self.orbit_on),
                 ("Center", True, False),
+                ("Tile", bool(self.path) and os.path.exists(os.path.join(self.path, splat_tiles.STATE)), False),
                 ("Fly", self.project is not None, self._flight is not None),
                 ("Map", True, getattr(self, "map_open", False)))
 
     def _sync_quickbar(self):
         """Rebuild the quick bar's row when a state changes (button groups cannot relabel in place):
         ● on, ○ off, · nothing to show yet."""
-        labels = tuple(f"⌖ {name}" if name == "Center" else
+        labels = tuple(f"⌖ {name}" if name in ("Center", "Tile") else
                        f"{'●' if on and avail else '○' if avail else '·'} {QUICK_SHORT.get(name, name)}"
                        for name, avail, on in self._quick_items())
         if labels == self._quick_labels:
@@ -2952,7 +3152,8 @@ class App:
                 "", options=labels, order=1.0,
                 hint="Splat, Mesh, Dense (fused points), Points (sparse), Cams (cameras), Thumbs (their "
                      "thumbnails, with the cameras on), Resid (red prior → refined segments), Traj (trajectories), "
-                     "Plan (the Ingest flight plan), Tiles (the splat tiles' boundaries); Orbit, Center (look at the whole scene), Fly (the camera "
+                     "Plan (the Ingest flight plan), Tiles (the splat tiles' boundaries); Orbit, Center (look at the whole scene), "
+                     "Tile (go to the tile a tiled splat run trains now, else a paused one, else the next), Fly (the camera "
                      "path), Map (the 2D map window). ● on, ○ off, · nothing yet. Same as the View tab.")
         long = {v: k for k, v in QUICK_SHORT.items()}
 
@@ -2997,6 +3198,8 @@ class App:
             self.toggle_fly(client)
         elif name == "Center":
             self.recenter(client)
+        elif name == "Tile":
+            self.focus_training_tile(client)
         elif name == "Map":
             self.map_open = not self.map_open
             if self.map_open:
@@ -3390,11 +3593,14 @@ class App:
                 if not info:  # a new run: an earlier run's snapshot must not stand in for it
                     self._live_splat = self._live_src = None
                     self.server.scene.remove_by_name("/dense/splat_live")
+                    self._end_live_lod()
                 self.server.scene.remove_by_name("/dense/splat")
                 self.lod.hide()
                 self._unchanged("splat", None)
                 self._splat_live_on = True
                 self.g_splat.disabled, self.g_splat.value = False, True  # View tab toggle drives the live layer
+                if info and self._adopt_live_lod():  # resumed: the paused run's level of detail until the next one
+                    self._draw_live_splat()
                 self.g_splat_status.content = (f"live preview: first snapshot at step "
                                                f"{int(self.g_splat_every.value):,}, then in the View tab")
             common = dict(on_line=on_line, on_progress=progress, job=self._token,
@@ -3433,27 +3639,170 @@ class App:
             if not keep_live:
                 self._splat_live_on = False
                 self.server.scene.remove_by_name("/dense/splat_live")
+                self._end_live_lod()
 
     def _on_splat_snapshot(self, step, npz, transforms):
-        """A new training checkpoint: redraw the live splat in the View tab."""
+        """A new training checkpoint: redraw the live splat in the View tab. Larger than the LoD budget (View → Level
+        of detail): its level of detail is built in a job process (`_live_lod_loop`) and shown when ready; the
+        previous snapshot's stays on screen meanwhile, the first snapshot shows a random subset of the budget."""
         self._live_src = (npz, transforms)
-        step, n, arrays = gdata.load_live_splat(npz, transforms, gdata.LIVE_SPLAT_SHOWN)
-        self._live_splat = arrays
-        self._draw_live_splat()
-        msg = f"live splat: step {step:,}, {n:,} gaussians" + (
-            f" ({len(arrays[0]):,} shown; View → All gaussians for all)" if len(arrays[0]) < n else "")
+        with np.load(npz) as d:
+            step, n = int(d["step"]), len(d["means"])
+        budget = int(self.g_lod_budget.value)
+        lod = bool(self.g_splat_lod.value) and n > budget
+        if lod and getattr(self, "_live_lod_idx", None) is None and self._adopt_live_lod():
+            self._draw_live_splat()  # the paused run's level of detail (GUI restarted): not a random subset
+        if lod and getattr(self, "_live_lod_idx", None) is not None:
+            msg = f"live splat: step {step:,}, {n:,} gaussians (level of detail of step " \
+                  f"{self._live_lod_idx.get('step', 0):,} shown, the new one is being built)"
+        else:
+            if not lod:
+                self._live_lod_idx = None
+            step, n, arrays = gdata.load_live_splat(npz, transforms,
+                                                    budget if lod else self._splat_limit(gdata.SPLAT_SHOWN))
+            with self._live_draw_lock():  # the level of detail may have become ready while this loaded (seconds)
+                if lod and getattr(self, "_live_lod_idx", None) is not None:
+                    arrays = None  # it is on screen: no subset over it
+                else:
+                    self._live_splat = arrays
+                    self._draw_live_splat()
+            if arrays is None:
+                msg = f"live splat: step {step:,}, {n:,} gaussians (level of detail)"
+            else:
+                msg = f"live splat: step {step:,}, {n:,} gaussians" + (
+                    (" (a random subset until its level of detail is built)" if lod else
+                     f" ({len(arrays[0]):,} shown; View → All gaussians for all)") if len(arrays[0]) < n else "")
+        if lod:
+            self._build_live_lod()
         self._dense_status("splat", msg)
         self.g_splat_status.content = msg + " · View tab → Dense / splat → Splat"
         self._live_msg = msg + " (View tab)"
         self._on_log(f"splat: live preview at step {step:,} ({n:,} gaussians)")
         print(f"splat: live preview at step {step:,} ({n:,} gaussians)", flush=True)
 
+    def _build_live_lod(self):
+        """Build the level of detail of the newest live snapshot (one build at a time; a snapshot arriving meanwhile
+        is built next)."""
+        lock = self.__dict__.setdefault("_live_lod_lock", threading.Lock())
+        with lock:
+            self._live_pending = True
+            if getattr(self, "_live_building", False):
+                return
+            self._live_building = True
+        threading.Thread(target=self._live_lod_loop, daemon=True).start()
+
+    def _live_lod_loop(self):
+        from modelforge import worker
+        from modelforge.gui import jobqueue
+        path, lock = self.path, self._live_lod_lock
+        try:
+            while True:
+                with lock:
+                    if not self._live_pending:
+                        self._live_building = False
+                        return
+                    self._live_pending = False
+                src = self._live_src
+                if src is None or not self._splat_live_on or self.path != path:
+                    continue
+                with np.load(src[0]) as d:
+                    n = len(d["means"])
+                need = 1.0 + 0.6 * n / 1e6
+                if jobqueue._available_gb() < need + jobqueue.MIN_FREE_GB:
+                    self._log_both(f"live level of detail: not built, needs ~{need:.0f} GB of free RAM (a random "
+                                   f"subset is shown)")
+                    continue
+                out = splat_lod.LIVE_DIRS[1] if getattr(self, "_live_lod_dir", None) == splat_lod.LIVE_DIRS[0] \
+                    else splat_lod.LIVE_DIRS[0]
+                t0 = time.time()
+                if os.environ.get("MODELFORGE_INPROCESS") == "1":
+                    splat_lod.build_live(path, src[0], src[1], out)
+                else:
+                    worker.run("modelforge.splat_lod:build_live", {"folder": path, "npz": src[0],
+                                                                   "transforms": src[1], "out": out},
+                               label="live level of detail")
+                if not self._splat_live_on or self.path != path:  # the run ended meanwhile
+                    shutil.rmtree(os.path.join(path, out), ignore_errors=True)
+                    continue
+                with open(os.path.join(path, out, "index.json")) as f:
+                    idx = json.load(f)
+                with self._live_draw_lock():
+                    self._live_lod_idx, self._live_lod_dir = idx, out
+                    self._draw_live_splat()
+                self._log_both(f"live level of detail: step {idx.get('step', 0):,}, {n:,} gaussians, "
+                               f"{time.time() - t0:.0f} s")
+        except Exception as e:  # noqa: BLE001 - the preview never stops training
+            self._log_both(f"live level of detail failed: {e}")
+            with lock:
+                self._live_building = False
+
+    def _adopt_live_lod(self):
+        """The newest live level of detail on disk (LIVE_DIRS, a paused run's: they go only when a run ends) as the
+        one shown, when none is in memory (the GUI restarted). True when there is one."""
+        if getattr(self, "_live_lod_idx", None) is not None:
+            return True
+        best = None
+        for d in splat_lod.LIVE_DIRS:
+            f = os.path.join(self.path, d, "index.json")
+            try:
+                if best is None or os.path.getmtime(f) > best[0]:
+                    best = (os.path.getmtime(f), d, json.load(open(f)))
+            except (OSError, ValueError):
+                pass
+        if best is None or best[2].get("version") != splat_lod.VERSION:
+            return False
+        with self._live_draw_lock():
+            self._live_lod_idx, self._live_lod_dir = best[2], best[1]
+        return True
+
+    def _live_draw_lock(self):
+        """Orders drawing the live layer: a snapshot's subset vs its level of detail becoming ready."""
+        return self.__dict__.setdefault("_live_draw_lock_", threading.RLock())
+
+    def _log_both(self, msg):
+        """The GUI's log and the server console (build/gui.log)."""
+        print(msg, flush=True)
+        self._on_log(msg)
+
+    def _end_live_lod(self):
+        """Training ended (or another run / project): the live level of detail goes, with its folders."""
+        self._live_lod_idx = None
+        if (self.lod.splat or "").startswith("lod:"):
+            self.lod.hide()
+            self.lod.splat = None
+            self._unchanged("splat", None)
+        path = self.path
+        threading.Thread(target=lambda: [shutil.rmtree(os.path.join(path, d), ignore_errors=True)
+                                         for d in splat_lod.LIVE_DIRS], daemon=True).start()
+
     def _draw_live_splat(self):
+        with self._live_draw_lock():
+            self._draw_live_splat_locked()
+
+    def _draw_live_splat_locked(self):
         a = getattr(self, "_live_splat", None)
-        if a is not None and self.g_splat.value:
+        idx = getattr(self, "_live_lod_idx", None)
+        live_lod = (self.lod.splat or "").startswith("lod:")
+        if not self.g_splat.value:
+            self.server.scene.remove_by_name("/dense/splat_live")
+            if live_lod:
+                self.lod.hide()
+        elif idx is not None and self.g_splat_lod.value:  # the level of detail of a snapshot: swapped in place
+            self.server.scene.remove_by_name("/dense/splat_live")
+            self._live_splat = None
+            self.lod.splat = "lod:" + self._live_lod_dir
+            self.lod.show(idx, swap=True)
+        elif a is not None:
+            if live_lod:
+                self.lod.hide()
             c, cov, rgb, op = a
             self.server.scene.add_gaussian_splats("/dense/splat_live", centers=c, covariances=cov, rgbs=rgb,
                                                   opacities=op)
+        elif getattr(self, "_live_src", None) is not None:  # Level of detail switched off: the snapshot again
+            if live_lod:
+                self.lod.hide()
+            threading.Thread(target=self._on_splat_snapshot, args=(None,) + tuple(self._live_src),
+                             daemon=True).start()
         else:
             self.server.scene.remove_by_name("/dense/splat_live")
 
@@ -3550,9 +3899,14 @@ class App:
                 j = self._job
                 now = time.time()
                 verb = "⏹ **stopping**" if self._token is not None and self._token.cancelled else "⏳ **running**"
+                pct = self.g_progress.value if self.g_progress.visible and self.g_progress.value > 0 else None
+                rem = _eta(self.__dict__.setdefault("_eta_samples", []), pct, now)
+                self._eta_text = _fmt_eta(rem, now) if rem is not None else ""
                 self.g_state.content = (
                     f"{verb} **{j['label']}** · stage {_fmt_s(now - j['stage_t0'])} · "
-                    f"total {_fmt_s(now - j['t0'])}" + (f"  \n{j['detail']}" if j["detail"] else "") +
+                    f"total {_fmt_s(now - j['t0'])}" +
+                    (f" · **{pct:.0f} %**" + (f" · ends {self._eta_text}" if rem is not None else "")
+                     if pct is not None else "") + (f"  \n{j['detail']}" if j["detail"] else "") +
                     (f"  \n_{self._mem_note}_" if getattr(self, "_mem_note", "") else ""))
             time.sleep(1.0)
 
@@ -3695,8 +4049,8 @@ class App:
                         f"the trajectory")
             if st == "difix":
                 r = rep["difix"]
-                return (f"towards {r['targets']} views, {r['rounds']} rounds, {r['steps']:,} steps, Difix at "
-                        f"{r['difix_width']}")
+                return (f"towards {r['targets']} views, {r['rounds']} rounds, {r['steps']:,} steps, "
+                        f"{r.get('cleaner', 'difix').capitalize()} at {r['difix_width']}")
             if st == "splatmesh":
                 r = rep["splat_mesh"]
                 return (f"{r['faces']:,} faces from {r['views']} views, voxel {100 * r['voxel_m']:.1f} cm "
@@ -3863,6 +4217,9 @@ class App:
         self.g_splat.disabled = self.dense["splat"] is None
         self.g_mesh.options = ("off",) + meshes
         self.g_mesh.disabled = not meshes
+        if getattr(self, "_pick_default_layer", False):
+            self._pick_default_layer = False
+            self._default_layer(meshes)
         have = [k for k, v in (("dense points", self.dense["fused"]), ("splat", self.dense["splat"])) if v] + \
             [f"mesh ({m})" for m in meshes]
         self._dense_status("available", "available: " + (", ".join(have) if have else
@@ -3876,6 +4233,7 @@ class App:
         self._sync_resume()
         self.semantic.refresh()
         self.rig.refresh()
+        self.replace.refresh()
         self._sync_tile_choice()
         self._refresh_prior_mesh()
         self._draw_tiles()
@@ -4142,12 +4500,21 @@ class App:
         """How many Gaussians to send to the browser: None = all (View: All gaussians)."""
         return None if self.g_splat_all.value else default
 
+    def sh_degree(self):
+        """SH bands above 0 to send for the finished splat (View -> Splat colours)."""
+        return gdata.SPLAT_COLOURS.get(self.g_splat_colours.value, 0)
+
+    def _splat_colours_changed(self):
+        self._save_setting("splat_colours", self.g_splat_colours.value)
+        if self.lod.idx is not None:  # every drawn cell again, with or without the bands
+            self.lod.redecorate()
+        self._draw_splat()
+
     def _splat_all_changed(self):
         self._draw_splat()  # the live preview is a subset either way
 
     def _draw_splat(self):
         if getattr(self, "_splat_live_on", False):  # training: the checkbox shows / hides the live layer
-            self.lod.hide()
             self._draw_live_splat()
             return
         variant = self._splat_variant
@@ -4155,7 +4522,7 @@ class App:
         if variant and not os.path.exists(src):
             variant, src = None, self.dense["splat"]
         key = ((self._file_key(src), self.g_splat_all.value, self.g_splat_lod.value,
-                int(self.g_lod_budget.value)) if self.g_splat.value and src else None)
+                int(self.g_lod_budget.value), self.sh_degree()) if self.g_splat.value and src else None)
         if self._unchanged("splat", key):
             return
         self.lod.splat = variant
@@ -4171,7 +4538,7 @@ class App:
             return
         self.lod.hide()
         if key is not None:
-            c, cov, rgb, op = gdata.load_splat(src, self._splat_limit(gdata.SPLAT_SHOWN))
+            c, cov, rgb, op = gdata.load_splat(src, self._splat_limit(gdata.SPLAT_SHOWN), sh_degree=self.sh_degree())
             total = gdata.splat_count(src)
             self._splat_shown = (c, cov, rgb, op, gdata.splat_subset(total, self._splat_limit(gdata.SPLAT_SHOWN)))
             self.redraw_splat_decorated()
@@ -4188,7 +4555,9 @@ class App:
         if lod.idx is None:
             return
         levels = np.bincount(list(lod.drawn.values()), minlength=len(lod.idx["levels"]))
-        self._dense_status("splat", ("before Difix: " if lod.splat else "") +
+        live = (lod.splat or "").startswith("lod:")
+        self._dense_status("splat", (f"live, step {lod.idx.get('step', 0):,}: " if live else
+                                     "before Difix: " if lod.splat else "") +
                            f"splat: {lod.idx['gaussians']:,} gaussians, level of detail: {lod.total():,} "
                                     f"shown, cells per level (fine → coarse) {' / '.join(map(str, levels))}")
 
@@ -4209,7 +4578,7 @@ class App:
         if shown is None or not self.g_splat.value or getattr(self, "_splat_live_on", False):
             return
         c, cov, rgb, op = shown[:4] if self._splat_variant else self.decorate(*shown)  # scores: the project's
-        self.server.scene.add_gaussian_splats("/dense/splat", centers=c, covariances=cov, rgbs=rgb, opacities=op)
+        gdata.add_splats(self.server.scene, "/dense/splat", c, cov, rgb, op)
 
     def serve_forever(self):
         while True:
@@ -4244,6 +4613,7 @@ def main():
                          "the GUI (e.g. sfmmesh,sfmmesh-fill,splat,sfmmesh-colour)")
     args = ap.parse_args()
     root = os.path.abspath(args.root)
+    use_timezone(root)
     if args.project:
         path = os.path.abspath(args.project)
     else:

@@ -27,6 +27,15 @@ CODE = next((p for p in (os.environ.get("MODELFORGE_DIFIX_REPO"), "/opt/difix3d"
                          os.path.join(_REPO, "build", "difix", "Difix3D"))
              if p and os.path.exists(os.path.join(p, "src", "pipeline_difix.py"))), None)
 MODEL = "nvidia/difix_ref"
+# NVIDIA Fixer (2026-10-31; nvidia/Fixer, Cosmos-Predict2 0.6B, one step, no reference photo; NVIDIA Open Model
+# License, commercial use allowed): its code (github.com/nv-tlabs/Fixer, cosmos-predict2 1.0.9), packages, weights
+# (5.2 GB in models/) and build/fixer/run_fixer.py, set up by hand in build/fixer (stand-ins in stubs/ for Transformer
+# Engine, Megatron and qwen_vl_utils, which only its multi-GPU / prompt-refiner paths need)
+FIXER = next((p for p in (os.environ.get("MODELFORGE_FIXER"), "/opt/fixer", os.path.join(_REPO, "build", "fixer"))
+              if p and os.path.exists(os.path.join(p, "run_fixer.py"))
+              and os.path.exists(os.path.join(p, "models", "pretrained", "pretrained_fixer.pkl"))), None)
+FIXER_PATH = ("stubs", "pkgs", os.path.join("dl", "x"), os.path.join("Fixer", "src"))
+CLEANERS = {"Difix": "difix", "Fixer": "fixer"}
 VIEWS_FILE = "difix_views.json"
 BACKUP = os.path.join("splat", "splat_enu.pre_difix.ply")  # the baseline: the splat before the first Difix run
 STATE = os.path.join("splat", "difix_state.json")  # the splat the last Difix run wrote (size + mtime)
@@ -36,12 +45,16 @@ WIDTHS = {"training size": 0, "1024 px": 1024}  # Difix's input width (it runs a
 _LINE = re.compile(r"\[difix\] (?:round (\d+) / (\d+): view (\d+) / (\d+)|step (\d+) / (\d+))")
 
 
-def available(project=None):
-    """None if a Difix refinement can run here (and on project, when given), else the reason."""
+def available(project=None, cleaner=None):
+    """None if a Difix refinement can run here (and on project, when given) with `cleaner` ("difix" / "fixer"; None:
+    either), else the reason."""
     why = splat.available()
     if why:
         return why
-    if PKGS is None or CODE is None:
+    if cleaner == "fixer" and FIXER is None:
+        return "Fixer is not set up (build/fixer: run_fixer.py, its packages and models/)"
+    if cleaner == "difix" and (PKGS is None or CODE is None) or cleaner is None and FIXER is None and (
+            PKGS is None or CODE is None):
         return ("the Difix packages or its code are missing (/opt/difix-pkgs + /opt/difix3d, or build/difix_pkgs + "
                 "build/difix/Difix3D: docs/todo_splat_quality.md)")
     if project is not None and not os.path.exists(splat_mesh.splat_path(project)):
@@ -163,11 +176,12 @@ def shape_terms(project):
 
 
 def run(project, views, steps=STEPS, rounds=ROUNDS, shift_m=SHIFT_M, difix_width=0, on_line=print, job=None,
-        on_progress=None):
-    """Refine PROJECT's splat towards `views` (gui/views.py records). on_progress(phase, done, total): "difix" views
-    cleaned in a round, "train" fine-tune steps. Returns the stats (also report.json["difix"])."""
+        on_progress=None, cleaner="difix"):
+    """Refine PROJECT's splat towards `views` (gui/views.py records), the renders cleaned by `cleaner` ("difix" or
+    "fixer"). on_progress(phase, done, total): "difix" views cleaned in a round, "train" fine-tune steps. Returns the
+    stats (also report.json["difix"])."""
     from modelforge.pipeline import Report
-    why = available(project)
+    why = available(project, cleaner)
     if why:
         raise RuntimeError(why)
     if not views:
@@ -187,12 +201,12 @@ def run(project, views, steps=STEPS, rounds=ROUNDS, shift_m=SHIFT_M, difix_width
     from modelforge import sky
     sky_dir = sky.folder(project, ds)
     spec = {"splat_npz": npz_in, "out_npz": npz_out, "repo": CODE, "model": MODEL,
-            "transforms": os.path.join(project, "transforms.json"), "downscale": ds,
+            "transforms": os.path.join(project, "transforms.json"), "root": project, "downscale": ds,
             "images_dirs": [os.path.join(project, f"images_{ds}"), os.path.join(project, "images")],
             "sky_dir": sky_dir if os.path.isdir(sky_dir) else None, "steps": int(steps), "rounds": int(rounds),
             "shift_m": float(shift_m), "rot_m": 10.0, "novel_prob": 0.3, "novel_weight": 0.3,
             "difix_width": int(difix_width), "targets": [c2w(v).tolist() for v in views], "workdir": work,
-            "cache_gb": 4.0, **shape_terms(project)}
+            "cache_gb": 4.0, "cleaner": cleaner, "fixer_dir": FIXER, **shape_terms(project)}
     spec_path = os.path.join(work, "spec.json")
     json.dump(spec, open(spec_path, "w"), indent=1)
 
@@ -206,7 +220,8 @@ def run(project, views, steps=STEPS, rounds=ROUNDS, shift_m=SHIFT_M, difix_width
         if not m or (m.group(5) and int(m.group(5)) % 500 == 0):
             on_line(text)
     env = splat._env()
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (PKGS, env.get("PYTHONPATH")) if p)
+    first = [os.path.join(FIXER, d) for d in FIXER_PATH] if cleaner == "fixer" else [PKGS]
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (*first, env.get("PYTHONPATH")) if p)
     env["HF_HOME"] = os.path.join(semantic.MODEL_CACHE, "hf_cache")
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export", "difix_refine.py")
@@ -219,7 +234,8 @@ def run(project, views, steps=STEPS, rounds=ROUNDS, shift_m=SHIFT_M, difix_width
     for f in (npz_in, npz_out):
         os.remove(f)
     st = json.load(open(os.path.join(work, "stats.json")))
-    stats = {**st, "views": [v["name"] for v in views], "difix_width": int(difix_width) or "training size",
+    stats = {**st, "views": [v["name"] for v in views], "cleaner": cleaner,
+             "difix_width": int(difix_width) or ("1024 px" if cleaner == "fixer" else "training size"),
              "shift_m": float(shift_m), "seconds": round(time.time() - t0, 1),
              "time": time.strftime("%Y-%m-%d %H:%M"), "previews": os.path.relpath(work, project)}
     Report(project).set("difix", stats)

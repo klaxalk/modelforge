@@ -194,9 +194,9 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    common training resolution). **SfM done 2026-10-24** (a camera per model + resolution + zoom, features and
    intrinsics per camera, boresight per camera; two-camera test f ratio 0.6667 of 2/3); export + readers per frame done
    too (`export/frame_camera.py`); GUI (colour by camera, stats, Inspect) done; **done 2026-10-25:** one common training resolution (the largest camera at 1 / N, the others at that long side: `splat.training_data` → `transforms_x<N>.json`), semantic features and held-out evaluation per camera, frustums per camera; open: a real mixed-drone or zooming clip. Plan and decisions: `docs/todo_multicamera.md`.
-6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget", 500k since 2026-10-30 (2M before): the user's browser
+6. **Level of detail for large splats: done 2026-10-24** (the user asked; View "Level of detail" + "LoD budget", 500k since 2026-10-31 (2M until 2026-10-30, then briefly 250k): the user's browser
    runs on another computer and kn_odin's whole 1.4M-Gaussian splat (45.6 MB at 32 bytes each) took long to arrive; at
-   500k a room's camera views render as the full splat; the live preview always sends <= 300k):
+   500k a room's camera views render as the full splat; the live preview goes through the level of detail too: built per snapshot, see Live preview):
    k-d cells of <= 100k Gaussians, levels of 1/4 merged per voxel by moment matching (`modelforge/splat_lod.py`,
    `splat/lod/`, built in the background when first shown: kladno_dira 5.77M in 48 s), a cut per camera (2 px per
    voxel, budget) swapped ~0.4 s after the camera stops (`gui/lod.py`); merged levels beat the random subset by
@@ -282,6 +282,13 @@ Open items by priority (high / medium / low; the user sets them; the TODO docs f
    per flight / pass its flat ground cells (the prototype `build/zalign.py`) against the DTM's height there -> height
    equations in the pose graph next to `Chunked.flight_z` (one constant for the datum). Caveats: ground that changed
    since the survey (quarries: only cells that agree), the national vertical datum vs the ellipsoid (a constant).
+18. **Content-aware repair of the splat: first version 2026-10-31** (the user asked: Photoshop's content-aware fill for
+   splats, for large outdoor drone splats; left panel → **Replace**, `modelforge/replace.py`, `modelforge/patchfill.py`,
+   `export/replace_rate.py`, `gui/replace.py`): objects (vegetation by the semantic features, one per crown, ground
+   from the SfM points) rated by render vs photo; edits = remove + PatchMatch ground fill (+ a donor of the same kind),
+   applied onto `splat/splat_enu.pre_replace.ply`, undo per edit; texture repair of weak ground areas from a detail
+   map (weak areas outlined and listed, or a circle picked by Ctrl + click). Fixer / Difix were tried first and rejected (kn_odin). On berlin remove + fill works,
+   donors within berlin are no sharper (open: a donor library across projects): `docs/todo_replace.md`.
 
 The user's working preferences, as seen so far:
 - They want results committed and pushed when asked ("commit and push").
@@ -1398,7 +1405,7 @@ training should pause and resume):
   finished splat replaces it at the end.
 - **All gaussians** (View → Dense / splat, **on by default** since 2026-10-19; the user asked):
   unticked, the browser gets a random subset, ≤500k Gaussians live and ≤1M for
-  the finished splat (`gdata.LIVE_SPLAT_SHOWN` / `SPLAT_SHOWN`). Ticked, it sends
+  the finished splat (`SPLAT_SHOWN`; the live preview: below). Ticked, it sends
   all of them; the last live snapshot is reloaded at once. The status lines
   say "N gaussians (k shown …)" when a subset is drawn.
 - `ns-train` gets `--method-name <method>`. splatfacto-big (and -mcmc) keep
@@ -1422,6 +1429,14 @@ training should pause and resume):
 - Measured on berlin_test: snapshots at steps 500/1000/1500 (47k → 146k →
   225k Gaussians), each redraw ≤0.3 s. A real 1.07M-Gaussian checkpoint
   dumps and converts in 0.6 s.
+- **Through the level of detail** (2026-10-30, the user asked; before: a random 300k subset, then briefly a setting):
+  a snapshot larger than View → LoD budget gets its own level of detail, built in a job process
+  (`splat_lod.build_live`, `App._live_lod_loop`) into `splat/lod_live_a` / `_b` in turn, and swapped in place
+  (`SplatLod.show(swap=True)`: the cells' objects get new buffers, no gap); the previous snapshot's stays on screen
+  while the next builds (a snapshot arriving meanwhile is built next, older ones skipped), the first snapshot shows a
+  budget-sized random subset until its own is ready. Both folders are deleted when the run ends (`_end_live_lod`).
+  Skipped (subset) when the free RAM is below ~1 GB + 0.6 GB per million Gaussians. Level of detail off: All
+  gaussians / the 1M subset as for the finished splat.
 - Each checkpoint is ~0.75 GB per million Gaussians (it includes optimizer
   state), so very small intervals slow training.
 
@@ -2353,21 +2368,23 @@ Code layout:
     - The choice is remembered in `ROOT/.modelforge_gui.json`.
   - **Quick bar** (the user asked): a small panel floated at the top of the
     3D view (`self.quick`).
-    - One button group in **two rows of 7** (the user found one row of 13, ~1250 px, too wide):
+    - One button group in **two rows** (8 + 7 since ⌖ Tile) (the user found one row of 13, ~1250 px, too wide):
       ● / ○ / · Splat, Mesh, Dense (fused points), Points (sparse), Cams, Thumbs (camera
       thumbnails; available while Cams is on) / Resid (View "Prior → refined": the red prior →
       refined segments), Traj (View "Trajectories"), Plan, Tiles (View "Tile boundaries"), Orbit, ⌖ Center,
-      Fly. Short labels (`QUICK_SHORT`): viser gives every button the longest label's width (~72 px) and
+      Fly, ⌖ Tile (2026-10-30, the user asked: glides to the tile a tiled splat run trains now, else a paused one, else the one
+      Resume trains next, framed from its cropped sparse points; `App.training_tile`, a notice says which). Short labels (`QUICK_SHORT`): viser gives every button the longest label's width (~72 px) and
       wraps; the panel is sized for ⌈n / 2⌉ per row (13 buttons: 7 + 6, ~528 px).
     - **⌖ Center** (also View tab "Center the view"; `App.recenter`): looks at the cameras + sparse
       points (2–98 % range, so stray far points don't count) from the south, above them. The same
       framing runs when a browser connects and on a project switch. The user lost the scene of a
       video-kind project (arbitrary frame and scale) and asked for it.
-    - **Default view** (the user asked, 2026-10-21): on start and on opening a project only **Points** and
-      **Trajectories** are on (`_default_view`); splat, mesh, dense points, cameras, thumbnails, prior cameras,
-      Prior → refined and tile boundaries are off (a large splat is no longer sent at start). The flight plan is
-      on only for a project without images (nothing else to see). After an SfM run a project with nothing else
-      to show still gets Cameras (≤ 2000) on (`_auto_show_sparse`); after a splat run the splat is shown.
+    - **Default view** (the user asked, 2026-10-21; since 2026-10-30, with the level of detail in place): on start and
+      on opening a project **one layer**: the splat if there is one, else a mesh (LiDAR, SfM, splat, COLMAP's, the
+      first found), else the dense points, else the sparse points (`App._default_layer`, chosen in `_refresh_dense`
+      once the files are known); **no trajectories**; cameras, thumbnails, prior cameras, Prior → refined and tile
+      boundaries off. The flight plan is on only for a project without images. After an SfM run a project with nothing
+      else to show still gets Points and Cameras (≤ 2000) on (`_auto_show_sparse`); after a splat run the splat is shown.
     - **Plan** is the Ingest flight plan (each source's track plus dots at the
       planned image positions). The user asked to hide it from the 3D view:
       its checkbox existed only in the Ingest tab. The quick bar, View
@@ -2396,6 +2413,11 @@ Code layout:
     pipeline" (off by default). A project without images is extracted first from
     its Ingest plan (`IngestPanel.extract_now`). Splat / dense are skipped, with a
     History note, without nerfstudio / CUDA.
+  - **Run full pipeline and Train + export splat ask first** (2026-10-30, the user asked: they replace earlier
+    results): when the project has any, a box lists them (`App.replaced_results`: the refined SfM model and the SfM
+    mesh with its patched holes / colours for the full pipeline; the splat with its Gaussian count and a paused training
+    Resume would continue, for both) with Replace and run / Cancel (`_confirm_replace`); nothing to replace or no
+    browser (tests, the queue, `--run`): it runs at once.
   - **Stop asks first** (2026-10-22, the user asked: a misclick cost a long run): a "Stop?" box naming the job, Stop /
     Keep running (`App._stop_clicked`; without a browser client, e.g. tests, it stops at once).
   - **Stop** (`App.stop`, `modelforge/jobs.py`) stops whatever runs: a
@@ -2436,6 +2458,23 @@ Code layout:
       options), so these refreshes don't re-send unchanged layers (the
       splat is tens of MB).
     - Each layer has its own status line (`_dense_status`).
+    - **Splat colours** (View → Dense / splat; 2026-10-30, the user asked): viser 1.1.1 draws one RGB per Gaussian
+      (SH band 0), so view-dependent colour was lost (kn_odin's 50k splat, 117 held-out photos, brightness-matched:
+      full SH 24.6 dB / LPIPS 0.344, band 0 23.3 / 0.381). "base colour" (default), "view-dependent, 1 band" (+12
+      bytes per Gaussian) or "view-dependent, full" (+48 bytes, ~2.5x the data); remembered in `.modelforge_gui.json`.
+      `gdata.pack_splats` appends the bands to viser's 8-word buffer (a tag in the first Gaussian's reserved word,
+      then per Gaussian a float16 scale + int8 coefficients), `gdata.add_splats` sends it; the page
+      (`docker/patch_viser_camera.py`, SH) merges them into a second texture and the vertex shader adds the bands for
+      the camera → Gaussian direction. Checked: the sum equals gsplat's to 1e-4 (`tests/test_splat_sh.py`), the
+      merge in node, the patched shader in Firefox's WebGL2 under Xvfb (`build/sh_webgl_test.py`, `build/ff_shot.sh`:
+      within 1-2 / 255; a demo server `build/sh_viser_demo.py` flips orange / blue between sides). The level of detail
+      stores the bands per level (`L<k>_sh.npy`, merged like the colour; index VERSION 2, so old ones rebuild). The
+      live preview and the rig stay base colour; the search's tint fades the bands with it.
+      The first shader unpacked the bytes into dynamically indexed local arrays: fine in software WebGL, nothing drawn
+      on the user's GPU (Firefox 155, Linux, AMD Radeon; base colour fine, no error anywhere); with constant indices
+      only and no loops it works there (confirmed by the user). **Page diagnostics** (`DIAG_JS`, `App._page_diag`):
+      every browser reports its GPU and limits, the SH texture's shape, GL errors (polled each second), lost contexts
+      and three.js errors / warnings into the GUI log and build/gui.log ("browser N: ...").
   - **Orbit** (View tab, the user asked): **Start / Stop orbit** + speed
     (°/s). **Since 2026-10-22 the browsers turn the view themselves** (the user could not zoom while orbiting: the
     server's 30 Hz poses overwrote each wheel step, a ~50 ms animation in the browser, before it was reported):
@@ -2529,6 +2568,11 @@ Code layout:
     - BA mode / chunk size / overlap / polish sweeps (see "Large projects: chunked refinement").
     - A **History** of finished stages with key numbers, and a **Log** of
       the last 40 `pipeline.log` lines (`pipeline.LISTENERS`).
+    - **End estimate** (2026-10-30, the user asked): the state line shows the progress bar's percentage and "ends
+      ≈ 22:46 (in 1 h 12 min)", the browser tab "… 42 % · ≈ 22:46" (`_eta`: the rate over the last 10 min of progress,
+      `ETA_WINDOW`; it starts over when the progress goes back, i.e. the next stage or tile, so it estimates the bar
+      in view, not the whole job). Clock times use ROOT/.modelforge_gui.json "timezone" (Europe/Prague here; the
+      container runs on UTC, so log and history times were an hour behind before), else $TZ (`use_timezone`).
     - The ticker and the final message share `App.lock` plus a run id, so
       a finished job never shows "running".
     - Every widget has a hover `hint`.

@@ -159,3 +159,87 @@ def test_view_draws_cells(tmp_path, monkeypatch):
     finally:
         app.lod.stop()
         app.server.stop()
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(REAL, "sparse", "refined", "images.bin")),
+                    reason="needs a refined project (data/berlin_3_1_frames or MODELFORGE_TEST_PROJECT)")
+def test_live_preview_through_the_lod(tmp_path, monkeypatch):
+    """Training snapshots larger than the budget: the first shows a random subset of the budget, then its level of
+    detail; the next snapshot's is built in the other folder and swapped in place (the same cell objects); the end of
+    the run removes both."""
+    import plyfile
+    from modelforge import splat_tiles
+    from modelforge.gui.app import App
+    from tests.test_gui_dense import free_port
+    p = str(tmp_path / "proj")
+    os.makedirs(p)
+    for name in ("poses.json", "images", "sparse"):
+        os.symlink(os.path.abspath(os.path.join(REAL, name)), os.path.join(p, name))
+    shutil.copyfile(os.path.join(REAL, "report.json"), os.path.join(p, "report.json"))
+    scene(p)
+    v = plyfile.PlyData.read(os.path.join(p, "splat", "splat_enu.ply"))["vertex"].data
+    os.remove(os.path.join(p, "splat", "splat_enu.ply"))  # training: no finished splat yet
+    monkeypatch.setenv("MODELFORGE_INPROCESS", "1")
+    app = App(p, port=free_port())
+    try:
+        app.g_lod_budget.value = 30_000
+        app._splat_live_on = True
+        app.g_splat.disabled, app.g_splat.value = False, True
+        npz, ident = splat_tiles._write_live(p, [v], 500)
+        app._on_splat_snapshot(500, npz, ident)
+        assert app._live_splat is not None and len(app._live_splat[0]) == 30_000  # the subset meanwhile
+        t0 = time.time()
+        while getattr(app, "_live_lod_idx", None) is None and time.time() - t0 < 120:
+            time.sleep(0.2)
+        idx = app._live_lod_idx
+        assert idx is not None and idx["step"] == 500 and idx["gaussians"] == len(v)
+        assert app.lod.splat == "lod:" + splat_lod.LIVE_DIRS[0] and app.lod.idx is idx and app._live_splat is None
+        t0 = time.time()
+        while len(app.lod.drawn) < len(idx["cells"]) and time.time() - t0 < 10:
+            time.sleep(0.1)
+        assert 0 < app.lod.total() <= 30_000 and "live, step 500" in app.g_dense_md.content
+        handles = dict(app.lod.handles)
+        npz, ident = splat_tiles._write_live(p, [v[::2]], 1000)
+        app._on_splat_snapshot(1000, npz, ident)
+        assert app.lod.idx is idx  # the old one stays until the new one is built
+        t0 = time.time()
+        while (app._live_lod_idx or {}).get("step") != 1000 and time.time() - t0 < 120:
+            time.sleep(0.2)
+        assert app._live_lod_idx["gaussians"] == len(v[::2]) and app.lod.splat == "lod:" + splat_lod.LIVE_DIRS[1]
+        assert all(app.lod.handles[k] is h for k, h in handles.items() if k in app.lod.handles)
+        # the race the user hit: a snapshot's subset loading (seconds) while the level of detail becomes ready
+        ready, real = app._live_lod_idx, gdata.load_live_splat
+
+        def slow(*args, **kw):
+            out = real(*args, **kw)
+            app._live_lod_idx = ready  # ready meanwhile
+            return out
+        monkeypatch.setattr(gdata, "load_live_splat", slow)
+        monkeypatch.setattr(app, "_adopt_live_lod", lambda: False)  # nothing on disk: the subset path
+        app._live_lod_idx = None
+        app._on_splat_snapshot(1500, npz, ident)
+        assert app._live_splat is None and app.lod.idx is ready  # no subset drawn over it
+        monkeypatch.setattr(gdata, "load_live_splat", real)
+        monkeypatch.delattr(app, "_adopt_live_lod")
+        t0 = time.time()
+        while getattr(app, "_live_building", False) and time.time() - t0 < 120:
+            time.sleep(0.2)
+        # the GUI restarted while paused: nothing in memory, the paused run's level of detail on disk is shown at once
+        newest = app._live_lod_idx
+        app._live_lod_idx, app._live_splat = None, None
+        app.lod.hide()
+        app._on_splat_snapshot(2000, npz, ident)
+        assert app._live_splat is None and app.lod.idx is not None and app.lod.idx["step"] == newest["step"]
+        t0 = time.time()
+        while getattr(app, "_live_building", False) and time.time() - t0 < 120:
+            time.sleep(0.2)
+        app._splat_live_on = False
+        app._end_live_lod()
+        t0 = time.time()
+        while any(os.path.exists(os.path.join(p, d)) for d in splat_lod.LIVE_DIRS) and time.time() - t0 < 10:
+            time.sleep(0.1)
+        assert app.lod.idx is None and app.lod.splat is None
+        assert not any(os.path.exists(os.path.join(p, d)) for d in splat_lod.LIVE_DIRS)
+    finally:
+        app.lod.stop()
+        app.server.stop()
